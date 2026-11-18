@@ -1,0 +1,182 @@
+﻿{
+  "generatedAt": "2026-07-08",
+  "metadata": [
+    {
+      "module": "accounts",
+      "lastVerified": "2026-01-23",
+      "releaseGateOpenItems": [
+        "ACCOUNTS-STAGING-001: W9 staging smoke must exercise account create/update/archive/restore and private-account access denial behavior",
+        "ACCOUNTS-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "ai-assistant",
+      "lastVerified": "2026-07-06",
+      "releaseGateOpenItems": [
+        "AI-STAGING-001: live Gemini provider path requires W9 staging smoke if AI is enabled",
+        "AI-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "auth",
+      "lastVerified": "2026-07-07",
+      "releaseGateOpenItems": [
+        "AUTH-STAGING-001: W9 staging smoke must exercise register/login/logout, MFA challenge/verify/resend, step-up denial/approval, session revoke, and email verification behavior",
+        "AUTH-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "budgets",
+      "lastVerified": "2026-01-23",
+      "releaseGateOpenItems": [
+        "BUDGETS-STAGING-001: W9 staging smoke must exercise budget create/update, spend calculation, and monthly period behavior",
+        "BUDGETS-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "cashflow",
+      "lastVerified": "2026-01-23",
+      "releaseGateOpenItems": [
+        "CASHFLOW-STAGING-001: W9 staging smoke must exercise cashflow report load, export, and missing-FX error behavior where practical",
+        "CASHFLOW-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "categories",
+      "lastVerified": "2026-07-07",
+      "releaseGateOpenItems": [
+        "CATEGORIES-STAGING-001: W9 staging smoke must exercise category create/update/archive/restore, category-group mutation, seed, and reorder behavior",
+        "CATEGORIES-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "dashboard",
+      "lastVerified": "2026-07-07",
+      "releaseGateOpenItems": [
+        "DASHBOARD-STAGING-001: W9 staging smoke must exercise dashboard loading, widget retry states where practical, widget visibility persistence, and dashboard preference save/load behavior",
+        "DASHBOARD-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "filter-presets",
+      "lastVerified": "2026-07-07",
+      "releaseGateOpenItems": [
+        "FILTER-PRESETS-STAGING-001: W9 staging smoke must exercise list/get/default/create/update/delete, duplicate-name conflicts, default-preset behavior, and audit-row creation",
+        "FILTER-PRESETS-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "goals",
+      "lastVerified": "2026-07-07",
+      "releaseGateOpenItems": [
+        "GOALS-STAGING-001: W9 staging smoke must exercise goal create/update/delete, contribution, assignment, image upload, and cross-household denial behavior",
+        "GOALS-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "health",
+      "lastVerified": "2026-07-07",
+      "releaseGateOpenItems": [
+        "HEALTH-STAGING-001: W9 staging smoke must exercise /health/live, /health/ready, and /health/startup on the deployed service",
+        "HEALTH-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "household",
+      "lastVerified": "2026-07-07",
+      "releaseGateOpenItems": [
+        "HOUSEHOLD-STAGING-001: W9 staging smoke must exercise household settings, member visibility, invitation status, and role-gated denial behavior",
+        "HOUSEHOLD-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "investments",
+      "lastVerified": "2026-01-23",
+      "releaseGateOpenItems": [
+        "INVESTMENTS-STAGING-001: W9 staging smoke must exercise GRZ bond/T-bill record-only creation and coupon or maturity income posting",
+        "INVESTMENTS-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "merchants",
+      "lastVerified": "2026-07-07",
+      "releaseGateOpenItems": [
+        "MERCHANTS-STAGING-001: W9 staging smoke must exercise merchant CRUD, duplicate detection, merge/undo merge, seed, autocomplete, and merchant detail currency formatting",
+        "MERCHANTS-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "notifications",
+      "lastVerified": "2026-07-07",
+      "releaseGateOpenItems": [
+        "NOTIFICATIONS-STAGING-001: W9 staging smoke must exercise notification read/archive behavior, notification preference update behavior, and push subscription save/remove behavior if browser push is enabled",
+        "NOTIFICATIONS-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "receipts",
+      "lastVerified": "2026-01-20",
+      "releaseGateOpenItems": [
+        "RECEIPTS-STAGING-001: W9 staging smoke must exercise receipt upload, authenticated read, and OCR/match/create-transaction behavior where enabled",
+        "RECEIPTS-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "recurring",
+      "lastVerified": "2026-01-23",
+      "releaseGateOpenItems": [
+        "RECURRING-STAGING-001: W9 staging smoke must exercise recurring schedule creation/update, due-item processing, and failure atomicity where practical",
+        "RECURRING-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "reports",
+      "lastVerified": "2026-07-07",
+      "releaseGateOpenItems": [
+        "REPORTS-STAGING-001: W9 staging smoke must exercise scoped reports, export audit logging, cache behavior through the live app, and missing-FX error behavior where practical",
+        "REPORTS-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "rules",
+      "lastVerified": "2026-07-07",
+      "releaseGateOpenItems": [
+        "RULES-STAGING-001: W9 staging smoke must exercise rule CRUD, preview, ordering, apply-to-past, and private-transaction exclusion behavior",
+        "RULES-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "settings",
+      "lastVerified": "2026-07-07",
+      "releaseGateOpenItems": [
+        "SETTINGS-STAGING-001: W9 staging smoke must exercise profile, display, notification, household preferences, report widget preferences, profile banner, security step-up, session revoke, password change, and account-erasure guard behavior",
+        "SETTINGS-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "tags",
+      "lastVerified": "2026-07-07",
+      "releaseGateOpenItems": [
+        "TAGS-STAGING-001: W9 staging smoke must exercise tag visibility and transaction-tag mutation behavior",
+        "TAGS-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "transactions",
+      "lastVerified": "2026-01-27",
+      "releaseGateOpenItems": [
+        "TRANSACTIONS-STAGING-001: W9 staging smoke must exercise normal transaction CRUD, transfer create/delete, CSV import success, and malformed import behavior",
+        "TRANSACTIONS-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    },
+    {
+      "module": "weekly-recap",
+      "lastVerified": "2026-07-07",
+      "releaseGateOpenItems": [
+        "WEEKLY-RECAP-STAGING-001: W9 staging smoke must exercise weekly recap load, feedback submission, settings persistence, consent-gated email behavior where practical, and generated recap behavior",
+        "WEEKLY-RECAP-ASSESS-001: W10 authoritative reassessment required after staging"
+      ]
+    }
+  ],
+  "securityReleaseGate": []
+}

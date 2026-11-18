@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "templatePath": "docs/reviews/production-readiness-w9-smoke-evidence-template-2026-07-07.md",
+  "metadataPath": "docs/reviews/module-assessments-metadata.json",
+  "description": "Maps W9 staging release-gate metadata items to concrete rows in the W9 smoke evidence worksheet.",
+  "mappings": [
+    {
+      "releaseGateId": "AI-STAGING-001",
+      "templateRowIds": ["AI-001", "AI-002"]
+    },
+    {
+      "releaseGateId": "ACCOUNTS-STAGING-001",
+      "templateRowIds": ["ACCOUNTS-001", "ACCOUNTS-002"]
+    },
+    {
+      "releaseGateId": "AUTH-STAGING-001",
+      "templateRowIds": ["AUTH-001", "AUTH-002", "AUTH-003", "AUTH-004", "AUTH-005"]
+    },
+    {
+      "releaseGateId": "BUDGETS-STAGING-001",
+      "templateRowIds": ["BUDGETS-001"]
+    },
+    {
+      "releaseGateId": "CASHFLOW-STAGING-001",
+      "templateRowIds": ["CASHFLOW-001", "CASHFLOW-002"]
+    },
+    {
+      "releaseGateId": "CATEGORIES-STAGING-001",
+      "templateRowIds": ["CATEGORIES-001"]
+    },
+    {
+      "releaseGateId": "DASHBOARD-STAGING-001",
+      "templateRowIds": ["DASHBOARD-001"]
+    },
+    {
+      "releaseGateId": "FILTER-PRESETS-STAGING-001",
+      "templateRowIds": ["FILTERS-001"]
+    },
+    {
+      "releaseGateId": "GOALS-STAGING-001",
+      "templateRowIds": ["GOALS-001", "GOALS-002"]
+    },
+    {
+      "releaseGateId": "HEALTH-STAGING-001",
+      "templateRowIds": ["HEALTH-001", "HEALTH-002", "HEALTH-003", "HEALTH-004"]
+    },
+    {
+      "releaseGateId": "HOUSEHOLD-STAGING-001",
+      "templateRowIds": ["HOUSEHOLD-001", "HOUSEHOLD-002"]
+    },
+    {
+      "releaseGateId": "INVESTMENTS-STAGING-001",
+      "templateRowIds": ["INVESTMENTS-001", "INVESTMENTS-002"]
+    },
+    {
+      "releaseGateId": "MERCHANTS-STAGING-001",
+      "templateRowIds": ["MERCHANTS-001", "MERCHANTS-002"]
+    },
+    {
+      "releaseGateId": "NOTIFICATIONS-STAGING-001",
+      "templateRowIds": ["NOTIFICATIONS-001", "NOTIFICATIONS-002"]
+    },
+    {
+      "releaseGateId": "RECEIPTS-STAGING-001",
+      "templateRowIds": ["RECEIPTS-001", "RECEIPTS-002", "RECEIPTS-003"]
+    },
+    {
+      "releaseGateId": "RECURRING-STAGING-001",
+      "templateRowIds": ["RECURRING-001", "RECURRING-002"]
+    },
+    {
+      "releaseGateId": "REPORTS-STAGING-001",
+      "templateRowIds": ["REPORTS-001", "REPORTS-002"]
+    },
+    {
+      "releaseGateId": "RULES-STAGING-001",
+      "templateRowIds": ["RULES-001", "RULES-002"]
+    },
+    {
+      "releaseGateId": "SETTINGS-STAGING-001",
+      "templateRowIds": ["SETTINGS-001", "SETTINGS-002", "SETTINGS-003"]
+    },
+    {
+      "releaseGateId": "TAGS-STAGING-001",
+      "templateRowIds": ["TAGS-001", "TAGS-002"]
+    },
+    {
+      "releaseGateId": "TRANSACTIONS-STAGING-001",
+      "templateRowIds": ["TRANSACTIONS-001", "TRANSACTIONS-002", "TRANSACTIONS-003", "TRANSACTIONS-004"]
+    },
+    {
+      "releaseGateId": "WEEKLY-RECAP-STAGING-001",
+      "templateRowIds": ["WEEKLY-001", "WEEKLY-002"]
+    }
+  ]
+}

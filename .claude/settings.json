@@ -1,0 +1,27 @@
+{
+  "$schema_note": "Claude Code project settings. Hooks are Node scripts invoked as 'node .claude/hooks/x.mjs' so they fire identically in the Claude desktop app on Windows, in WSL, in a terminal, and in CI (node is on PATH in all of them). No chmod or shell dependency needed. The Stop hook enforces the Definition of Done; set REMEDIATION_GATE=off to bypass during exploratory work.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/block-money-floats.mjs" },
+          { "type": "command", "command": "node .claude/hooks/block-any-casts.mjs" }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/scan-secrets.mjs" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/stop-gate.mjs" }
+        ]
+      }
+    ]
+  }
+}

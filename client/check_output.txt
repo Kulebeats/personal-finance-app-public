@@ -1,0 +1,9 @@
+
+> rest-express@1.0.0 check
+> tsc
+
+client/src/components/transactions/AddTransactionModal.tsx(684,17): error TS2322: Type 'string' is not assignable to type 'MoneyDto'.
+client/src/features/recurring/hooks/useRecurringPageData.ts(121,11): error TS2322: Type 'string' is not assignable to type 'MoneyDto'.
+client/src/hooks/use-finance-data.ts(711,9): error TS2322: Type 'string' is not assignable to type 'MoneyDto'.
+client/src/hooks/use-finance-data.ts(727,11): error TS2322: Type 'string | undefined' is not assignable to type 'MoneyDto | undefined'.
+  Type 'string' is not assignable to type 'MoneyDto'.

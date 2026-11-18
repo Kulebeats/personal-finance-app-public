@@ -1,0 +1,40 @@
+name: AI Eval Gate
+
+on:
+  pull_request:
+    paths:
+      - "server/modules/ai/**"
+      - "docs/ai-integration/**"
+      - "scripts/ai-eval-gate.ts"
+      - "package.json"
+      - "package-lock.json"
+  push:
+    branches: ["main", "develop"]
+    paths:
+      - "server/modules/ai/**"
+      - "docs/ai-integration/**"
+      - "scripts/ai-eval-gate.ts"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch: {}
+
+jobs:
+  eval-pack:
+    name: Run AI Eval Pack
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run AI eval gate
+        run: npm run test:ai:eval

@@ -1,0 +1,115 @@
+﻿{
+  "generatedAt": "2026-01-27",
+  "modules": [
+    {
+      "module": "accounts",
+      "canonicalAssessmentPath": "docs/reviews/accounts-module-assessment.md",
+      "notes": "Canonical root assessment; avoid addendum drift by updating this file."
+    },
+    {
+      "module": "ai-assistant",
+      "canonicalAssessmentPath": "docs/reviews/ai-assistant/ai-assistant-module-assessment.md",
+      "notes": "Provisional W6 canonical assessment; W10 is authoritative after staging."
+    },
+    {
+      "module": "auth",
+      "canonicalAssessmentPath": "docs/reviews/auth/auth-module-assessment.md",
+      "notes": "Canonical modular assessment."
+    },
+    {
+      "module": "budgets",
+      "canonicalAssessmentPath": "docs/reviews/budget/budget-module-assessment.md",
+      "notes": "Canonical budget assessment lives in subfolder; root variant is legacy."
+    },
+    {
+      "module": "cashflow",
+      "canonicalAssessmentPath": "docs/reviews/cashflow/cashflow-module-assessment.md",
+      "notes": "Canonical cashflow assessment lives in subfolder; root variant is legacy."
+    },
+    {
+      "module": "categories",
+      "canonicalAssessmentPath": "docs/reviews/categories/categories-module-assessment.md",
+      "notes": "Canonical categories assessment."
+    },
+    {
+      "module": "dashboard",
+      "canonicalAssessmentPath": "docs/reviews/dashboard/dashboard-module-assessment.md",
+      "notes": "Canonical dashboard assessment."
+    },
+    {
+      "module": "filter-presets",
+      "canonicalAssessmentPath": "docs/reviews/filter-presets/filter-presets-module-assessment.md",
+      "notes": "Provisional W6 canonical assessment; W10 is authoritative after staging."
+    },
+    {
+      "module": "goals",
+      "canonicalAssessmentPath": "docs/reviews/goals-module-assessment.md",
+      "notes": "Canonical root assessment."
+    },
+    {
+      "module": "health",
+      "canonicalAssessmentPath": "docs/reviews/health/health-module-assessment.md",
+      "notes": "Canonical infrastructure assessment."
+    },
+    {
+      "module": "household",
+      "canonicalAssessmentPath": "docs/reviews/household/household-module-assessment.md",
+      "notes": "Canonical security-critical assessment."
+    },
+    {
+      "module": "investments",
+      "canonicalAssessmentPath": "docs/reviews/investments-module-assessment.md",
+      "notes": "Canonical root assessment."
+    },
+    {
+      "module": "merchants",
+      "canonicalAssessmentPath": "docs/reviews/merchants/merchants-module-assessment.md",
+      "notes": "Canonical merchants assessment."
+    },
+    {
+      "module": "notifications",
+      "canonicalAssessmentPath": "docs/reviews/notifications/notifications-module-assessment.md",
+      "notes": "Canonical subfolder assessment."
+    },
+    {
+      "module": "receipts",
+      "canonicalAssessmentPath": "docs/reviews/receipts-module-assessment.md",
+      "notes": "Canonical root assessment."
+    },
+    {
+      "module": "recurring",
+      "canonicalAssessmentPath": "docs/reviews/recurring/recurring-module-assessment.md",
+      "notes": "Canonical subfolder assessment; root variant is legacy."
+    },
+    {
+      "module": "reports",
+      "canonicalAssessmentPath": "docs/reviews/reports-module-assessment.md",
+      "notes": "Canonical root assessment with addendum risks."
+    },
+    {
+      "module": "rules",
+      "canonicalAssessmentPath": "docs/reviews/rules/rules-module-assessment.md",
+      "notes": "Canonical rules assessment."
+    },
+    {
+      "module": "settings",
+      "canonicalAssessmentPath": "docs/reviews/settings/settings-module-assessment.md",
+      "notes": "Canonical subfolder assessment."
+    },
+    {
+      "module": "tags",
+      "canonicalAssessmentPath": "docs/reviews/tags/tags-module-assessment.md",
+      "notes": "Canonical security-critical assessment."
+    },
+    {
+      "module": "transactions",
+      "canonicalAssessmentPath": "docs/reviews/transactions-module-assessment.md",
+      "notes": "Canonical root assessment."
+    },
+    {
+      "module": "weekly-recap",
+      "canonicalAssessmentPath": "docs/reviews/weekly-recap/weekly-recap-module-assessment.md",
+      "notes": "Canonical subfolder assessment."
+    }
+  ]
+}

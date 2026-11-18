@@ -1,0 +1,3 @@
+# The Jarvis CLIs start with a hashbang that vitest 4.1 cannot parse when the
+# line ends in CRLF (Windows checkouts with core.autocrlf=true). Keep them LF.
+scripts/jarvis/*.mjs text eol=lf

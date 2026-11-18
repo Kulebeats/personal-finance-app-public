@@ -1,0 +1,6 @@
+{
+  "scripts": {
+    "start:fresh": "npx kill-port 5000 && npm run dev",
+    "kill:port": "npx kill-port 5000"
+  }
+}

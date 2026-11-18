@@ -1,0 +1,10 @@
+[
+  {
+    "advisory": "GHSA-mrhx-c7xc-m3w5",
+    "package": "zod",
+    "reason": "Fixed only in zod 4.6.6. Moving from zod 3 to 4 is a major upgrade across about 100 importing files plus drizzle-zod, @hookform/resolvers and zod-validation-error, tracked as its own work item. The advisory is memory exhaustion on oversized constrained collections; request bodies are size-limited before validation.",
+    "approvedBy": "Repository owner (Kulebeats)",
+    "approvedOn": "2026-11-15",
+    "expires": "2027-01-31"
+  }
+]

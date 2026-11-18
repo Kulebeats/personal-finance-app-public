@@ -1,0 +1,56 @@
+{
+  "goal": "example-goal",
+  "title": "An example goal with two waves",
+  "lanes": [
+    {
+      "id": "example-goal-notice",
+      "title": "Show a notice when a savings goal falls behind",
+      "wave": "1",
+      "model": "opus",
+      "branch": "claude/example-goal-notice",
+      "worktree": "C:/Dev/pfa-example-goal-notice",
+      "base": "origin/main",
+      "auditId": "REVIEW-EXAMPLE-001",
+      "runsAfter": [],
+      "signOffIds": [],
+      "rulingOwed": "The owner approves the notice wording before any code",
+      "do": [
+        "Add the notice to the goal detail panel, test first (a failing test, then the change)",
+        "Write the results file named in the brief"
+      ],
+      "doNotTouch": [
+        "shared/schema.ts - no schema change in this lane",
+        "The files of lane example-goal-docs"
+      ],
+      "checks": [
+        {
+          "command": "npx vitest run --config client/vitest.config.ts client/src/features/goals",
+          "expect": "Test Files 4 passed (4)"
+        },
+        {
+          "command": "node scripts/check-loc-limits.mjs",
+          "expect": "no new file over its limit"
+        }
+      ],
+      "landed": ["A live check of the goal detail panel in the dev app"]
+    },
+    {
+      "id": "example-goal-docs",
+      "title": "Describe the notice in the goals user guide",
+      "wave": "2",
+      "model": "sonnet",
+      "branch": "claude/example-goal-docs",
+      "worktree": "C:/Dev/pfa-example-goal-docs",
+      "base": "origin/main",
+      "auditId": "REVIEW-EXAMPLE-002",
+      "runsAfter": ["example-goal-notice"],
+      "do": ["Add a paragraph on the notice to the goals guide"],
+      "checks": [
+        {
+          "command": "git diff --stat origin/main -- docs/",
+          "expect": "1 file changed"
+        }
+      ]
+    }
+  ]
+}

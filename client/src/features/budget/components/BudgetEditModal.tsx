@@ -1,0 +1,158 @@
+/**
+ * BudgetEditModal Component
+ *
+ * Modal for editing a category budget amount.
+ */
+
+import { useState, useEffect } from "react";
+import { X } from "lucide-react";
+import { Card } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import type { BudgetEditData, ApplyScope } from "../types";
+
+interface BudgetEditModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  data: BudgetEditData | null;
+  defaultApplyScope: ApplyScope;
+  onSave: (payload: BudgetEditData & { applyScope: ApplyScope }) => void;
+  isSaving: boolean;
+}
+
+export function BudgetEditModal({
+  isOpen,
+  onClose,
+  data,
+  defaultApplyScope,
+  onSave,
+  isSaving,
+}: BudgetEditModalProps) {
+  const [amount, setAmount] = useState("");
+  const [applyScope, setApplyScope] = useState<ApplyScope>(defaultApplyScope);
+
+  useEffect(() => {
+    if (!data) return;
+    setAmount(String(data.amount ?? ""));
+    setApplyScope(defaultApplyScope);
+  }, [data, defaultApplyScope]);
+
+  if (!isOpen || !data) return null;
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onSave({
+      ...data,
+      amount,
+      applyScope,
+    });
+  };
+
+  const periodLabel = new Date(data.year, data.month - 1).toLocaleString(
+    "default",
+    {
+      month: "long",
+      year: "numeric",
+    },
+  );
+
+  return (
+    <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center">
+      <Card className="w-full max-w-md bg-card shadow-lg overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between p-4 border-b border-border">
+          <h2 className="text-lg font-bold text-foreground">Edit Budget</h2>
+          <button
+            onClick={onClose}
+            aria-label="Close dialog"
+            className="p-1 hover:bg-muted rounded"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Form */}
+        <form onSubmit={handleSubmit}>
+          <div className="p-6 space-y-6">
+            {/* Category Info */}
+            <div>
+              <div className="text-sm text-muted-foreground">Category</div>
+              <div className="text-lg font-semibold text-foreground">
+                {data.categoryName}
+              </div>
+              <div className="text-sm text-muted-foreground mt-1">
+                {periodLabel}
+              </div>
+            </div>
+
+            {/* Amount Input */}
+            <div>
+              <Label htmlFor="amount" className="text-sm font-medium">
+                Budget Amount
+              </Label>
+              <input
+                id="amount"
+                type="number"
+                step="0.01"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                className="mt-2 w-full px-3 py-2 rounded-md border border-border bg-background dark:bg-card focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm"
+                placeholder="0.00"
+                autoFocus
+              />
+            </div>
+
+            {/* Apply Scope */}
+            <div>
+              <Label className="text-sm font-medium mb-3 block">
+                Apply changes to
+              </Label>
+              <RadioGroup
+                value={applyScope}
+                onValueChange={(v) => setApplyScope(v as ApplyScope)}
+              >
+                <div className="flex items-center space-x-2 mb-2">
+                  <RadioGroupItem value="this_month" id="edit-this-month" />
+                  <Label
+                    htmlFor="edit-this-month"
+                    className="font-normal cursor-pointer"
+                  >
+                    This month only
+                  </Label>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <RadioGroupItem value="all_future" id="edit-all-future" />
+                  <Label
+                    htmlFor="edit-all-future"
+                    className="font-normal cursor-pointer"
+                  >
+                    This and all future months
+                  </Label>
+                </div>
+              </RadioGroup>
+            </div>
+          </div>
+
+          {/* Footer */}
+          <div className="p-4 border-t border-border flex justify-end gap-3 bg-muted/10">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isSaving}
+              className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors disabled:opacity-60"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={isSaving}
+              className="px-6 py-2 text-sm font-bold bg-orange-500 text-white rounded-md hover:bg-orange-600 transition-colors disabled:opacity-60"
+            >
+              {isSaving ? "Saving..." : "Save"}
+            </button>
+          </div>
+        </form>
+      </Card>
+    </div>
+  );
+}

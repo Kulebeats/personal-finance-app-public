@@ -1,0 +1,2 @@
+CREATE UNIQUE INDEX "uniq_account_balance_snapshots_account_date" ON "account_balance_snapshots" USING btree ("account_id","date");--> statement-breakpoint
+CREATE UNIQUE INDEX "uniq_net_worth_snapshots_household_date" ON "net_worth_snapshots" USING btree ("household_id","date");

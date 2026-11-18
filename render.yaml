@@ -1,0 +1,68 @@
+# Render Blueprint — Personal Finance App (SCP-306)
+#
+# Deploys the Express backend as a SINGLE Web Service. In production the same
+# Node process serves the API and the built React client (see server/index-prod.ts),
+# so there is no separate static host. Managed Postgres and Render Key Value are
+# provisioned alongside it. Redis is required in production so rate limits,
+# scheduler locks, and AI cost counters are cluster-wide if the service scales.
+#
+# Blueprint spec: https://render.com/docs/blueprint-spec
+# After first deploy, confirm the assigned URL and update CLIENT_URL/APP_URL below
+# if Render assigned a subdomain other than the service name. See docs/runbooks/deploy.md.
+
+services:
+  - type: web
+    name: personal-finance-app
+    runtime: node
+    plan: starter # single instance; preDeployCommand requires Starter+
+    region: oregon # choose the region nearest your users
+    numInstances: 1 # single instance for v1
+    buildCommand: npm ci && npm run build
+    preDeployCommand: npm run db:migrate # apply versioned migrations before traffic shifts
+    startCommand: npm run start
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY
+        value: "1"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: personal-finance-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: personal-finance-cache
+          property: connectionString
+      - key: SESSION_SECRET
+        generateValue: true # Render generates a strong secret (>32 chars)
+      - key: CLIENT_URL
+        value: https://personal-finance-app.onrender.com # update if Render assigns a different host
+      - key: APP_URL
+        value: https://personal-finance-app.onrender.com # update if Render assigns a different host
+      # Optional feature vars — set in the Render dashboard when enabling each feature:
+      #   SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, SMTP_FROM  (email / weekly recap)
+      #   GEMINI_API_KEY                                                      (AI assistant)
+      #   VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY                                 (web push)
+      #   CRON_SECRET                                                         (HTTP cron endpoints)
+      #
+      # DB TLS certificate verification is staging-gated until W9:
+      #   1. Add Render/Postgres CA PEM as a Render Secret File.
+      #   2. Set DATABASE_SSL_CA_FILE to that mounted PEM path.
+      #   3. Set DATABASE_SSL_REJECT_UNAUTHORIZED="true".
+      # Do not enable this in the blueprint until connectivity is proven against
+      # the real Render database target and the W9 smoke checklist passes.
+
+  - type: keyvalue
+    name: personal-finance-cache
+    plan: starter
+    region: oregon # MUST match the web service region for private networking
+    maxmemoryPolicy: allkeys-lru
+
+databases:
+  - name: personal-finance-db
+    plan: basic-256mb # smallest paid tier; `free` is available but expires after 90 days
+    region: oregon # MUST match the web service region for private networking
+    postgresMajorVersion: "16"

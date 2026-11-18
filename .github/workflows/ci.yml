@@ -1,0 +1,170 @@
+# The keystone. Until this runs, every "fixed" claim is unguarded against regression,
+# which is exactly how the 2026-06-04 audit found 238 failing tests behind a
+# "100% production-ready" claim. This gates check + both suites against a real
+# ephemeral Postgres on every PR and push to main.
+#
+# Adjust the env names and npm script names to match the repo if they differ.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  # PR branches share a per-ref group so a new push supersedes the old run.
+  # Main pushes get a group keyed on the COMMIT, so they never compete at all.
+  #
+  # `cancel-in-progress: false` was not enough on its own. It protects a RUNNING
+  # run, but GitHub also evicts an older PENDING run whenever a newer one queues
+  # into the same group — only the newest pending entry is kept, regardless of
+  # this setting. So merges landing minutes apart still lost their runs, just at
+  # a different stage than before:
+  #
+  #   #129 cancelled by #127, #135 by #136  <- in-progress; fixed by cancel-in-progress
+  #   #147 evicted by #148 (2026-07-20)     <- PENDING; NOT fixed by it
+  #
+  # #147's run was cancelled 2m45s after creation with ZERO jobs ever started —
+  # the signature of pending eviction rather than cancellation. Three merges
+  # inside ~13 minutes did it: #146 running, #147 pending, #148 queued.
+  #
+  # Keying main on `github.sha` gives every merge commit its own group, so each
+  # gets a completed run and CI history has no holes. That is what the
+  # Definition of Done ("green in CI on the branch") actually requires: a run
+  # covering the newest commit is not the same as a run FOR this commit.
+  #
+  # `push` only fires for main here (see the trigger above), so event_name is a
+  # precise proxy and avoids repeating the ref comparison.
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: pfa_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://ci:ci@localhost:5432/pfa_test
+      NODE_ENV: test
+      # Provide test-only placeholders so startup env validation does not fail-open.
+      # SESSION_SECRET must be >=32 chars (validateEnv/SCP-324), else app.ts throws at
+      # import and every test that loads it via __tests__/fixtures.ts fails to collect.
+      GEMINI_API_KEY: test-key-not-used
+      CRON_SECRET: test-cron-secret-not-for-production
+      SESSION_SECRET: test-session-secret-not-for-production-use
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Production dependency audit
+        # Fails on every advisory except those listed, with a reason and an
+        # expiry date, in scripts/production-audit-exceptions.json.
+        run: |
+          node --test scripts/__tests__/production-audit.test.mjs
+          node scripts/check-production-audit.mjs
+
+      - name: Type check (must be clean)
+        run: npm run check
+
+      - name: Apply versioned migrations to the test DB
+        # CI and production must exercise the same migration history. `db:push`
+        # remains available for local schema exploration only.
+        run: npm run db:migrate
+
+      - name: Server tests (real Postgres, coverage-gated)
+        # --coverage is what arms vitest's coverage.thresholds; without it the
+        # thresholds in server/vitest.config.ts are dead config. The thresholds
+        # are regression floors calibrated to current coverage, not quality bars.
+        run: npm run test:coverage:server
+
+      - name: Client tests (coverage-gated)
+        # Same: client/vitest.config.ts thresholds only gate under --coverage.
+        run: npm run test:coverage
+
+      - name: Build
+        run: npm run build
+
+      - name: Client bundle budget
+        run: npm run check:bundle
+
+  e2e:
+    # Playwright 1.58 cannot install Chromium on ubuntu-26.04, which ubuntu-latest now selects.
+    runs-on: ubuntu-24.04
+    needs: verify
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: pfa_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://ci:ci@localhost:5432/pfa_e2e
+      NODE_ENV: test
+      PORT: 5000
+      CLIENT_URL: http://localhost:5000
+      APP_URL: http://localhost:5000
+      TRUST_PROXY: "false"
+      SHUTDOWN_TIMEOUT_MS: 10000
+      GEMINI_API_KEY: test-key-not-used
+      CRON_SECRET: test-cron-secret-not-for-production
+      SESSION_SECRET: test-session-secret-not-for-production-use
+      SMTP_HOST: ""
+      SMTP_PORT: ""
+      SMTP_SECURE: "false"
+      SMTP_USER: ""
+      SMTP_PASS: ""
+      SMTP_FROM: ""
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Apply versioned migrations to the E2E DB
+        run: npm run db:migrate
+
+      - name: Browser E2E smoke/regression gate
+        run: npm run test:e2e:smoke

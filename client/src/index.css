@@ -1,0 +1,872 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+
+  --color-chart-1: hsl(var(--chart-1));
+  --color-chart-2: hsl(var(--chart-2));
+  --color-chart-3: hsl(var(--chart-3));
+  --color-chart-4: hsl(var(--chart-4));
+  --color-chart-5: hsl(var(--chart-5));
+
+  /* Semantic financial chart colors */
+  --color-chart-income: hsl(var(--chart-income));
+  --color-chart-expense: hsl(var(--chart-expense));
+  --color-chart-neutral: hsl(var(--chart-neutral));
+
+  --color-sidebar: hsl(var(--sidebar));
+  --color-sidebar-foreground: hsl(var(--sidebar-foreground));
+  --color-sidebar-primary: hsl(var(--sidebar-primary));
+  --color-sidebar-primary-foreground: hsl(var(--sidebar-primary-foreground));
+  --color-sidebar-accent: hsl(var(--sidebar-accent));
+  --color-sidebar-accent-foreground: hsl(var(--sidebar-accent-foreground));
+  --color-sidebar-border: hsl(var(--sidebar-border));
+  --color-sidebar-ring: hsl(var(--sidebar-ring));
+
+  /* Elevation surface colors */
+  --color-surface-0: hsl(var(--surface-0));
+  --color-surface-1: hsl(var(--surface-1));
+  --color-surface-2: hsl(var(--surface-2));
+  --color-surface-3: hsl(var(--surface-3));
+}
+
+/* LIGHT MODE - Refined Qase-inspired palette (softer, lighter) */
+:root {
+  color-scheme: light;
+
+  /* Soft off-white backgrounds - not harsh pure white */
+  --background: 210 20% 99%; /* #FAFBFC - Soft off-white */
+  --foreground: 215 25% 20%; /* #2D3748 - Soft dark blue-gray */
+
+  /* Cards slightly brighter than background for lift */
+  --card: 0 0% 100%; /* Pure white for cards */
+  --card-foreground: 215 25% 20%;
+
+  --popover: 0 0% 100%;
+  --popover-foreground: 215 25% 20%;
+
+  /* Primary - Modern vibrant blue (softer than before) */
+  --primary: 217 91% 60%; /* #4299E1 - Softer blue */
+  --primary-foreground: 0 0% 100%;
+
+  /* Secondary - Very light gray with blue tint */
+  --secondary: 210 25% 96%; /* #F7FAFC - Almost white */
+  --secondary-foreground: 215 25% 27%;
+
+  /* Muted - Subtle gray for backgrounds */
+  --muted: 210 20% 96%; /* #F7FAFC */
+  --muted-foreground: 215 16% 52%; /* #718096 - Medium gray */
+
+  /* Accent - Light interactive states */
+  --accent: 210 25% 94%; /* #EDF2F7 */
+  --accent-foreground: 215 25% 20%;
+
+  /* Destructive - Softer red */
+  --destructive: 0 72% 55%;
+  --destructive-foreground: 0 0% 100%;
+
+  /* Borders - Very subtle, almost invisible */
+  --border: 210 20% 90%; /* #E2E8F0 - Soft gray */
+  --input: 210 20% 90%;
+  --ring: 217 91% 60%;
+
+  --radius: 0.75rem;
+
+  /* Charts - Vibrant but not harsh */
+  --chart-1: 217 91% 60%; /* Blue */
+  --chart-2: 154 65% 45%; /* Teal green */
+  --chart-3: 354 70% 55%; /* Soft red */
+  --chart-4: 262 60% 58%; /* Purple */
+  --chart-5: 38 92% 55%; /* Warm orange */
+
+  /* Semantic financial colors */
+  --chart-income: 154 65% 45%; /* Green for income/positive */
+  --chart-expense: 354 70% 55%; /* Red for expenses/negative */
+  --chart-neutral: 215 16% 52%; /* Gray for neutral */
+
+  /* Investment-specific colors */
+  --chart-investment-gain: 142.1 76.2% 36.3%; /* Green */
+  --chart-investment-loss: 0 84.2% 60.2%; /* Red */
+  --chart-investment-neutral: 240 3.8% 46.1%; /* Gray */
+  --chart-fx-positive: 142.1 70.6% 45.3%;
+  --chart-fx-negative: 0 72.2% 50.6%;
+
+  /* Sidebar - Soft off-white matching main */
+  --sidebar: 210 20% 98%;
+  --sidebar-foreground: 215 25% 20%;
+  --sidebar-primary: 217 91% 60%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 210 25% 94%;
+  --sidebar-accent-foreground: 215 25% 27%;
+  --sidebar-border: 210 20% 90%;
+  --sidebar-ring: 217 91% 60%;
+
+  /* Elevation tokens (light mode) */
+  --surface-0: 210 20% 99%; /* Base background */
+  --surface-1: 0 0% 100%; /* Cards - pure white */
+  --surface-2: 210 25% 96%; /* Hover states */
+  --surface-3: 210 20% 90%; /* Borders */
+}
+
+/* DARK MODE - GitHub-inspired palette */
+.dark {
+  color-scheme: dark;
+
+  /* Base colors - GitHub-inspired */
+  --background: 215 21% 7%; /* #0d1117 - Main background */
+  --foreground: 212 12% 82%; /* #c9d1d9 - Primary text */
+
+  /* Surfaces with elevation */
+  --card: 215 21% 11%; /* #161b22 - Cards, elevated surfaces */
+  --card-foreground: 212 12% 82%; /* #c9d1d9 */
+
+  --popover: 215 21% 11%; /* #161b22 - Popovers, dropdowns */
+  --popover-foreground: 212 12% 82%; /* #c9d1d9 */
+
+  /* Interactive elements */
+  --primary: 212 100% 67%; /* #58a6ff - Primary accent */
+  --primary-foreground: 215 21% 7%; /* Dark text on primary */
+
+  --secondary: 215 17% 15%; /* #21262d - Secondary surfaces */
+  --secondary-foreground: 212 12% 82%;
+
+  /* Muted/subtle elements */
+  --muted: 215 17% 15%; /* #21262d */
+  --muted-foreground: 212 9% 58%; /* #8b949e - Muted text */
+
+  /* Accent (hover states) */
+  --accent: 215 17% 15%; /* #21262d */
+  --accent-foreground: 212 12% 82%;
+
+  /* Status colors (desaturated for dark mode) */
+  --destructive: 0 72% 51%; /* Softer red */
+  --destructive-foreground: 0 0% 100%;
+
+  /* Borders */
+  --border: 215 14% 21%; /* #30363d */
+  --input: 215 14% 21%; /* #30363d */
+  --ring: 212 100% 67%; /* #58a6ff */
+
+  /* Elevation tokens */
+  --surface-0: 215 21% 7%; /* #0d1117 - Base/background */
+  --surface-1: 215 21% 11%; /* #161b22 - Cards, elevated */
+  --surface-2: 215 17% 15%; /* #21262d - Hover, interactive */
+  --surface-3: 215 14% 21%; /* #30363d - Borders, dividers */
+
+  /* Charts - desaturated for dark mode */
+  --chart-1: 212 80% 55%;
+  --chart-2: 160 50% 45%;
+  --chart-3: 30 70% 50%;
+  --chart-4: 280 55% 55%;
+  --chart-5: 340 65% 50%;
+
+  /* Semantic financial colors - dark mode */
+  --chart-income: 160 50% 45%; /* Green for income/positive */
+  --chart-expense: 0 65% 55%; /* Red for expenses/negative */
+  --chart-neutral: 212 9% 58%; /* Gray for neutral */
+
+  /* Investment-specific dark mode */
+  --chart-investment-gain: 142.1 70.6% 45.3%;
+  --chart-investment-loss: 0 62.8% 50.6%;
+  --chart-investment-neutral: 240 5% 64.9%;
+  --chart-fx-positive: 142.1 76.2% 36.3%;
+  --chart-fx-negative: 0 84.2% 60.2%;
+
+  /* Sidebar */
+  --sidebar: 215 21% 7%; /* #0d1117 */
+  --sidebar-foreground: 212 12% 82%;
+  --sidebar-primary: 212 100% 67%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 215 17% 15%;
+  --sidebar-accent-foreground: 212 12% 82%;
+  --sidebar-border: 215 14% 21%;
+  --sidebar-ring: 212 100% 67%;
+
+  /* Browser color scheme */
+  color-scheme: dark;
+  accent-color: hsl(var(--primary));
+}
+
+/* Light Gray Theme */
+.light-gray {
+  --background: 220 14% 96%; /* Light Gray */
+  --foreground: 220 10% 10%;
+
+  --card: 0 0% 100%;
+  --card-foreground: 220 10% 10%;
+
+  --popover: 0 0% 100%;
+  --popover-foreground: 220 10% 10%;
+
+  --primary: 221 83% 53%; /* Modern Blue */
+  --primary-foreground: 210 40% 98%;
+
+  --secondary: 220 14% 90%;
+  --secondary-foreground: 220 10% 10%;
+
+  --muted: 220 14% 90%;
+  --muted-foreground: 220 10% 40%;
+
+  --accent: 220 14% 90%;
+  --accent-foreground: 220 10% 10%;
+
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 210 40% 98%;
+
+  --border: 220 14% 90%;
+  --input: 220 14% 90%;
+  --ring: 221 83% 53%;
+
+  --sidebar: 220 14% 96%;
+  --sidebar-foreground: 220 10% 10%;
+  --sidebar-primary: 221 83% 53%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 220 14% 90%;
+  --sidebar-accent-foreground: 220 10% 10%;
+  --sidebar-border: 220 14% 90%;
+  --sidebar-ring: 221 83% 53%;
+
+  --chart-1: 221 83% 53%;
+  --chart-2: 160 60% 45%;
+  --chart-3: 340 75% 55%;
+  --chart-4: 280 65% 60%;
+  --chart-5: 40 90% 60%;
+
+  /* Semantic financial colors */
+  --chart-income: 160 60% 45%;
+  --chart-expense: 340 75% 55%;
+  --chart-neutral: 220 10% 40%;
+
+  --surface-0: 220 14% 96%;
+  --surface-1: 0 0% 100%;
+  --surface-2: 220 14% 90%;
+  --surface-3: 220 14% 90%;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    font-family: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+    @apply font-sans antialiased bg-background text-foreground;
+  }
+}
+
+/* =================================
+   DARK MODE UTILITY CLASSES
+   ================================= */
+
+/* Modal/Dialog backgrounds */
+.modal-card {
+  @apply bg-card text-card-foreground;
+}
+
+/* Glassmorphic inputs */
+.input-glass {
+  @apply bg-white/50 backdrop-blur-sm;
+}
+
+.dark .input-glass {
+  @apply bg-slate-800/50;
+}
+
+/* Elevated surfaces */
+.surface-elevated {
+  @apply bg-card;
+}
+
+.dark .surface-elevated {
+  @apply bg-[#161b22];
+}
+
+/* Interactive surface (hover) */
+.surface-interactive {
+  @apply transition-colors;
+}
+
+.surface-interactive:hover {
+  @apply bg-muted;
+}
+
+.dark .surface-interactive:hover {
+  @apply bg-[#21262d];
+}
+
+/* Hover surface - generic */
+.hover-surface {
+  @apply hover:bg-muted transition-colors;
+}
+
+/* Status badges - Success */
+.badge-success {
+  @apply bg-emerald-50 text-emerald-700;
+}
+
+.dark .badge-success {
+  @apply bg-emerald-900/30 text-emerald-400;
+}
+
+/* Status badges - Warning */
+.badge-warning {
+  @apply bg-amber-50 text-amber-700;
+}
+
+.dark .badge-warning {
+  @apply bg-amber-900/30 text-amber-400;
+}
+
+/* Status badges - Info */
+.badge-info {
+  @apply bg-blue-50 text-blue-700;
+}
+
+.dark .badge-info {
+  @apply bg-blue-900/30 text-blue-400;
+}
+
+/* Toggle buttons */
+.toggle-active {
+  @apply bg-background shadow-sm text-foreground;
+}
+
+.dark .toggle-active {
+  @apply bg-slate-800;
+}
+
+.toggle-inactive {
+  @apply text-muted-foreground hover:text-foreground;
+}
+
+/* Info boxes/alerts */
+.info-box-success {
+  @apply bg-emerald-50 border-emerald-100 text-emerald-900;
+}
+
+.dark .info-box-success {
+  @apply bg-emerald-900/20 border-emerald-800 text-emerald-100;
+}
+
+/* Table Row Hover */
+.table-row-hover {
+  @apply hover:bg-muted/50 transition-colors;
+}
+
+.dark .table-row-hover {
+  @apply hover:bg-[#161b22];
+}
+
+/* =================================
+   SCROLLBAR STYLING
+   ================================= */
+
+/* Scrollbar - Firefox */
+.dark * {
+  scrollbar-color: hsl(var(--border)) transparent;
+  scrollbar-width: thin;
+}
+
+/* Scrollbar - Chrome/Safari/Edge */
+.dark ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.dark ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground));
+  background-clip: padding-box;
+}
+
+/* Autofill styling */
+.dark input:-webkit-autofill,
+.dark input:-webkit-autofill:hover,
+.dark input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px hsl(var(--card)) inset !important;
+  -webkit-text-fill-color: hsl(var(--foreground)) !important;
+  caret-color: hsl(var(--foreground));
+}
+
+/* Selection highlight */
+::selection {
+  @apply bg-primary/20 text-foreground;
+}
+
+.dark ::selection {
+  @apply bg-primary/30;
+}
+
+/* =================================
+   PHONE INPUT STYLES
+   ================================= */
+.phone-input .PhoneInputInput {
+  @apply bg-background border border-input rounded-md px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 text-foreground;
+}
+
+.dark .phone-input .PhoneInputInput {
+  @apply bg-slate-800/50 border-slate-600 text-slate-100;
+}
+
+.phone-input .PhoneInputCountrySelect {
+  @apply border-r border-input mr-2 pr-2;
+}
+
+.phone-input .PhoneInputCountrySelectArrow {
+  @apply text-muted-foreground;
+}
+
+.phone-input .PhoneInputCountryIcon {
+  @apply w-5 h-5;
+}
+
+.phone-input {
+  @apply w-full;
+}
+
+/* Settings input field dark mode support */
+.dark input,
+.dark textarea,
+.dark select,
+.dark [data-radix-select-trigger] {
+  @apply bg-input/20 border-border text-foreground;
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  @apply text-muted-foreground;
+}
+
+.dark input:focus,
+.dark textarea:focus,
+.dark select:focus {
+  @apply border-ring ring-1 ring-ring;
+}
+
+/* =================================
+   ANIMATIONS
+   ================================= */
+@keyframes pulse-success {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes progress-fill {
+  from {
+    width: 0%;
+  }
+  to {
+    width: var(--progress-width);
+  }
+}
+
+.profile-completeness-bar {
+  animation: slide-in 0.3s ease-out;
+}
+
+.auto-save-indicator {
+  animation: slide-in 0.2s ease-out;
+}
+
+.validation-error {
+  animation: slide-in 0.2s ease-out;
+  border-left: 3px solid #ef4444;
+}
+
+.phone-input-valid {
+  border-color: #10b981;
+  box-shadow: 0 0 0 1px #10b981;
+}
+
+.phone-input-invalid {
+  border-color: #ef4444;
+  box-shadow: 0 0 0 1px #ef4444;
+}
+
+.progress-bar-animated {
+  animation: progress-fill 0.8s ease-out;
+}
+
+/* Smooth transitions for all interactive elements */
+.profile-field {
+  transition: all 0.2s ease-in-out;
+}
+
+.profile-field:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* =================================
+   GLASSMORPHISM UTILITIES
+   ================================= */
+.glass-effect {
+  @apply bg-white/70 backdrop-blur-md border border-white/20;
+}
+
+.dark .glass-effect {
+  @apply bg-slate-900/70 backdrop-blur-md border-white/10;
+}
+
+.glass-card {
+  @apply bg-white/70 backdrop-blur-md border border-white/20 shadow-xl transition-all duration-300;
+}
+
+.dark .glass-card {
+  @apply bg-slate-900/70 backdrop-blur-md border-white/10;
+}
+
+.glass-card:hover {
+  @apply -translate-y-1 shadow-2xl border-primary/20;
+}
+
+/* =================================
+   PREMIUM GRADIENTS
+   ================================= */
+.gradient-copper {
+  background: linear-gradient(135deg, #b87333 0%, #db9a6a 50%, #8b4513 100%);
+}
+
+.gradient-premium-blue {
+  background: linear-gradient(135deg, #1e40af 0%, #3b82f6 50%, #172554 100%);
+}
+
+.gradient-glass-border {
+  position: relative;
+  border-radius: var(--radius);
+  background:
+    linear-gradient(var(--card), var(--card)) padding-box,
+    linear-gradient(135deg, rgba(255, 255, 255, 0.4), rgba(255, 255, 255, 0.1))
+      border-box;
+  border: 1px solid transparent;
+}
+
+/* Animated Underline */
+.premium-link {
+  position: relative;
+  @apply transition-colors duration-300;
+}
+
+.premium-link::after {
+  content: "";
+  position: absolute;
+  width: 0;
+  height: 2px;
+  bottom: -2px;
+  left: 0;
+  @apply bg-primary transition-all duration-300;
+}
+
+.premium-link:hover::after {
+  width: 100%;
+}
+
+/* Enhanced dropdown animations */
+.dropdown-content {
+  animation: slide-in 0.15s ease-out;
+}
+
+/* Success state animations */
+.success-indicator {
+  animation: pulse-success 2s ease-in-out;
+}
+
+/* =================================
+   EDITORIAL DASHBOARD WIDGETS
+   Distinctive typography & Art Deco flourishes
+   ================================= */
+
+/* Typography utilities */
+.font-display {
+  font-family: "Fraunces", Georgia, serif;
+  font-optical-sizing: auto;
+}
+
+.font-body {
+  font-family: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Widget color palette - sophisticated, not generic */
+:root {
+  --widget-income: 158 64% 35%; /* Deep teal */
+  --widget-income-light: 158 50% 92%;
+  --widget-expense: 16 65% 50%; /* Warm terracotta */
+  --widget-expense-light: 16 60% 94%;
+  --widget-savings: 250 50% 55%; /* Deep indigo */
+  --widget-savings-light: 250 40% 95%;
+  --widget-gold: 43 90% 55%; /* Accent gold */
+  --widget-gold-muted: 43 40% 85%;
+}
+
+.dark {
+  --widget-income: 158 55% 45%;
+  --widget-income-light: 158 40% 15%;
+  --widget-expense: 16 55% 55%;
+  --widget-expense-light: 16 30% 18%;
+  --widget-savings: 250 45% 60%;
+  --widget-savings-light: 250 30% 18%;
+  --widget-gold: 43 80% 60%;
+  --widget-gold-muted: 43 30% 25%;
+}
+
+/* Editorial widget card */
+.widget-editorial {
+  @apply relative overflow-hidden;
+  background: linear-gradient(
+    135deg,
+    hsl(var(--card)) 0%,
+    hsl(var(--card)) 50%,
+    hsl(var(--muted) / 0.3) 100%
+  );
+}
+
+.widget-editorial::before {
+  content: "";
+  @apply absolute top-0 right-0 w-32 h-32 opacity-5;
+  background: radial-gradient(
+    circle,
+    hsl(var(--widget-gold)) 0%,
+    transparent 70%
+  );
+}
+
+/* Art Deco corner flourish */
+.widget-flourish {
+  @apply absolute -top-1 -right-1 w-16 h-16 opacity-10;
+  background: linear-gradient(
+    135deg,
+    transparent 50%,
+    hsl(var(--widget-gold)) 50%
+  );
+  clip-path: polygon(100% 0, 100% 100%, 0 0);
+}
+
+/* Elegant metric display */
+.metric-editorial {
+  @apply relative;
+}
+
+.metric-editorial .metric-value {
+  font-family: "Fraunces", Georgia, serif;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+.metric-editorial .metric-label {
+  font-family: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  @apply text-xs uppercase tracking-[0.2em] font-medium;
+}
+
+/* Animated number counting effect */
+@keyframes countUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-count-up {
+  animation: countUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Staggered entry animations */
+.stagger-1 {
+  animation-delay: 0.05s;
+}
+.stagger-2 {
+  animation-delay: 0.1s;
+}
+.stagger-3 {
+  animation-delay: 0.15s;
+}
+.stagger-4 {
+  animation-delay: 0.2s;
+}
+.stagger-5 {
+  animation-delay: 0.25s;
+}
+
+/* Progress bar with gradient shine */
+.progress-editorial {
+  @apply relative overflow-hidden rounded-full;
+  background: hsl(var(--muted));
+}
+
+.progress-editorial .progress-fill {
+  @apply h-full rounded-full transition-all duration-700 ease-out;
+  background: linear-gradient(
+    90deg,
+    hsl(var(--widget-income)) 0%,
+    hsl(var(--widget-income) / 0.8) 100%
+  );
+}
+
+.progress-editorial .progress-fill::after {
+  content: "";
+  @apply absolute inset-0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.2) 50%,
+    transparent 100%
+  );
+  animation: shimmer 2s infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* Circular progress gauge */
+.gauge-ring {
+  fill: none;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 1s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.gauge-bg {
+  stroke: hsl(var(--muted));
+}
+
+.gauge-fill {
+  stroke: hsl(var(--widget-income));
+  transform-origin: center;
+  transform: rotate(-90deg);
+}
+
+/* Merchant rank badge */
+.rank-badge {
+  @apply relative flex items-center justify-center;
+  font-family: "Fraunces", Georgia, serif;
+}
+
+.rank-badge.rank-1 {
+  @apply text-amber-500;
+}
+
+.rank-badge.rank-2 {
+  @apply text-slate-400;
+}
+
+.rank-badge.rank-3 {
+  @apply text-amber-700;
+}
+
+/* Dramatic percentage bar */
+.percentage-bar {
+  @apply relative h-1.5 rounded-full overflow-hidden;
+  background: hsl(var(--muted) / 0.5);
+}
+
+.percentage-bar .fill {
+  @apply absolute left-0 top-0 h-full rounded-full;
+  transition: width 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Hover lift effect */
+.hover-lift {
+  @apply transition-all duration-300;
+}
+
+.hover-lift:hover {
+  @apply -translate-y-0.5;
+  box-shadow: 0 8px 30px -12px hsl(var(--foreground) / 0.15);
+}
+
+/* Subtle gradient text */
+.text-gradient-gold {
+  background: linear-gradient(
+    135deg,
+    hsl(var(--widget-gold)) 0%,
+    hsl(var(--foreground)) 100%
+  );
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Activity timeline dot */
+.timeline-dot {
+  @apply relative;
+}
+
+.timeline-dot::before {
+  content: "";
+  @apply absolute left-0 top-1/2 w-2 h-2 rounded-full -translate-y-1/2;
+  background: hsl(var(--widget-gold));
+}
+
+.timeline-dot::after {
+  content: "";
+  @apply absolute left-0.5 top-full w-0.5 h-full;
+  background: linear-gradient(to bottom, hsl(var(--border)), transparent);
+}

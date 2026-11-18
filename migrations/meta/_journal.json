@@ -1,0 +1,90 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1780616815817,
+      "tag": "0000_youthful_speed",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1780619240507,
+      "tag": "0001_curvy_matthew_murdock",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1780620823905,
+      "tag": "0002_last_matthew_murdock",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1780756697697,
+      "tag": "0003_chilly_diamondback",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1780760244223,
+      "tag": "0004_massive_puck",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1781122770360,
+      "tag": "0005_household_members_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1783075642831,
+      "tag": "0006_filter_presets_default_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1783122652125,
+      "tag": "0007_filter_presets_name_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1783159506761,
+      "tag": "0008_budget_period_monthly_check",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1783251574717,
+      "tag": "0009_reconcile_custom_migration_snapshots",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1783813330721,
+      "tag": "0010_password_reset_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1784458934366,
+      "tag": "0011_hash_email_verification_tokens",
+      "breakpoints": true
+    }
+  ]
+}

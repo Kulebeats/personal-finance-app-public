@@ -1,0 +1,3883 @@
+openapi: 3.1.0
+info:
+  title: Personal Finance App API
+  version: 0.1.0
+  description: |
+    Baseline OpenAPI 3.1 specification for the Personal Finance App.
+    Paths are anchored at `/api/*` and are currently available under both
+    `/api/*` and `/api/v1/*` via server-side routing.
+    Schemas document the core client contract and allow additional fields
+    for forward compatibility where appropriate.
+servers:
+  - url: http://localhost:5000
+    description: Local development (supports /api/* and /api/v1/* aliases)
+tags:
+  - name: Auth
+    description: Authentication and sessions
+  - name: Settings
+    description: User profile, display, notifications, and security settings
+  - name: Household
+    description: Household settings and membership
+  - name: Accounts
+  - name: Categories
+  - name: Merchants
+  - name: Rules
+  - name: Reports
+  - name: Transactions
+  - name: Budgets
+  - name: Goals
+  - name: Recurring
+  - name: Cron
+  - name: Health
+security:
+  - cookieAuth: []
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Health check
+      operationId: healthCheck
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/csrf-token:
+    get:
+      tags: [Auth]
+      summary: Get CSRF token
+      operationId: getCsrfToken
+      security: []
+      responses:
+        "200":
+          description: CSRF token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CsrfTokenResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user
+      operationId: registerUser
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRegisterRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/HouseholdResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Login
+      operationId: loginUser
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthLoginRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/auth/mfa/verify:
+    post:
+      tags: [Auth]
+      summary: Verify MFA during login
+      operationId: verifyMfaLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthMfaVerifyRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/auth/mfa/resend:
+    post:
+      tags: [Auth]
+      summary: Resend MFA code
+      operationId: resendMfaCode
+      security: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/auth/verify-email:
+    post:
+      tags: [Auth]
+      summary: Verify email address
+      operationId: verifyEmail
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthVerifyEmailRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/auth/resend-verification:
+    post:
+      tags: [Auth]
+      summary: Resend verification email
+      operationId: resendVerification
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthResendVerificationRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Logout
+      operationId: logoutUser
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Get current user
+      operationId: getCurrentUser
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/settings/profile:
+    get:
+      tags: [Settings]
+      summary: Get user profile
+      operationId: getProfile
+      responses:
+        "200":
+          $ref: "#/components/responses/ProfileResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [Settings]
+      summary: Update user profile
+      operationId: updateProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProfileRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/ProfileResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/settings/profile/picture:
+    post:
+      tags: [Settings]
+      summary: Upload profile picture
+      operationId: uploadProfilePicture
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                picture:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Settings]
+      summary: Remove profile picture
+      operationId: deleteProfilePicture
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/settings/profile/banner:
+    post:
+      tags: [Settings]
+      summary: Upload banner
+      operationId: uploadBanner
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                banner:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Settings]
+      summary: Remove banner
+      operationId: deleteBanner
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/settings/display:
+    get:
+      tags: [Settings]
+      summary: Get display settings
+      operationId: getDisplaySettings
+      responses:
+        "200":
+          $ref: "#/components/responses/DisplaySettingsResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [Settings]
+      summary: Update display settings
+      operationId: updateDisplaySettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateDisplaySettingsRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/DisplaySettingsResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/settings/notifications:
+    get:
+      tags: [Settings]
+      summary: Get notification preferences
+      operationId: getNotificationPreferences
+      responses:
+        "200":
+          $ref: "#/components/responses/NotificationPreferencesResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [Settings]
+      summary: Update notification preferences
+      operationId: updateNotificationPreferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateNotificationPreferencesRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/NotificationPreferencesResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/settings/security/password:
+    put:
+      tags: [Settings]
+      summary: Change password
+      operationId: changePassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangePasswordRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/settings/security/sessions:
+    get:
+      tags: [Settings]
+      summary: Get active sessions
+      operationId: getActiveSessions
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/settings/security/sessions/{id}:
+    delete:
+      tags: [Settings]
+      summary: Revoke a specific session
+      operationId: revokeSession
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/settings/security/sessions/revoke-all:
+    post:
+      tags: [Settings]
+      summary: Revoke all sessions except current
+      operationId: revokeAllSessions
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/settings/security/login-history:
+    get:
+      tags: [Settings]
+      summary: Get login history
+      operationId: getLoginHistory
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/household:
+    post:
+      tags: [Household]
+      summary: Create household
+      operationId: createHousehold
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HouseholdCreateRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/HouseholdResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/household/general:
+    get:
+      tags: [Household]
+      summary: Get household settings
+      operationId: getHouseholdSettings
+      responses:
+        "200":
+          $ref: "#/components/responses/HouseholdResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [Household]
+      summary: Update household settings
+      operationId: updateHouseholdSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HouseholdUpdateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/HouseholdResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/household/members:
+    get:
+      tags: [Household]
+      summary: List household members
+      operationId: listHouseholdMembers
+      responses:
+        "200":
+          $ref: "#/components/responses/HouseholdMembersResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/household/members/{userId}/role:
+    put:
+      tags: [Household]
+      summary: Update household member role
+      operationId: updateHouseholdMemberRole
+      parameters:
+        - $ref: "#/components/parameters/userIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HouseholdUpdateMemberRoleRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/household/members/{userId}:
+    delete:
+      tags: [Household]
+      summary: Remove household member
+      operationId: removeHouseholdMember
+      parameters:
+        - $ref: "#/components/parameters/userIdParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/accounts:
+    get:
+      tags: [Accounts]
+      summary: List accounts
+      operationId: listAccounts
+      responses:
+        "200":
+          $ref: "#/components/responses/AccountListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Accounts]
+      summary: Create account
+      operationId: createAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountCreateRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/AccountResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/accounts/summary:
+    get:
+      tags: [Accounts]
+      summary: Get net worth summary
+      operationId: getNetWorthSummary
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/accounts/{id}:
+    get:
+      tags: [Accounts]
+      summary: Get account by id
+      operationId: getAccountById
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/AccountResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [Accounts]
+      summary: Update account
+      operationId: updateAccount
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountUpdateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/AccountResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Accounts]
+      summary: Delete account
+      operationId: deleteAccount
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/accounts/{id}/adjust-balance:
+    post:
+      tags: [Accounts]
+      summary: Adjust account balance
+      operationId: adjustAccountBalance
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BalanceAdjustmentRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/accounts/{id}/archive:
+    post:
+      tags: [Accounts]
+      summary: Archive account
+      operationId: archiveAccount
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/accounts/{id}/unarchive:
+    post:
+      tags: [Accounts]
+      summary: Unarchive account
+      operationId: unarchiveAccount
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/categories/groups:
+    get:
+      tags: [Categories]
+      summary: List category groups
+      operationId: listCategoryGroups
+      responses:
+        "200":
+          $ref: "#/components/responses/CategoryGroupsResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Categories]
+      summary: Create category group
+      operationId: createCategoryGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CategoryGroupCreateRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/CategoryGroupResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/categories:
+    get:
+      tags: [Categories]
+      summary: List categories
+      operationId: listCategories
+      responses:
+        "200":
+          $ref: "#/components/responses/CategoriesResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Categories]
+      summary: Create category
+      operationId: createCategory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CategoryCreateRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/CategoryResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/categories/{id}:
+    put:
+      tags: [Categories]
+      summary: Update category
+      operationId: updateCategory
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CategoryUpdateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/CategoryResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Categories]
+      summary: Archive category
+      operationId: deleteCategory
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/categories/reorder:
+    put:
+      tags: [Categories]
+      summary: Reorder categories
+      operationId: reorderCategories
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/categories/seed:
+    post:
+      tags: [Categories]
+      summary: Seed default categories
+      operationId: seedCategories
+      responses:
+        "201":
+          $ref: "#/components/responses/Created"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/merchants:
+    get:
+      tags: [Merchants]
+      summary: List merchants
+      operationId: listMerchants
+      responses:
+        "200":
+          $ref: "#/components/responses/MerchantListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Merchants]
+      summary: Create merchant
+      operationId: createMerchant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MerchantCreateRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/MerchantResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/merchants/seed:
+    post:
+      tags: [Merchants]
+      summary: Seed default merchants
+      operationId: seedMerchants
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/merchants/similar/{id}:
+    get:
+      tags: [Merchants]
+      summary: Find similar merchants
+      operationId: findSimilarMerchants
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/merchants/{id}:
+    get:
+      tags: [Merchants]
+      summary: Get merchant
+      operationId: getMerchant
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/MerchantResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [Merchants]
+      summary: Update merchant
+      operationId: updateMerchant
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MerchantUpdateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/MerchantResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/merchants/{id}/merge:
+    post:
+      tags: [Merchants]
+      summary: Merge merchant into another
+      operationId: mergeMerchant
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MerchantMergeRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/rules:
+    get:
+      tags: [Rules]
+      summary: List rules
+      operationId: listRules
+      responses:
+        "200":
+          $ref: "#/components/responses/RuleListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Rules]
+      summary: Create rule
+      operationId: createRule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuleCreateRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/RuleResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/rules/reorder:
+    put:
+      tags: [Rules]
+      summary: Reorder rules
+      operationId: reorderRules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/rules/{id}:
+    get:
+      tags: [Rules]
+      summary: Get rule
+      operationId: getRule
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/RuleResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [Rules]
+      summary: Update rule
+      operationId: updateRule
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuleUpdateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/RuleResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Rules]
+      summary: Delete rule
+      operationId: deleteRule
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/rules/{id}/test:
+    post:
+      tags: [Rules]
+      summary: Test rule
+      operationId: testRule
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/reports/annual:
+    get:
+      tags: [Reports]
+      summary: Annual report
+      operationId: getAnnualReport
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/reports/cashflow:
+    get:
+      tags: [Reports]
+      summary: Cashflow report
+      operationId: getCashflowReport
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/reports/sankey:
+    get:
+      tags: [Reports]
+      summary: Sankey report
+      operationId: getSankeyReport
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/reports/spending/breakdown:
+    get:
+      tags: [Reports]
+      summary: Spending breakdown report
+      operationId: getSpendingBreakdownReport
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/reports/spending/trend:
+    get:
+      tags: [Reports]
+      summary: Spending trend report
+      operationId: getSpendingTrendReport
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/reports/income:
+    get:
+      tags: [Reports]
+      summary: Income report
+      operationId: getIncomeReport
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/reports/net-worth:
+    get:
+      tags: [Reports]
+      summary: Net worth report
+      operationId: getNetWorthReport
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/reports/savings-rate:
+    get:
+      tags: [Reports]
+      summary: Savings rate report
+      operationId: getSavingsRateReport
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/reports/transactions:
+    get:
+      tags: [Reports]
+      summary: Transactions report
+      operationId: getTransactionsReport
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/reports/export:
+    get:
+      tags: [Reports]
+      summary: Export report data as CSV
+      operationId: exportReport
+      responses:
+        "200":
+          description: CSV export
+          content:
+            text/csv:
+              schema:
+                type: string
+        default:
+          $ref: "#/components/responses/Error"
+  /api/transactions:
+    get:
+      tags: [Transactions]
+      summary: List transactions
+      operationId: listTransactions
+      responses:
+        "200":
+          $ref: "#/components/responses/TransactionListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Transactions]
+      summary: Create transaction
+      operationId: createTransaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransactionCreateRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/TransactionResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/transactions/summary:
+    get:
+      tags: [Transactions]
+      summary: Transaction summary
+      operationId: getTransactionSummary
+      parameters:
+        - in: query
+          name: startDate
+          required: true
+          schema:
+            type: string
+            format: date
+          description: Start date (YYYY-MM-DD)
+        - in: query
+          name: endDate
+          required: true
+          schema:
+            type: string
+            format: date
+          description: End date (YYYY-MM-DD)
+        - in: query
+          name: ownerUserId
+          required: false
+          schema:
+            type: string
+            nullable: true
+          description: Owner filter; use "shared" for unowned transactions
+        - in: query
+          name: accountId
+          required: false
+          schema:
+            type: string
+          description: Filter summary to a single account
+        - in: query
+          name: tags
+          required: false
+          schema:
+            type: string
+          description: Comma-separated tag IDs to filter the summary
+      responses:
+        "200":
+          description: Summary response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      totalCount:
+                        type: number
+                      totalIncome:
+                        type: number
+                      totalExpense:
+                        type: number
+                      netFlow:
+                        type: number
+                      largestIncome:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          amount:
+                            type: number
+                          name:
+                            type: string
+                          date:
+                            type: string
+                      largestExpense:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          amount:
+                            type: number
+                          name:
+                            type: string
+                          date:
+                            type: string
+                      avgAmount:
+                        type: number
+                      dateRange:
+                        type: object
+                        properties:
+                          first:
+                            type: string
+                          last:
+                            type: string
+                      byCategory:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            categoryId:
+                              type: string
+                            name:
+                              type: string
+                            total:
+                              type: number
+                            count:
+                              type: number
+                      byMerchant:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            merchantId:
+                              type: string
+                            name:
+                              type: string
+                            total:
+                              type: number
+                            count:
+                              type: number
+                required:
+                  - success
+                  - data
+        default:
+          $ref: "#/components/responses/Error"
+  /api/transactions/transfer:
+    post:
+      tags: [Transactions]
+      summary: Create transfer
+      operationId: createTransfer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransferCreateRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/TransferResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/transactions/{id}:
+    get:
+      tags: [Transactions]
+      summary: Get transaction
+      operationId: getTransaction
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/TransactionResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [Transactions]
+      summary: Update transaction
+      operationId: updateTransaction
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransactionUpdateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/TransactionResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Transactions]
+      summary: Delete transaction
+      operationId: deleteTransaction
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/transactions/{id}/attachments:
+    post:
+      tags: [Transactions]
+      summary: Upload transaction attachment
+      operationId: uploadTransactionAttachment
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                attachment:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+    get:
+      tags: [Transactions]
+      summary: List transaction attachments
+      operationId: listTransactionAttachments
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/transactions/{id}/attachments/{attachmentId}:
+    delete:
+      tags: [Transactions]
+      summary: Delete transaction attachment
+      operationId: deleteTransactionAttachment
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+        - name: attachmentId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/budgets:
+    get:
+      tags: [Budgets]
+      summary: List budgets
+      operationId: listBudgets
+      responses:
+        "200":
+          $ref: "#/components/responses/BudgetListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Budgets]
+      summary: Create budget
+      operationId: createBudget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BudgetCreateRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/BudgetResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/budgets/progress:
+    get:
+      tags: [Budgets]
+      summary: Budget progress
+      operationId: getBudgetProgress
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/budgets/alerts:
+    get:
+      tags: [Budgets]
+      summary: Budget alerts
+      operationId: getBudgetAlerts
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/budgets/{id}:
+    get:
+      tags: [Budgets]
+      summary: Get budget
+      operationId: getBudget
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/BudgetResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [Budgets]
+      summary: Update budget
+      operationId: updateBudget
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BudgetUpdateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/BudgetResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Budgets]
+      summary: Delete budget
+      operationId: deleteBudget
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/goals:
+    get:
+      tags: [Goals]
+      summary: List goals
+      operationId: listGoals
+      responses:
+        "200":
+          $ref: "#/components/responses/GoalListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Goals]
+      summary: Create goal
+      operationId: createGoal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GoalCreateRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/GoalResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/goals/{id}:
+    get:
+      tags: [Goals]
+      summary: Get goal
+      operationId: getGoal
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/GoalResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [Goals]
+      summary: Update goal
+      operationId: updateGoal
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GoalUpdateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/GoalResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Goals]
+      summary: Delete goal
+      operationId: deleteGoal
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/goals/{id}/contributions:
+    get:
+      tags: [Goals]
+      summary: List goal contributions
+      operationId: listGoalContributions
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/goals/{id}/contribute:
+    post:
+      tags: [Goals]
+      summary: Add goal contribution
+      operationId: addGoalContribution
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GoalContributionRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/goals/{id}/archive:
+    post:
+      tags: [Goals]
+      summary: Archive goal
+      operationId: archiveGoal
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/goals/{id}/unarchive:
+    post:
+      tags: [Goals]
+      summary: Unarchive goal
+      operationId: unarchiveGoal
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/recurring:
+    get:
+      tags: [Recurring]
+      summary: List recurring rules
+      operationId: listRecurring
+      responses:
+        "200":
+          $ref: "#/components/responses/RecurringListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Recurring]
+      summary: Create recurring rule
+      operationId: createRecurring
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecurringCreateRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/RecurringResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/recurring/upcoming:
+    get:
+      tags: [Recurring]
+      summary: List upcoming recurring items
+      operationId: listUpcomingRecurring
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/recurring/{id}:
+    get:
+      tags: [Recurring]
+      summary: Get recurring rule
+      operationId: getRecurring
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/RecurringResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      tags: [Recurring]
+      summary: Update recurring rule
+      operationId: updateRecurring
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecurringUpdateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/RecurringResponse"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Recurring]
+      summary: Delete recurring rule
+      operationId: deleteRecurring
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/recurring/{id}/skip:
+    post:
+      tags: [Recurring]
+      summary: Skip next occurrence
+      operationId: skipRecurring
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/recurring/{id}/pause:
+    post:
+      tags: [Recurring]
+      summary: Pause recurring rule
+      operationId: pauseRecurring
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/recurring/{id}/resume:
+    post:
+      tags: [Recurring]
+      summary: Resume recurring rule
+      operationId: resumeRecurring
+      parameters:
+        - $ref: "#/components/parameters/idParam"
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/recurring/process:
+    post:
+      tags: [Recurring]
+      summary: Process recurring items
+      operationId: processRecurring
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/cron/snapshots:
+    post:
+      tags: [Cron]
+      summary: Run daily snapshots
+      operationId: runSnapshots
+      security:
+        - cronSecret: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/cron/recurring:
+    post:
+      tags: [Cron]
+      summary: Process recurring transactions
+      operationId: runRecurringCron
+      security:
+        - cronSecret: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+  /api/cron/budget-rollover:
+    post:
+      tags: [Cron]
+      summary: Run budget rollover
+      operationId: runBudgetRollover
+      security:
+        - cronSecret: []
+      responses:
+        "200":
+          $ref: "#/components/responses/Success"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: connect.sid
+    cronSecret:
+      type: apiKey
+      in: header
+      name: x-cron-secret
+  parameters:
+    idParam:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    userIdParam:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    AuthLoginRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          minLength: 1
+          maxLength: 128
+        rememberMe:
+          type: boolean
+          default: false
+    AuthRegisterRequest:
+      type: object
+      required:
+        - email
+        - username
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+          pattern: "^[a-zA-Z0-9_-]+$"
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+        fullName:
+          type: string
+          minLength: 1
+          maxLength: 100
+    AuthMfaVerifyRequest:
+      type: object
+      required:
+        - code
+      properties:
+        code:
+          type: string
+          minLength: 6
+          maxLength: 64
+    AuthVerifyEmailRequest:
+      type: object
+      required:
+        - token
+      properties:
+        token:
+          type: string
+    AuthResendVerificationRequest:
+      type: object
+      required:
+        - email
+      properties:
+        email:
+          type: string
+          format: email
+    ChangePasswordRequest:
+      type: object
+      required:
+        - currentPassword
+        - newPassword
+        - confirmPassword
+      properties:
+        currentPassword:
+          type: string
+          minLength: 1
+        newPassword:
+          type: string
+          minLength: 8
+        confirmPassword:
+          type: string
+          minLength: 1
+    CsrfTokenResponse:
+      type: object
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          type: object
+          required:
+            - csrfToken
+          properties:
+            csrfToken:
+              type: string
+    MoneyDto:
+      type: object
+      description: Money representation with string amount to avoid floating-point precision issues
+      required:
+        - amount
+        - currency
+      properties:
+        amount:
+          type: string
+          pattern: '^-?\d+(\.\d{1,4})?$'
+          example: "1234.56"
+          description: Amount as string to preserve precision
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+          example: "ZMW"
+          description: ISO 4217 currency code
+    DecimalAmount:
+      type: string
+      pattern: '^-?\d+(\.\d{1,2})?$'
+      description: Decimal string with up to 2 decimal places
+    Pagination:
+      type: object
+      properties:
+        total:
+          type: number
+        page:
+          type: number
+        pageSize:
+          type: number
+        totalPages:
+          type: number
+        hasNext:
+          type: boolean
+        hasPrev:
+          type: boolean
+    Account:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        type:
+          type: string
+          enum:
+            - checking
+            - savings
+            - credit
+            - cash
+            - mobile_money
+            - investment
+            - loan
+            - mortgage
+            - other_liability
+            - real_estate
+            - vehicle
+            - other
+        subtype:
+          type: string
+          nullable: true
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        balance:
+          $ref: "#/components/schemas/DecimalAmount"
+        initialBalance:
+          $ref: "#/components/schemas/DecimalAmount"
+        institution:
+          type: string
+          nullable: true
+        accountNumber:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        isPrivate:
+          type: boolean
+        isHidden:
+          type: boolean
+        isArchived:
+          type: boolean
+        ownerUserId:
+          type: string
+          format: uuid
+          nullable: true
+        creditLimit:
+          $ref: "#/components/schemas/DecimalAmount"
+        apr:
+          type: string
+          nullable: true
+        statementDay:
+          type: number
+          nullable: true
+        estimatedValue:
+          $ref: "#/components/schemas/DecimalAmount"
+        purchaseDate:
+          type: string
+          format: date
+          nullable: true
+        address:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    AccountCreateRequest:
+      type: object
+      required:
+        - name
+        - type
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        type:
+          type: string
+          enum:
+            - checking
+            - savings
+            - credit
+            - cash
+            - mobile_money
+            - investment
+            - loan
+            - mortgage
+            - other_liability
+            - real_estate
+            - vehicle
+            - other
+        subtype:
+          type: string
+          nullable: true
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        initialBalance:
+          $ref: "#/components/schemas/DecimalAmount"
+        balance:
+          $ref: "#/components/schemas/DecimalAmount"
+        institution:
+          type: string
+          maxLength: 100
+          nullable: true
+        accountNumber:
+          type: string
+          maxLength: 50
+          nullable: true
+        notes:
+          type: string
+          maxLength: 500
+          nullable: true
+        isPrivate:
+          type: boolean
+        isHidden:
+          type: boolean
+        ownerUserId:
+          type: string
+          format: uuid
+          nullable: true
+        creditLimit:
+          $ref: "#/components/schemas/DecimalAmount"
+        apr:
+          type: number
+          minimum: 0
+          maximum: 100
+        statementDay:
+          type: number
+          minimum: 1
+          maximum: 31
+        estimatedValue:
+          $ref: "#/components/schemas/DecimalAmount"
+        purchaseDate:
+          type: string
+          format: date
+          nullable: true
+        address:
+          type: string
+          maxLength: 255
+          nullable: true
+    AccountUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+        subtype:
+          type: string
+          nullable: true
+        currency:
+          type: string
+        balance:
+          $ref: "#/components/schemas/DecimalAmount"
+        institution:
+          type: string
+          nullable: true
+        accountNumber:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        isPrivate:
+          type: boolean
+        isHidden:
+          type: boolean
+        isArchived:
+          type: boolean
+        ownerUserId:
+          type: string
+          format: uuid
+          nullable: true
+        creditLimit:
+          $ref: "#/components/schemas/DecimalAmount"
+        apr:
+          type: number
+        statementDay:
+          type: number
+        estimatedValue:
+          $ref: "#/components/schemas/DecimalAmount"
+        purchaseDate:
+          type: string
+          format: date
+          nullable: true
+        address:
+          type: string
+          nullable: true
+        displayOrder:
+          type: number
+        updatedAt:
+          type: string
+          format: date-time
+    BalanceAdjustmentRequest:
+      type: object
+      required:
+        - amount
+        - isIncrease
+      properties:
+        amount:
+          $ref: "#/components/schemas/DecimalAmount"
+        isIncrease:
+          type: boolean
+        notes:
+          type: string
+          maxLength: 500
+    CategoryGroup:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        type:
+          type: string
+          enum: [income, expense, expenses, transfers, other]
+        budgetMode:
+          type: string
+          enum: [by_category, by_group]
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        sortOrder:
+          type: number
+        isArchived:
+          type: boolean
+    Category:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        groupId:
+          type: string
+          format: uuid
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        sortOrder:
+          type: number
+        includeInBudget:
+          type: boolean
+        isArchived:
+          type: boolean
+    CategoryGroupCreateRequest:
+      type: object
+      required:
+        - name
+        - type
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        type:
+          type: string
+          enum: [income, expense, expenses, transfers, other]
+        budgetMode:
+          type: string
+          enum: [by_category, by_group]
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        sortOrder:
+          type: number
+        isArchived:
+          type: boolean
+    CategoryGroupUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [income, expense, expenses, transfers, other]
+        budgetMode:
+          type: string
+          enum: [by_category, by_group]
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        sortOrder:
+          type: number
+        isArchived:
+          type: boolean
+    CategoryCreateRequest:
+      type: object
+      required:
+        - name
+        - groupId
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        groupId:
+          type: string
+          format: uuid
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        sortOrder:
+          type: number
+        includeInBudget:
+          type: boolean
+        isArchived:
+          type: boolean
+    CategoryUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        groupId:
+          type: string
+          format: uuid
+        color:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        sortOrder:
+          type: number
+        includeInBudget:
+          type: boolean
+        isArchived:
+          type: boolean
+    Merchant:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        logoUrl:
+          type: string
+          nullable: true
+        category:
+          type: string
+          nullable: true
+        defaultCategoryId:
+          type: string
+          format: uuid
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        isActive:
+          type: boolean
+        iconType:
+          type: string
+          nullable: true
+        customIcon:
+          type: string
+          nullable: true
+    MerchantCreateRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        logoUrl:
+          type: string
+          format: uri
+          nullable: true
+        category:
+          type: string
+          nullable: true
+        defaultCategoryId:
+          type: string
+          format: uuid
+          nullable: true
+        notes:
+          type: string
+          maxLength: 1000
+          nullable: true
+        isActive:
+          type: boolean
+        iconType:
+          type: string
+          maxLength: 20
+          nullable: true
+        customIcon:
+          type: string
+          nullable: true
+    MerchantUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        logoUrl:
+          type: string
+          format: uri
+          nullable: true
+        category:
+          type: string
+          nullable: true
+        defaultCategoryId:
+          type: string
+          format: uuid
+          nullable: true
+        notes:
+          type: string
+          maxLength: 1000
+          nullable: true
+        isActive:
+          type: boolean
+        iconType:
+          type: string
+          maxLength: 20
+          nullable: true
+        customIcon:
+          type: string
+          nullable: true
+    MerchantMergeRequest:
+      type: object
+      required:
+        - sourceId
+        - targetId
+      properties:
+        sourceId:
+          type: string
+          format: uuid
+        targetId:
+          type: string
+          format: uuid
+    RuleCondition:
+      type: object
+      required:
+        - type
+        - operator
+        - value
+      properties:
+        type:
+          type: string
+        operator:
+          type: string
+        value:
+          oneOf:
+            - type: string
+            - type: number
+            - type: array
+              items:
+                type: string
+        value2:
+          oneOf:
+            - type: string
+            - type: number
+        enabled:
+          type: boolean
+    RuleSplitConfig:
+      type: object
+      properties:
+        categoryId:
+          type: string
+          format: uuid
+        amount:
+          type: number
+        percentage:
+          type: number
+        note:
+          type: string
+        merchantName:
+          type: string
+    RuleAction:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+        value:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        enabled:
+          type: boolean
+        splitConfig:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuleSplitConfig"
+    Rule:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        conditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuleCondition"
+        conditionLogic:
+          type: string
+          enum: [all, any]
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuleAction"
+        enabled:
+          type: boolean
+        priority:
+          type: number
+        applyToNew:
+          type: boolean
+        applyToPast:
+          type: boolean
+    RuleCreateRequest:
+      type: object
+      required:
+        - name
+        - conditions
+        - actions
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        conditions:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/RuleCondition"
+        conditionLogic:
+          type: string
+          enum: [all, any]
+        actions:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/RuleAction"
+        enabled:
+          type: boolean
+        priority:
+          type: number
+        applyToNew:
+          type: boolean
+        applyToPast:
+          type: boolean
+    RuleUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        conditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuleCondition"
+        conditionLogic:
+          type: string
+          enum: [all, any]
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuleAction"
+        enabled:
+          type: boolean
+        priority:
+          type: number
+        applyToNew:
+          type: boolean
+        applyToPast:
+          type: boolean
+    TransactionSplit:
+      type: object
+      properties:
+        amount:
+          $ref: "#/components/schemas/MoneyDto"
+        categoryId:
+          type: string
+          format: uuid
+          nullable: true
+        merchantId:
+          type: string
+          format: uuid
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+    Transaction:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+        amount:
+          $ref: "#/components/schemas/MoneyDto"
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        type:
+          type: string
+          enum: [income, expense, transfer]
+        date:
+          type: string
+          format: date
+        name:
+          type: string
+        description:
+          type: string
+        categoryId:
+          type: string
+          format: uuid
+          nullable: true
+        merchantId:
+          type: string
+          format: uuid
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        tags:
+          type: array
+          items:
+            type: string
+        splits:
+          type: array
+          items:
+            $ref: "#/components/schemas/TransactionSplit"
+        isRecurring:
+          type: boolean
+        recurringTransactionId:
+          type: string
+          format: uuid
+          nullable: true
+        recurringRuleId:
+          type: string
+          format: uuid
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    TransactionCreateRequest:
+      type: object
+      required:
+        - accountId
+        - amount
+        - type
+        - date
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        amount:
+          $ref: "#/components/schemas/MoneyDto"
+        type:
+          type: string
+          enum: [income, expense, transfer]
+        date:
+          type: string
+          format: date
+        name:
+          type: string
+        description:
+          type: string
+        categoryId:
+          type: string
+          format: uuid
+        merchantId:
+          type: string
+          format: uuid
+        notes:
+          type: string
+          maxLength: 1000
+        tags:
+          type: array
+          items:
+            type: string
+        splits:
+          type: array
+          items:
+            $ref: "#/components/schemas/TransactionSplit"
+        isRecurring:
+          type: boolean
+        recurringTransactionId:
+          type: string
+          format: uuid
+        recurringRuleId:
+          type: string
+          format: uuid
+        idempotencyKey:
+          type: string
+          format: uuid
+    TransactionUpdateRequest:
+      type: object
+      properties:
+        amount:
+          $ref: "#/components/schemas/MoneyDto"
+        type:
+          type: string
+          enum: [income, expense, transfer]
+        date:
+          type: string
+          format: date
+        name:
+          type: string
+        description:
+          type: string
+        categoryId:
+          type: string
+          format: uuid
+          nullable: true
+        merchantId:
+          type: string
+          format: uuid
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        tags:
+          type: array
+          items:
+            type: string
+        updatedAt:
+          type: string
+          format: date-time
+        expectedUpdatedAt:
+          type: string
+          format: date-time
+        ownerUserId:
+          type: string
+          format: uuid
+          nullable: true
+    TransferCreateRequest:
+      type: object
+      required:
+        - fromAccountId
+        - toAccountId
+        - amount
+      properties:
+        fromAccountId:
+          type: string
+          format: uuid
+        toAccountId:
+          type: string
+          format: uuid
+        amount:
+          $ref: "#/components/schemas/MoneyDto"
+        date:
+          type: string
+          format: date
+        name:
+          type: string
+        description:
+          type: string
+        notes:
+          type: string
+          maxLength: 1000
+        idempotencyKey:
+          type: string
+          format: uuid
+        fxRate:
+          type: string
+        fxSource:
+          type: string
+    TransferUpdateRequest:
+      type: object
+      properties:
+        fromAccountId:
+          type: string
+          format: uuid
+        toAccountId:
+          type: string
+          format: uuid
+        amount:
+          $ref: "#/components/schemas/MoneyDto"
+        date:
+          type: string
+          format: date
+        name:
+          type: string
+        description:
+          type: string
+        notes:
+          type: string
+          nullable: true
+        fxRate:
+          type: string
+        fxSource:
+          type: string
+    Budget:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        categoryId:
+          type: string
+          format: uuid
+          nullable: true
+        categoryGroupId:
+          type: string
+          format: uuid
+          nullable: true
+        amount:
+          $ref: "#/components/schemas/MoneyDto"
+        spent:
+          $ref: "#/components/schemas/MoneyDto"
+        remaining:
+          $ref: "#/components/schemas/MoneyDto"
+        period:
+          type: string
+          enum: [monthly]
+        rolloverEnabled:
+          type: boolean
+        warningThreshold:
+          type: number
+        alertThreshold:
+          type: number
+        isActive:
+          type: boolean
+    BudgetCreateRequest:
+      type: object
+      required:
+        - name
+        - amount
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        categoryId:
+          type: string
+          format: uuid
+          nullable: true
+        categoryGroupId:
+          type: string
+          format: uuid
+          nullable: true
+        amount:
+          $ref: "#/components/schemas/MoneyDto"
+        period:
+          type: string
+          enum: [monthly]
+        rolloverEnabled:
+          type: boolean
+        warningThreshold:
+          type: number
+        alertThreshold:
+          type: number
+        isActive:
+          type: boolean
+    BudgetUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        categoryId:
+          type: string
+          format: uuid
+          nullable: true
+        categoryGroupId:
+          type: string
+          format: uuid
+          nullable: true
+        amount:
+          $ref: "#/components/schemas/MoneyDto"
+        period:
+          type: string
+          enum: [monthly]
+        rolloverEnabled:
+          type: boolean
+        rolloverAmount:
+          $ref: "#/components/schemas/MoneyDto"
+        warningThreshold:
+          type: number
+        alertThreshold:
+          type: number
+        isActive:
+          type: boolean
+    BudgetMoveRequest:
+      type: object
+      required:
+        - fromBudgetId
+        - toBudgetId
+        - amount
+        - year
+        - month
+      properties:
+        fromBudgetId:
+          type: string
+          format: uuid
+        toBudgetId:
+          type: string
+          format: uuid
+        amount:
+          $ref: "#/components/schemas/MoneyDto"
+        year:
+          type: number
+        month:
+          type: number
+        applyScope:
+          type: string
+          enum: [this_month, all_future]
+        months:
+          type: number
+    Goal:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        type:
+          type: string
+          enum: [save_up, pay_down, investment]
+        goalType:
+          type: string
+        targetAmount:
+          $ref: "#/components/schemas/MoneyDto"
+        currentAmount:
+          $ref: "#/components/schemas/MoneyDto"
+        status:
+          type: string
+          enum: [on_track, behind, at_risk, completed]
+        startDate:
+          type: string
+          format: date
+        targetDate:
+          type: string
+          format: date
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+    GoalCreateRequest:
+      oneOf:
+        - $ref: "#/components/schemas/GoalSaveUpCreateRequest"
+        - $ref: "#/components/schemas/GoalPayDownCreateRequest"
+        - $ref: "#/components/schemas/GoalInvestmentCreateRequest"
+    GoalSaveUpCreateRequest:
+      type: object
+      required:
+        - name
+        - type
+        - goalType
+        - targetAmount
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        type:
+          type: string
+          enum: [save_up]
+        goalType:
+          type: string
+        description:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        color:
+          type: string
+          nullable: true
+        customImageUrl:
+          type: string
+          nullable: true
+        targetAmount:
+          $ref: "#/components/schemas/MoneyDto"
+        targetDate:
+          type: string
+          format: date
+          nullable: true
+        startDate:
+          type: string
+          format: date
+        spendingReducesProgress:
+          type: boolean
+        priority:
+          type: number
+        notes:
+          type: string
+          nullable: true
+    GoalPayDownCreateRequest:
+      type: object
+      required:
+        - name
+        - type
+        - goalType
+        - debtAccountId
+        - minimumPayment
+        - monthlyPayment
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        type:
+          type: string
+          enum: [pay_down]
+        goalType:
+          type: string
+        debtAccountId:
+          type: string
+          format: uuid
+        interestRate:
+          type: string
+        minimumPayment:
+          $ref: "#/components/schemas/MoneyDto"
+        monthlyPayment:
+          $ref: "#/components/schemas/MoneyDto"
+        oneTimePayment:
+          $ref: "#/components/schemas/MoneyDto"
+        payoffMethod:
+          type: string
+          enum: [avalanche, snowball, custom]
+        priority:
+          type: number
+        notes:
+          type: string
+          nullable: true
+    GoalInvestmentCreateRequest:
+      type: object
+      required:
+        - name
+        - type
+        - goalType
+        - targetAmount
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        type:
+          type: string
+          enum: [investment]
+        goalType:
+          type: string
+        description:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        color:
+          type: string
+          nullable: true
+        customImageUrl:
+          type: string
+          nullable: true
+        targetAmount:
+          $ref: "#/components/schemas/MoneyDto"
+        targetDate:
+          type: string
+          format: date
+          nullable: true
+        startDate:
+          type: string
+          format: date
+        linkedAccountId:
+          type: string
+          format: uuid
+          nullable: true
+        progressSource:
+          type: string
+          enum: [contributions, holdings]
+        expectedReturn:
+          type: string
+          nullable: true
+        inflationRate:
+          type: string
+          nullable: true
+        priority:
+          type: number
+        notes:
+          type: string
+          nullable: true
+    GoalUpdateRequest:
+      oneOf:
+        - $ref: "#/components/schemas/GoalSaveUpUpdateRequest"
+        - $ref: "#/components/schemas/GoalPayDownUpdateRequest"
+        - $ref: "#/components/schemas/GoalInvestmentUpdateRequest"
+    GoalSaveUpUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        goalType:
+          type: string
+        description:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        color:
+          type: string
+          nullable: true
+        customImageUrl:
+          type: string
+          nullable: true
+        targetAmount:
+          $ref: "#/components/schemas/MoneyDto"
+        targetDate:
+          type: string
+          format: date
+          nullable: true
+        startDate:
+          type: string
+          format: date
+        spendingReducesProgress:
+          type: boolean
+        priority:
+          type: number
+        notes:
+          type: string
+          nullable: true
+    GoalPayDownUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        goalType:
+          type: string
+        debtAccountId:
+          type: string
+          format: uuid
+        interestRate:
+          type: string
+        minimumPayment:
+          $ref: "#/components/schemas/MoneyDto"
+        monthlyPayment:
+          $ref: "#/components/schemas/MoneyDto"
+        oneTimePayment:
+          $ref: "#/components/schemas/MoneyDto"
+        payoffMethod:
+          type: string
+          enum: [avalanche, snowball, custom]
+        priority:
+          type: number
+        notes:
+          type: string
+          nullable: true
+    GoalInvestmentUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        goalType:
+          type: string
+        description:
+          type: string
+          nullable: true
+        icon:
+          type: string
+          nullable: true
+        color:
+          type: string
+          nullable: true
+        customImageUrl:
+          type: string
+          nullable: true
+        targetAmount:
+          $ref: "#/components/schemas/MoneyDto"
+        targetDate:
+          type: string
+          format: date
+          nullable: true
+        startDate:
+          type: string
+          format: date
+        linkedAccountId:
+          type: string
+          format: uuid
+          nullable: true
+        progressSource:
+          type: string
+          enum: [contributions, holdings]
+        expectedReturn:
+          type: string
+          nullable: true
+        inflationRate:
+          type: string
+          nullable: true
+        priority:
+          type: number
+        notes:
+          type: string
+          nullable: true
+    GoalContributionRequest:
+      type: object
+      required:
+        - amount
+      properties:
+        amount:
+          $ref: "#/components/schemas/MoneyDto"
+        date:
+          type: string
+          format: date
+        notes:
+          type: string
+          maxLength: 500
+        transactionId:
+          type: string
+          format: uuid
+    RecurringRule:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        amount:
+          $ref: "#/components/schemas/MoneyDto"
+        amountType:
+          type: string
+          enum: [fixed, variable]
+        amountTolerance:
+          type: number
+        type:
+          type: string
+          enum: [income, expense]
+        frequency:
+          type: string
+          enum: [daily, weekly, biweekly, monthly, quarterly, semi_annually, annually, yearly, custom]
+        categoryId:
+          type: string
+          format: uuid
+          nullable: true
+        merchantId:
+          type: string
+          format: uuid
+          nullable: true
+        intervalValue:
+          type: number
+        intervalUnit:
+          type: string
+          enum: [days, weeks, months, years]
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+          nullable: true
+        nextDueDate:
+          type: string
+          format: date
+        reminderDays:
+          type: number
+        reminderEmail:
+          type: boolean
+        reminderPush:
+          type: boolean
+        reminderInApp:
+          type: boolean
+        autoLinkEnabled:
+          type: boolean
+        autoMarkReviewed:
+          type: boolean
+        isSubscription:
+          type: boolean
+        notes:
+          type: string
+          nullable: true
+        isActive:
+          type: boolean
+        isPaused:
+          type: boolean
+    RecurringCreateRequest:
+      type: object
+      required:
+        - accountId
+        - name
+        - amount
+        - type
+        - frequency
+        - nextDueDate
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 255
+        amount:
+          $ref: "#/components/schemas/MoneyDto"
+        amountType:
+          type: string
+          enum: [fixed, variable]
+        amountTolerance:
+          type: number
+        type:
+          type: string
+          enum: [income, expense]
+        frequency:
+          type: string
+          enum: [daily, weekly, biweekly, monthly, quarterly, semi_annually, annually, yearly, custom]
+        categoryId:
+          type: string
+          format: uuid
+          nullable: true
+        merchantId:
+          type: string
+          format: uuid
+          nullable: true
+        intervalValue:
+          type: number
+        intervalUnit:
+          type: string
+          enum: [days, weeks, months, years]
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+          nullable: true
+        nextDueDate:
+          type: string
+          format: date
+        reminderDays:
+          type: number
+        reminderEmail:
+          type: boolean
+        reminderPush:
+          type: boolean
+        reminderInApp:
+          type: boolean
+        autoLinkEnabled:
+          type: boolean
+        autoMarkReviewed:
+          type: boolean
+        isSubscription:
+          type: boolean
+        trialEndDate:
+          type: string
+          format: date
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        isActive:
+          type: boolean
+    RecurringUpdateRequest:
+      type: object
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        amount:
+          $ref: "#/components/schemas/MoneyDto"
+        amountType:
+          type: string
+          enum: [fixed, variable]
+        amountTolerance:
+          type: number
+        type:
+          type: string
+          enum: [income, expense]
+        frequency:
+          type: string
+          enum: [daily, weekly, biweekly, monthly, quarterly, semi_annually, annually, yearly, custom]
+        categoryId:
+          type: string
+          format: uuid
+          nullable: true
+        merchantId:
+          type: string
+          format: uuid
+          nullable: true
+        intervalValue:
+          type: number
+        intervalUnit:
+          type: string
+          enum: [days, weeks, months, years]
+        endDate:
+          type: string
+          format: date
+          nullable: true
+        nextDueDate:
+          type: string
+          format: date
+        reminderDays:
+          type: number
+        reminderEmail:
+          type: boolean
+        reminderPush:
+          type: boolean
+        reminderInApp:
+          type: boolean
+        autoLinkEnabled:
+          type: boolean
+        autoMarkReviewed:
+          type: boolean
+        isSubscription:
+          type: boolean
+        trialEndDate:
+          type: string
+          format: date
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        isActive:
+          type: boolean
+        isPaused:
+          type: boolean
+    Household:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        currency:
+          type: string
+        timezone:
+          type: string
+          nullable: true
+        fiscalYearStartMonth:
+          type: number
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    HouseholdCreateRequest:
+      type: object
+      required:
+        - name
+        - currency
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+    HouseholdUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        currency:
+          type: string
+        fiscalYearStartMonth:
+          type: number
+          minimum: 1
+          maximum: 12
+    HouseholdMember:
+      type: object
+      properties:
+        userId:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [owner, admin, member, view_only]
+        email:
+          type: string
+          format: email
+          nullable: true
+    HouseholdUpdateMemberRoleRequest:
+      type: object
+      required:
+        - role
+      properties:
+        role:
+          type: string
+          enum: [owner, admin, member, view_only]
+    UserProfile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        username:
+          type: string
+        fullName:
+          type: string
+          nullable: true
+        firstName:
+          type: string
+          nullable: true
+        lastName:
+          type: string
+          nullable: true
+        displayName:
+          type: string
+          nullable: true
+        birthday:
+          type: string
+          format: date
+          nullable: true
+        timezone:
+          type: string
+          nullable: true
+        language:
+          type: string
+          nullable: true
+        bio:
+          type: string
+          nullable: true
+        profilePictureUrl:
+          type: string
+          nullable: true
+        bannerUrl:
+          type: string
+          nullable: true
+    UpdateProfileRequest:
+      type: object
+      properties:
+        fullName:
+          type: string
+          maxLength: 100
+        firstName:
+          type: string
+          maxLength: 50
+        lastName:
+          type: string
+          maxLength: 50
+        displayName:
+          type: string
+          maxLength: 50
+        birthday:
+          type: string
+          format: date
+          nullable: true
+        timezone:
+          type: string
+        language:
+          type: string
+        bio:
+          type: string
+          maxLength: 1000
+    DisplaySettings:
+      type: object
+      properties:
+        theme:
+          type: string
+          enum: [light, dark, system]
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        locale:
+          type: string
+        timezone:
+          type: string
+        numberFormat:
+          type: string
+          enum: [US, EU, IN]
+        dateFormat:
+          type: string
+        currencyPosition:
+          type: string
+          enum: [before, after]
+        firstDayOfWeek:
+          type: string
+          enum: [Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday]
+        viewMode:
+          type: string
+          enum: [compact, comfortable]
+        dashboardWidgets:
+          type: object
+          additionalProperties: true
+    UpdateDisplaySettingsRequest:
+      type: object
+      properties:
+        theme:
+          type: string
+          enum: [light, dark, system]
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        locale:
+          type: string
+          maxLength: 10
+        timezone:
+          type: string
+          maxLength: 100
+        numberFormat:
+          type: string
+          enum: [US, EU, IN]
+        dateFormat:
+          type: string
+          maxLength: 20
+        currencyPosition:
+          type: string
+          enum: [before, after]
+        firstDayOfWeek:
+          type: string
+          enum: [Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday]
+        viewMode:
+          type: string
+          enum: [compact, comfortable]
+        dashboardWidgets:
+          type: object
+          additionalProperties: true
+    NotificationPreference:
+      type: object
+      properties:
+        notificationType:
+          type: string
+        inAppEnabled:
+          type: boolean
+        emailEnabled:
+          type: boolean
+        pushEnabled:
+          type: boolean
+        thresholdAmount:
+          type: string
+          nullable: true
+    UpdateNotificationPreferencesRequest:
+      type: object
+      properties:
+        preferences:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationPreference"
+    UserPreferences:
+      type: object
+      properties:
+        theme:
+          type: string
+          enum: [light, dark, system]
+        dateFormat:
+          type: string
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        weekStartDay:
+          type: number
+        notificationsEnabled:
+          type: boolean
+    HouseholdResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                household:
+                  $ref: "#/components/schemas/Household"
+                preferences:
+                  $ref: "#/components/schemas/UserPreferences"
+    HouseholdMembersResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                members:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/HouseholdMember"
+    ProfileResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                profile:
+                  $ref: "#/components/schemas/UserProfile"
+    DisplaySettingsResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                settings:
+                  $ref: "#/components/schemas/DisplaySettings"
+    NotificationPreferencesResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                preferences:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/NotificationPreference"
+    AccountListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/Account"
+    AccountResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Account"
+    CategoryGroupsResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                groups:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/CategoryGroup"
+    CategoriesResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                categories:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Category"
+                groups:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/CategoryGroup"
+    CategoryResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                category:
+                  $ref: "#/components/schemas/Category"
+    CategoryGroupResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                group:
+                  $ref: "#/components/schemas/CategoryGroup"
+    MerchantListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                merchants:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Merchant"
+    MerchantResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                merchant:
+                  $ref: "#/components/schemas/Merchant"
+    RuleListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                rules:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/Rule"
+    RuleResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                rule:
+                  $ref: "#/components/schemas/Rule"
+    TransactionListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/Transaction"
+            pagination:
+              type: object
+              properties:
+                limit:
+                  type: number
+                offset:
+                  type: number
+                count:
+                  type: number
+                totalCount:
+                  type: number
+                total:
+                  type: number
+                page:
+                  type: number
+                pageSize:
+                  type: number
+                hasNext:
+                  type: boolean
+                hasPrev:
+                  type: boolean
+    TransactionResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Transaction"
+    TransferResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                outflow:
+                  $ref: "#/components/schemas/Transaction"
+                inflow:
+                  $ref: "#/components/schemas/Transaction"
+    BudgetListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/Budget"
+    BudgetResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Budget"
+    GoalListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/Goal"
+    GoalResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/Goal"
+    RecurringListResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/RecurringRule"
+    RecurringResponse:
+      allOf:
+        - $ref: "#/components/schemas/SuccessResponse"
+        - type: object
+          properties:
+            data:
+              $ref: "#/components/schemas/RecurringRule"
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data: {}
+        meta:
+          type: object
+          additionalProperties: true
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+        isDuplicate:
+          type: boolean
+      required:
+        - success
+        - data
+    ErrorResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        error:
+          type: object
+          additionalProperties: true
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+      required:
+        - success
+        - error
+  responses:
+    Success:
+      description: Success
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SuccessResponse"
+    Created:
+      description: Created
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SuccessResponse"
+    Error:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    ProfileResponse:
+      description: Profile response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProfileResponse"
+    DisplaySettingsResponse:
+      description: Display settings response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/DisplaySettingsResponse"
+    NotificationPreferencesResponse:
+      description: Notification preferences response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/NotificationPreferencesResponse"
+    HouseholdResponse:
+      description: Household response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HouseholdResponse"
+    HouseholdMembersResponse:
+      description: Household members response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HouseholdMembersResponse"
+    AccountListResponse:
+      description: Account list response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AccountListResponse"
+    AccountResponse:
+      description: Account response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AccountResponse"
+    CategoryGroupsResponse:
+      description: Category groups response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CategoryGroupsResponse"
+    CategoryGroupResponse:
+      description: Category group response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CategoryGroupResponse"
+    CategoriesResponse:
+      description: Categories response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CategoriesResponse"
+    CategoryResponse:
+      description: Category response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CategoryResponse"
+    MerchantListResponse:
+      description: Merchant list response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MerchantListResponse"
+    MerchantResponse:
+      description: Merchant response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/MerchantResponse"
+    RuleListResponse:
+      description: Rule list response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RuleListResponse"
+    RuleResponse:
+      description: Rule response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RuleResponse"
+    TransactionListResponse:
+      description: Transaction list response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TransactionListResponse"
+    TransactionResponse:
+      description: Transaction response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TransactionResponse"
+    TransferResponse:
+      description: Transfer response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TransferResponse"
+    BudgetListResponse:
+      description: Budget list response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BudgetListResponse"
+    BudgetResponse:
+      description: Budget response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BudgetResponse"
+    GoalListResponse:
+      description: Goal list response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GoalListResponse"
+    GoalResponse:
+      description: Goal response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GoalResponse"
+    RecurringListResponse:
+      description: Recurring list response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RecurringListResponse"
+    RecurringResponse:
+      description: Recurring response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RecurringResponse"

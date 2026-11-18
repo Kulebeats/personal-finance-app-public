@@ -1,0 +1,7 @@
+
+> rest-express@1.0.0 check
+> tsc
+
+client/src/components/transactions/AddTransactionModal.tsx(527,15): error TS2353: Object literal may only specify known properties, and 'name' does not exist in type 'UpdateTransferInput'.
+client/src/components/transactions/AddTransactionModal.tsx(592,13): error TS2353: Object literal may only specify known properties, and 'name' does not exist in type 'CreateTransferInput'.
+client/src/components/transactions/AddTransactionModal.tsx(684,17): error TS2322: Type 'string' is not assignable to type 'MoneyDto'.

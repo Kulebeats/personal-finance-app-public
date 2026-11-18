@@ -1,0 +1,6 @@
+title = "Finance App Gitleaks Config"
+
+[allowlist]
+paths = [
+  '''\.env\.example''',
+]
