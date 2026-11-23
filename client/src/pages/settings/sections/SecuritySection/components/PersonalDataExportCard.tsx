@@ -66,7 +66,7 @@ export function PersonalDataExportCard() {
   return (
     <SettingsCard
       title="Your data"
-      description="Download a copy of your profile and the household data you can see as one ZIP file: a JSON document plus a CSV sheet for each section, covering accounts, transactions, categories, goals, budgets, recurring rules, investment holdings, government bonds and treasury bills, receipt details and tags. Other members' private data is never included. Each file can be downloaded for 7 days."
+      description="Download a copy of your profile and the household data you can see as one ZIP file: a JSON document plus a CSV sheet for each section, covering accounts, transactions, categories, goals, budgets, recurring rules, investment holdings and activity, government bonds and treasury bills, receipt details, tags, saved views, your assistant conversations and your weekly recap feedback. Other members' private data is never included. Each file can be downloaded for 7 days."
       action={
         <Button onClick={() => requestExport.mutate()} disabled={requestExport.isPending}>
           {requestExport.isPending ? (

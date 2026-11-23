@@ -63,7 +63,7 @@ export function amountOf(amount: string | null | undefined, currency: string | n
 }
 
 /** An optional amount: null when it does not apply, an unavailable amount when withheld. */
-function optionalAmount(amount: string | null, currency: string | null, withheld = false): PersonalExportAmount | null {
+export function optionalAmount(amount: string | null, currency: string | null, withheld = false): PersonalExportAmount | null {
   return amount === null && !withheld ? null : amountOf(amount, currency);
 }
 
@@ -131,7 +131,8 @@ async function readHoldings(tx: TransactionType, actor: HouseholdContext) {
   return rows.map(({ costBasis, costBasisZmw, currentPrice, ...rest }) => ({
     ...rest,
     costBasis: amountOf(costBasis, rest.securityCurrency),
-    costBasisZmw: optionalAmount(costBasisZmw, "ZMW"),
+    // A foreign holding's kwacha basis can be unknown (no acquisition rate); a kwacha one has none to give.
+    costBasisZmw: optionalAmount(costBasisZmw, "ZMW", rest.securityCurrency !== "ZMW"),
     // No price (or an ambiguous household mark) is unavailable, never zero.
     currentPrice: amountOf(currentPrice, rest.securityCurrency),
   }));
