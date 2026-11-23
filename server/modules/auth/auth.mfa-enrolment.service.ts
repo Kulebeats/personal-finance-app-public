@@ -31,7 +31,7 @@ import { isMfaGraceOver } from "./auth.mfa-compliance";
 import { withTransaction, type TransactionType } from "../../utils/withTransaction";
 import { lockCurrentSessionCredential } from "../../services/session-identity";
 import { isEmailServiceConfigured, sendMfaCodeEmail } from "../../services/emailService";
-import { AuditEventType } from "../../services/AuditService";
+import { AuditEventType, auditService } from "../../services/AuditService";
 import { generateBackupCodes, generateMfaCode, MFA_CODE_TTL_MS } from "../../routes/security.mfa.utils";
 
 /** Whether the operation expects MFA to be on (disable, regenerate) or off (enrol). */
@@ -159,14 +159,28 @@ export async function disableMfa(req: Request, password: string, code: string): 
   const snapshot = await loadSnapshot(req);
   if (!(await verifyPassword(password, snapshot.passwordHash))) throw new InvalidCredentialsError("That password is not correct.");
   await proveCode(req, snapshot, code, "disable");
-  await consumeCodeAndApply(req, snapshot, "on", async (tx, current) => {
-    // AH-11: after the grace MFA is mandatory; checked on the locked row, so the code is not consumed.
-    if (isMfaGraceOver(current)) throw new MfaRequiredError();
-    await tx.update(users).set({
-      mfaEnabled: false, mfaMethod: null, mfaCode: null, mfaCodeExpiry: null,
-      mfaBackupCodes: null, mfaBackupCodesGeneratedAt: null, updatedAt: new Date(),
-    }).where(eq(users.id, current.id));
-    await writeAudit(tx, req, current.id, AuditEventType.MFA_DISABLED, { method: "email" });
+  try {
+    await consumeCodeAndApply(req, snapshot, "on", async (tx, current) => {
+      // AH-11: after the grace MFA is mandatory; checked on the locked row, so the code is not consumed.
+      if (isMfaGraceOver(current)) throw new MfaRequiredError();
+      await tx.update(users).set({
+        mfaEnabled: false, mfaMethod: null, mfaCode: null, mfaCodeExpiry: null,
+        mfaBackupCodes: null, mfaBackupCodesGeneratedAt: null, updatedAt: new Date(),
+      }).where(eq(users.id, current.id));
+      await writeAudit(tx, req, current.id, AuditEventType.MFA_DISABLED, { method: "email" });
+    });
+  } catch (error) {
+    if (error instanceof MfaRequiredError) await auditDisableRefused(req, snapshot.id);
+    throw error;
+  }
+}
+
+/** Written after the rolled-back transaction, so the refusal survives it. */
+async function auditDisableRefused(req: Request, userId: string): Promise<void> {
+  await auditService.log({
+    eventType: AuditEventType.MFA_DISABLE_REFUSED, userId,
+    ipAddress: req.ip || req.socket?.remoteAddress, userAgent: req.headers["user-agent"],
+    details: { reason: "mfa_required_after_grace" },
   });
 }
 
