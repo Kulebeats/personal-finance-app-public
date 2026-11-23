@@ -10,7 +10,10 @@
  * - saved views go through the saved-view viewer mapping, so a filter on an
  *   account the requester cannot see is withheld and the view is `restricted`;
  * - investment activity goes through the activity visibility predicate
- *   (account, holding and linked cash must all be visible).
+ *   (account, holding and linked cash must all be visible), and its notes
+ *   through the same custody projection as the activity list (R1-05): a bond
+ *   sale or T-bill maturity whose custody the requester cannot see reads its
+ *   generic label, never the instrument's name.
  * Other members' user ids never leave: a view says whether it is yours.
  */
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
@@ -21,6 +24,7 @@ import type { TransactionType } from "../../utils/withTransaction";
 import type { HouseholdContext } from "../../middleware/householdGuard";
 import { can } from "../../core/authz/capabilities";
 import { visibleInvestmentTransactionPredicate } from "../../core/authz/investment-visibility";
+import { investmentNotesProjection } from "../../services/grz/instrumentIdentity";
 import { toViewerViews } from "../saved-views/saved-views.references";
 import { amountOf, optionalAmount, type ExportRow } from "./settings.privacy-export.sections";
 
@@ -86,7 +90,7 @@ async function readSavedViews(tx: TransactionType, actor: HouseholdContext) {
 }
 
 async function readInvestmentActivity(tx: TransactionType, actor: HouseholdContext) {
-  const rows = await tx.select(investmentActivityColumns).from(investmentTransactions)
+  const rows = await tx.select({ ...investmentActivityColumns, notes: investmentNotesProjection(actor) }).from(investmentTransactions)
     .where(visibleInvestmentTransactionPredicate(actor))
     .orderBy(asc(investmentTransactions.transactionDate), asc(investmentTransactions.id));
   return rows.map(({ price, amount, amountZmw, fees, withholdingTax, ...rest }) => ({
