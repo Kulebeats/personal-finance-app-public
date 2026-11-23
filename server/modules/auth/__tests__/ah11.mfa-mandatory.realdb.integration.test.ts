@@ -36,6 +36,7 @@ const password = "SyntheticAh11Password123!";
 // bcryptjs cost 12 is ~0.5s per hash or verify; each case signs in and steps up.
 const BCRYPT_HEAVY_TIMEOUT_MS = 120_000;
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 const mfa = "/api/settings/security/mfa";
 const created: Array<{ userId: string; householdId: string }> = [];
 let app: Awaited<ReturnType<typeof getTestApp>>;
@@ -55,6 +56,11 @@ const post = (member: Member, path: string, body: object = {}) => signed(member,
 
 async function setGrace(userId: string, sqlInterval: string) {
   await pool.query(`UPDATE users SET mfa_grace_ends_at = now() + interval '${sqlInterval}' WHERE id = $1`, [userId]);
+}
+async function auditCount(userId: string, eventType: string): Promise<number> {
+  const { rows: [row] } = await pool.query(
+    "SELECT count(*)::int AS n FROM security_audit_logs WHERE user_id = $1 AND event_type = $2", [userId, eventType]);
+  return row.n;
 }
 async function mfaEnabled(userId: string): Promise<boolean> {
   const { rows: [row] } = await pool.query("SELECT mfa_enabled FROM users WHERE id = $1", [userId]);
@@ -111,14 +117,15 @@ describe("AH-11 mandatory MFA after a 14-day grace (real HTTP, real PostgreSQL)"
   });
 
   it("inside the grace a member without MFA works and is told the deadline", async () => {
-    const member = await newMember();
+    // An hour short of 14 days, so daysRemaining is 14 even if the Node and Postgres clocks differ by seconds.
+    const member = await newMember("13 days 23 hours");
     expect(member.loginBody).toMatchObject({ mfa: { state: "grace" } });
     expect(member.loginBody).not.toHaveProperty("suggestMfa");
     await get(member, "/api/accounts").expect(200);
     const status = await get(member, "/api/auth/session").expect(200);
     expect(status.body.data).toMatchObject({ state: "ready", mfa: { state: "grace", daysRemaining: 14 } });
     const graceEndsAt = Date.parse(status.body.data.mfa.graceEndsAt);
-    expect(Math.abs(graceEndsAt - Date.now() - 14 * DAY_MS)).toBeLessThan(60_000);
+    expect(Math.abs(graceEndsAt - Date.now() - (14 * DAY_MS - HOUR_MS))).toBeLessThan(60_000);
     const policy = await get(member, `${mfa}/status`).expect(200);
     expect(policy.body.data.policy).toMatchObject({ required: true, state: "grace", daysRemaining: 14 });
   });
@@ -192,6 +199,24 @@ describe("AH-11 mandatory MFA after a 14-day grace (real HTTP, real PostgreSQL)"
     expect(refused.status).toBe(409);
     expect(refused.body.error.code).toBe("MFA_REQUIRED");
     expect(await mfaEnabled(member.userId)).toBe(true);
+    // The refusal is audited even though the disable transaction rolled back.
+    expect(await auditCount(member.userId, "MFA_DISABLE_REFUSED")).toBe(1);
+    expect(await auditCount(member.userId, "MFA_DISABLED")).toBe(0);
+    // Settings learns that "Turn off" is not available.
+    const status = await get(member, `${mfa}/status`).expect(200);
+    expect(status.body.data).toMatchObject({ mfaEnabled: true, canDisable: false });
+  });
+
+  it("inside the grace a member can still turn MFA off", async () => {
+    const member = await newMember();
+    await enrol(member);
+    const status = await get(member, `${mfa}/status`).expect(200);
+    expect(status.body.data).toMatchObject({ mfaEnabled: true, canDisable: true });
+    await post(member, "/api/settings/security/step-up", { password }).expect(200);
+    await post(member, `${mfa}/code`, { purpose: "disable" }).expect(200);
+    await post(member, `${mfa}/disable`, { password, code: lastCodeFor(member.email) }).expect(200);
+    expect(await mfaEnabled(member.userId)).toBe(false);
+    expect(await auditCount(member.userId, "MFA_DISABLE_REFUSED")).toBe(0);
   });
 
   it("an unverified member past the grace is asked to verify email first", async () => {
