@@ -180,6 +180,15 @@ describe("runScheduledJob", () => {
     expect(run).toHaveBeenCalledOnce();
   });
 
+  it("skips without running when the journal finds the period completed as the run starts", async () => {
+    const { deps } = fakeLockDependencies();
+    const run = vi.fn(async () => ({ processed: 1 }));
+
+    await expect(runScheduledJob(job(run), { ...deps, startRun: vi.fn(async () => null) }, NOW))
+      .resolves.toEqual({ status: "skipped", reason: "PERIOD_DONE" });
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("passes a caller's bound on the job-lock wait to the lock request", async () => {
     const { deps } = fakeLockDependencies();
     const withLock = vi.spyOn(deps, "withLock");
