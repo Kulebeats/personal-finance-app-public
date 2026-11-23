@@ -5,8 +5,10 @@
  * today is the day they chose (Monday when none is saved). Each send goes
  * through the R16.2 delivery ledger under one event per household
  * Monday-to-Sunday week, so a re-run, a retry or a day moved later in the
- * week sends nothing more once that week is sent. A failed send, or one
- * withheld for consent or preference, may be tried again by a later run.
+ * week sends nothing more once that week is sent. Only a send SMTP definitely
+ * refused, or one withheld for consent, preference or an unverified address,
+ * may be tried again by a later run. A send SMTP may have accepted is never
+ * repeated, and neither is one accepted whose egress audit row failed.
  *
  * @module modules/weekly-recap/recap-schedule
  */
@@ -16,13 +18,21 @@ import { weekContaining, weekdayOf } from "./recap-week";
 const LEDGER_WEEK_START_MONDAY = 1;
 const RECAP_EVENT_PREFIX = "weekly_recap:week-of:";
 const FAILED_REASON = "recap_failed";
+const UNCONFIRMED_REASON = "smtp_unconfirmed";
+const UNAUDITED_REASON = "audit_failed";
+
+/** The outcomes of one recap send that are not a delivery; each may be taken again later. */
+export type WithheldRecap = "skipped_no_consent" | "skipped_preference" | "skipped_unverified";
+const WITHHELD: readonly WithheldRecap[] = ["skipped_no_consent", "skipped_preference", "skipped_unverified"];
+
+/**
+ * Outcome of attempting to send one weekly-recap digest.
+ * `unknown`: SMTP may have accepted it. `sent_unaudited`: accepted, but the egress audit row failed.
+ */
+export type RecapSendOutcome = "sent" | "sent_unaudited" | "unknown" | "failed" | WithheldRecap;
 
 /** What one user's scheduled send came to. `done`: this week was already settled. */
-export type ScheduledRecapResult = "sent" | "skipped" | "failed" | "done";
-
-/** The outcomes of one recap send that are not a delivery. */
-export type WithheldRecap = "skipped_no_consent" | "skipped_preference";
-const WITHHELD: readonly WithheldRecap[] = ["skipped_no_consent", "skipped_preference"];
+export type ScheduledRecapResult = "sent" | "sent_unaudited" | "skipped" | "failed" | "done";
 
 /** Whether the user's recap day is the household's `today` (YYYY-MM-DD). */
 export function isRecapDay(today: string, dayOfWeek: number): boolean {
@@ -34,8 +44,10 @@ export function recapWeekEventKey(today: string): string {
   return `${RECAP_EVENT_PREFIX}${weekContaining(today, LEDGER_WEEK_START_MONDAY).from}`;
 }
 
-function channelResult(outcome: "sent" | "failed" | WithheldRecap): ChannelResult {
+function channelResult(outcome: RecapSendOutcome): ChannelResult {
   if (outcome === "sent") return { status: "sent" };
+  if (outcome === "sent_unaudited") return { status: "sent", reason: UNAUDITED_REASON };
+  if (outcome === "unknown") return { status: "unknown", reason: UNCONFIRMED_REASON };
   if (outcome === "failed") return { status: "failed", reason: FAILED_REASON };
   return { status: "suppressed", reason: outcome };
 }
@@ -44,12 +56,17 @@ function channelResult(outcome: "sent" | "failed" | WithheldRecap): ChannelResul
 export async function deliverWeeklyRecapOnce(
   userId: string,
   today: string,
-  send: () => Promise<"sent" | "failed" | WithheldRecap>,
+  send: () => Promise<RecapSendOutcome>,
 ): Promise<ScheduledRecapResult> {
-  const outcome = await deliverOnce(userId, recapWeekEventKey(today), "email",
-    async () => channelResult(await send()), { retrySuppressed: WITHHELD });
+  let sendOutcome: RecapSendOutcome | undefined;
+  const outcome = await deliverOnce(userId, recapWeekEventKey(today), "email", async () => {
+    sendOutcome = await send();
+    return channelResult(sendOutcome);
+  }, { retrySuppressed: WITHHELD });
   if (!outcome.attempted) return "done";
+  if (sendOutcome === "sent_unaudited") return "sent_unaudited";
   if (outcome.status === "sent") return "sent";
   if (outcome.status === "suppressed") return "skipped";
+  // Failed, or unknown (SMTP may have accepted it): either way the run needs looking at.
   return "failed";
 }
