@@ -28,6 +28,8 @@ export interface MfaStatus {
   backupCodesRemaining: number;
   lowCodesWarning: boolean;
   policy?: MfaPolicy | null;
+  /** False once MFA is mandatory for this member (past the grace). */
+  canDisable?: boolean;
 }
 
 export interface Session {

@@ -52,9 +52,15 @@ export function MfaCard() {
             {isOn ? (
               <>
                 <Button variant="outline" onClick={() => setAction("regenerate")}>Create new backup codes</Button>
-                <Button variant="outline" className="text-destructive" onClick={() => setAction("disable")}>
-                  Turn off
-                </Button>
+                {status.canDisable === false ? (
+                  <p className="text-sm text-muted-foreground self-center">
+                    Two-step verification is required for every member, so it can't be turned off.
+                  </p>
+                ) : (
+                  <Button variant="outline" className="text-destructive" onClick={() => setAction("disable")}>
+                    Turn off
+                  </Button>
+                )}
               </>
             ) : (
               <Button onClick={() => setAction("enable")}>Turn on two-step verification</Button>

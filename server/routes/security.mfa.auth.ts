@@ -29,7 +29,7 @@ import { requireStepUp } from "../middleware/requireStepUp";
 import { logger } from "../utils/logger";
 import { success } from "../core/http";
 import { ValidationError } from "../core/errors";
-import { mfaCompliance } from "../modules/auth/auth.mfa-compliance";
+import { isMfaGraceOver, mfaCompliance } from "../modules/auth/auth.mfa-compliance";
 import {
   confirmMfaEnrolment, disableMfa, regenerateMfaBackupCodes, sendMfaSettingsCode,
 } from "../modules/auth/auth.mfa-enrolment.service";
@@ -119,6 +119,8 @@ export function registerMfaAuthRoutes(router: Router): void {
       lowCodesWarning: mfaEnabled && backupCodesRemaining <= LOW_BACKUP_CODES_THRESHOLD,
       // AH-11: every member needs MFA; `state` says whether this one is in the grace or past it.
       policy: user ? { required: true, ...mfaCompliance(user) } : null,
+      // After the grace the server refuses disable (409 MFA_REQUIRED), so Settings hides "Turn off".
+      canDisable: mfaEnabled && !!user && !isMfaGraceOver(user),
     });
   }));
 }
