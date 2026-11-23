@@ -19,11 +19,10 @@ import { effectiveRecapEmail } from "../../repositories/UserNotificationPreferen
 import { readDigestRelease, type DigestData } from "./digest-release";
 import { getWeeklyRecapSettings } from "../../repositories/UserDisplayPreferences";
 import { previousCompleteWeek, readHouseholdToday, upcomingBillsWindow, type RecapWeek } from "./recap-week";
-import { deliverWeeklyRecapOnce, isRecapDay } from "./recap-schedule";
+import { deliverWeeklyRecapOnce, isRecapDay, type RecapSendOutcome } from "./recap-schedule";
 import { escapeHtml } from "../../services/notification/escape";
 
-/** Outcome of attempting to send one weekly-recap digest. */
-export type RecapSendOutcome = "sent" | "skipped_no_consent" | "skipped_preference" | "failed";
+export type { RecapSendOutcome } from "./recap-schedule";
 
 // The shared helper also escapes quotes, which the previous inline version did not.
 const htmlText = escapeHtml;
@@ -284,16 +283,47 @@ async function readDeliveryGrant(userId: string, householdId: string, email: str
     ))
     .where(and(eq(householdMembers.householdId, householdId), eq(householdMembers.userId, userId)));
   const recipient = grants[0];
-  if (!recipient || !can(recipient.role, "financial.read") || !recipient.verified || recipient.email !== email) return { outcome: "failed" } as const;
+  if (!recipient || !can(recipient.role, "financial.read") || recipient.email !== email) return { outcome: "failed" } as const;
+  // OPS-007 P2: not yet deliverable rather than broken; sent once the address is verified.
+  if (!recipient.verified) return { outcome: "skipped_unverified" } as const;
   if (!recipient.consent) return { outcome: "skipped_no_consent" } as const;
   if (!effectiveRecapEmail(grants)) return { outcome: "skipped_preference" } as const;
   return { outcome: "ready", role: recipient.role, currency: recipient.currency } as const;
+}
+
+/** The digest HTML, or why there is none to send. Nothing has left the server yet. */
+async function prepareRecapEmail(
+  userId: string, householdId: string, email: string, weekStart: string, weekEnd: string, bills?: RecapWeek,
+): Promise<{ outcome: "ready"; html: string } | { outcome: Exclude<RecapSendOutcome, "sent" | "sent_unaudited" | "unknown"> }> {
+  try {
+    // SCP-319: DPA consent gate. A weekly recap is a financial-PII digest, so it
+    // must NEVER be emailed without the household's explicit consent
+    // (households.aiConsentGiven, which covers AI + recap egress). Consent
+    // defaults to false, so an un-consented household is silently excluded.
+    const grant = await readDeliveryGrant(userId, householdId, email);
+    if (grant.outcome !== "ready") return { outcome: grant.outcome };
+    if (!grant.currency) throw new Error("Missing household currency for recap");
+    const actor = await requireRecapRecipient(householdId, userId);
+    // OPS-007: excluded upcoming bills are never read for the digest.
+    const { includeRecurring } = await getWeeklyRecapSettings(userId);
+    const billsWindow = bills ?? { from: weekStart, to: weekEnd };
+    const release = await readDigestRelease(actor, email, weekStart, weekEnd, grant.currency, { includeRecurring, bills: billsWindow });
+    if (release.outcome !== "ready") return { outcome: release.outcome };
+    return { outcome: "ready", html: generateEmailTemplate(release.data, grant.currency) };
+  } catch (error) {
+    logger.error("Failed to prepare weekly recap email", { userId }, error as Error);
+    return { outcome: "failed" };
+  }
 }
 
 /**
  * Send weekly recap email to a user. Spending covers weekStart..weekEnd; the
  * bills are those due in `bills`, by default the same dates. The scheduled
  * digest passes the household's next seven dates (A-26).
+ *
+ * OPS-007 P2: only a send SMTP definitely refused is "failed" (retryable). An
+ * ambiguous SMTP reply is "unknown" and an audit failure after acceptance is
+ * "sent_unaudited"; the ledger never repeats either.
  */
 export async function sendWeeklyRecapEmail(
   userId: string,
@@ -303,32 +333,23 @@ export async function sendWeeklyRecapEmail(
   weekEnd: string,
   bills?: RecapWeek,
 ): Promise<RecapSendOutcome> {
-  try {
-    // SCP-319: DPA consent gate. A weekly recap is a financial-PII digest, so it
-    // must NEVER be emailed without the household's explicit consent
-    // (households.aiConsentGiven, which covers AI + recap egress). Consent
-    // defaults to false, so an un-consented household is silently excluded.
-    const grant = await readDeliveryGrant(userId, householdId, email);
-    if (grant.outcome !== "ready") return grant.outcome;
-    if (!grant.currency) throw new Error("Missing household currency for recap");
-    const actor = await requireRecapRecipient(householdId, userId);
-    // OPS-007: excluded upcoming bills are never read for the digest.
-    const { includeRecurring } = await getWeeklyRecapSettings(userId);
-    const billsWindow = bills ?? { from: weekStart, to: weekEnd };
-    const release = await readDigestRelease(actor, email, weekStart, weekEnd, grant.currency, { includeRecurring, bills: billsWindow });
-    if (release.outcome !== "ready") return release.outcome;
-    const html = generateEmailTemplate(release.data, grant.currency);
+  const prepared = await prepareRecapEmail(userId, householdId, email, weekStart, weekEnd, bills);
+  if (prepared.outcome !== "ready") return prepared.outcome;
 
+  try {
     const sent = await sendEmail({
       to: email,
       subject: `📊 Your Weekly Financial Recap (${weekStart} to ${weekEnd})`,
-      html,
+      html: prepared.html,
+      throwOnUnknownDelivery: true,
     });
+    if (!sent) return "failed";
+  } catch (error) {
+    logger.error("Weekly recap email: SMTP acceptance unknown", { userId }, error as Error);
+    return "unknown";
+  }
 
-    if (!sent) {
-      return "failed";
-    }
-
+  try {
     // SCP-319: DPA audit — record the financial-PII email egress (metadata only,
     // never the recap contents) so each send is traceable.
     await businessAuditService.log({
@@ -344,17 +365,17 @@ export async function sendWeeklyRecapEmail(
         recipient: email.substring(0, 3) + "***",
       },
     });
-
-    logger.info("Weekly recap email sent", {
-      userId: userId.substring(0, 8) + "...",
-      email: email.substring(0, 3) + "***",
-    });
-
-    return "sent";
   } catch (error) {
-    logger.error("Failed to send weekly recap email", { userId }, error as Error);
-    return "failed";
+    // The e-mail left the server: it must not be sent again, but its missing egress row must be seen.
+    logger.error("Weekly recap email sent but its egress audit row failed", { userId, weekStart, weekEnd }, error as Error);
+    return "sent_unaudited";
   }
+
+  logger.info("Weekly recap email sent", {
+    userId: userId.substring(0, 8) + "...",
+    email: email.substring(0, 3) + "***",
+  });
+  return "sent";
 }
 
 /**
@@ -400,9 +421,10 @@ export async function processWeeklyRecapEmails(
           },
         });
 
+        // OPS-007 P2: a user with no address or no household is not deliverable: a skip, not a failure.
         if (!user || !user.email) {
           logger.warn("User not found or no email", { userId: pref.userId ?? "unknown" });
-          failed++;
+          skipped++;
           continue;
         }
 
@@ -416,7 +438,7 @@ export async function processWeeklyRecapEmails(
 
         if (!householdMember || !householdMember.householdId) {
           logger.warn("User not in household", { userId: user.id });
-          failed++;
+          skipped++;
           continue;
         }
 
@@ -432,6 +454,7 @@ export async function processWeeklyRecapEmails(
         ));
 
         if (outcome === "sent") sent++;
+        else if (outcome === "sent_unaudited") { sent++; failed++; }
         else if (outcome === "skipped") skipped++;
         else if (outcome === "failed") failed++;
       } catch (error) {

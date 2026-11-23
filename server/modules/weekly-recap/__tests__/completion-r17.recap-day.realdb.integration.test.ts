@@ -54,7 +54,7 @@ async function enableRecap(recipient: Recipient, day?: number): Promise<void> {
 }
 async function runAt(instant: Date): Promise<JobSummary> {
   vi.setSystemTime(instant);
-  return runWeeklyRecap();
+  return runWeeklyRecap({ identity: `recap.weekly@${instant.toISOString()}`, scheduledFor: instant });
 }
 async function ledgerStatus(recipient: Recipient): Promise<string | undefined> {
   const [row] = await db.select({ status: notificationDeliveries.status }).from(notificationDeliveries)
