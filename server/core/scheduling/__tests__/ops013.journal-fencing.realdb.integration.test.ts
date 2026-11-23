@@ -11,6 +11,7 @@ import { and, eq, like } from "drizzle-orm";
 import { afterAll, expect, it } from "vitest";
 import { jobs } from "@shared/schema";
 import { db } from "../../../db";
+import { getPostgresError } from "../../../utils/postgresError";
 import { finishJobRun, SCHEDULED_RUN_PREFIX, startJobRun, type ScheduledPeriod } from "../jobJournal";
 
 const tag = randomUUID().slice(0, 8);
@@ -55,10 +56,13 @@ it("holds at most one running and one completed row per period, and leaves other
   const row = (status: "running" | "completed") => ({
     name, status, attempts: 1, maxAttempts: 1, runAt: scheduledFor, startedAt: new Date(), idempotencyKey: identity,
   });
+  // Drizzle wraps the Postgres error; the SQLSTATE and index name sit on its cause.
+  const duplicate = (status: "running" | "completed") =>
+    db.insert(jobs).values(row(status)).then(() => undefined, (error: unknown) => getPostgresError(error));
   await db.insert(jobs).values(row("running"));
-  await expect(db.insert(jobs).values(row("running"))).rejects.toMatchObject({ code: "23505" });
+  expect(await duplicate("running")).toMatchObject({ code: "23505", constraint: "idx_jobs_scheduled_period_running" });
   await db.insert(jobs).values(row("completed"));
-  await expect(db.insert(jobs).values(row("completed"))).rejects.toMatchObject({ code: "23505" });
+  expect(await duplicate("completed")).toMatchObject({ code: "23505", constraint: "idx_jobs_scheduled_period_completed" });
   expect(await db.select({ id: jobs.id }).from(jobs).where(and(eq(jobs.name, name), eq(jobs.idempotencyKey, identity))))
     .toHaveLength(2);
 
