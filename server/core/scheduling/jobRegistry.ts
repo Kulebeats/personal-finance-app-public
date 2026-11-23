@@ -2,7 +2,8 @@ import { SCHEDULED_JOB_SPECS, type ScheduledJobName, type ScheduledJobSpec } fro
 import {
   runBudgetAlerts, runBudgetRollover, runDailySecurityReport, runFxRefresh, runGoalDeadlines, runGoalWeeklyReport,
   runMerchantLogoCleanup, runNotificationCleanup, runPersonalExportCleanup, runRecurringMaterialization,
-  runRecurringReminders, runSipCatchUp, runSnapshots, runStalePriceAlerts, runTBillMaturities, runWeeklyRecap,
+  runMfaGraceReminders, runRecurringReminders, runSipCatchUp, runSnapshots, runStalePriceAlerts, runTBillMaturities,
+  runWeeklyRecap,
 } from "./jobRunners";
 import type { ScheduledJobDefinition } from "./scheduledJob";
 
@@ -23,6 +24,7 @@ const RUNNERS: Readonly<Record<ScheduledJobName, ScheduledJobDefinition["run"]>>
   "cleanup.personal-exports": runPersonalExportCleanup,
   "snapshots.daily": runSnapshots,
   "security.daily-report": runDailySecurityReport,
+  "security.mfa-reminders": runMfaGraceReminders,
   "recap.weekly": runWeeklyRecap,
 };
 

@@ -23,6 +23,8 @@ export enum AuditEventType {
   MFA_DISABLED = "MFA_DISABLED",
   /** AH-11: a disable attempt refused because MFA is mandatory after the grace. */
   MFA_DISABLE_REFUSED = "MFA_DISABLE_REFUSED",
+  /** AH-11: a 7-day or 1-day grace reminder that may have been delivered. */
+  MFA_GRACE_REMINDER_SENT = "MFA_GRACE_REMINDER_SENT",
   MFA_VERIFIED = "MFA_VERIFIED",
   MFA_FAILED = "MFA_FAILED",
   MFA_BACKUP_CODES_REGENERATED = "MFA_BACKUP_CODES_REGENERATED",
