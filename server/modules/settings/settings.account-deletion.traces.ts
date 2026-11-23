@@ -12,10 +12,12 @@
  *   acted in or that is about them, or the record of a household invitation
  *   they accepted, which may predate their account) gets the tombstone address
  *   in place of each of their addresses, whenever it was written, except where
- *   another account held that address when the row was written (A-49 P2-3:
- *   A's later invitation to B at an address A left names B, not A);
+ *   another account held that address, and the user did not, when the row was
+ *   written (A-49 P2-3: A's later invitation to B at an address A left names
+ *   B, not A; a case-variant sign-up while A holds it does not count);
  * - the household_invitations rows the user accepted take the tombstone
- *   address; invitations they sent, and unaccepted ones, stay;
+ *   address, first, before any audit row is locked; invitations they sent, and
+ *   unaccepted ones, stay;
  * - anyone else's row (another actor's, an anonymous failed login, a household
  *   invitation record) gets the tombstone in place of an address only if it was
  *   written while the user held that address (A-49, R3-2: an address can belong
@@ -105,12 +107,19 @@ const swapAddresses = (text: SQL, rules: readonly AddressRule[], tombstoneEmail:
   text);
 const anyOf = (conditions: readonly SQL[]) => conditions.length === 0 ? sql`false`
   : sql`(${sql.join(conditions.map(condition => sql`(${condition})`), sql` or `)})`;
-/** The user's addresses in rows about them, except where another account held that address when the row was written. */
-const ownRules = (addresses: readonly string[], foreign: readonly AddressPeriod[], createdAt: PgColumn, alsoWhen?: SQL) =>
+/** The user's and the other accounts' periods of each address, by lowercased address. */
+type Holdings = { readonly own: readonly AddressPeriod[]; readonly foreign: readonly AddressPeriod[] };
+const heldWithin = (periods: readonly AddressPeriod[], email: string, createdAt: PgColumn) =>
+  anyOf(periods.filter(period => period.email.toLowerCase() === email.toLowerCase()).map(period => heldAt(createdAt, period)));
+/**
+ * The user's addresses in rows about them, except where another account held
+ * that address when the row was written and the user did not. While the user
+ * held it, it is theirs, even if another account registered it in another case.
+ */
+const ownRules = (addresses: readonly string[], holdings: Holdings, createdAt: PgColumn, alsoWhen?: SQL) =>
   addresses.map((email): AddressRule => {
-    const notForeign = sql`not ${anyOf(foreign.filter(period => period.email.toLowerCase() === email.toLowerCase())
-      .map(period => heldAt(createdAt, period)))}`;
-    return { pattern: wholeAddressPattern(email), when: alsoWhen ? sql`(${alsoWhen}) or ${notForeign}` : notForeign };
+    const ours = sql`${heldWithin(holdings.own, email, createdAt)} or not ${heldWithin(holdings.foreign, email, createdAt)}`;
+    return { pattern: wholeAddressPattern(email), when: alsoWhen ? sql`(${alsoWhen}) or ${ours}` : ours };
   });
 /** Each period's address, only in rows written inside that period. */
 const heldRules = (periods: readonly AddressPeriod[], createdAt: PgColumn) =>
@@ -147,7 +156,13 @@ export async function pseudonymiseErasedIdentity(
   const addresses = await addressesOf(tx, userId, originalEmail);
   const pattern = wholeAddressPattern(addresses);
   const periods = await addressPeriodsOf(tx, userId, originalEmail, isAddress);
-  const foreign = await foreignPeriodsOf(tx, userId, addresses, isAddress);
+  const holdings: Holdings = { own: periods, foreign: await foreignPeriodsOf(tx, userId, addresses, isAddress) };
+  // The invitation rows the user accepted hold their address, in a household
+  // that may outlive them. Invitations they sent hold other people's. Locked
+  // before any audit row: erasing a household's last owner deletes its
+  // invitations first, then (by cascade) their audit rows, so the reverse order
+  // here would deadlock against it.
+  await tx.update(householdInvitations).set({ email: tombstoneEmail }).where(eq(householdInvitations.acceptedBy, userId));
   const details = securityAuditLogs.details;
   const withoutIpKeys = sql`case when jsonb_typeof(${details}) = 'object'
     then ${details} - ${sql.raw(`array[${IP_DETAIL_KEYS.map(key => `'${key}'`).join(",")}]`)} else ${details} end`;
@@ -155,7 +170,7 @@ export async function pseudonymiseErasedIdentity(
   // them (held by that account when the row was written) is redacted below,
   // never attributed to the tombstone.
   const ownAddress = swapAddresses(sql`(${withoutIpKeys})::text`,
-    ownRules(addresses, foreign, securityAuditLogs.createdAt), tombstoneEmail);
+    ownRules(addresses, holdings, securityAuditLogs.createdAt), tombstoneEmail);
   await tx.update(securityAuditLogs).set({
     ipAddress: null,
     userAgent: null,
@@ -169,20 +184,16 @@ export async function pseudonymiseErasedIdentity(
   // Only rows that name one change, so unrelated audit rows (and their
   // dependency triggers) are never touched.
   await tx.update(securityAuditLogs).set({
-    details: sql`${swapAddresses(sql`${details}::text`, ownRules(addresses, foreign, securityAuditLogs.createdAt), tombstoneEmail)}::jsonb`,
+    details: sql`${swapAddresses(sql`${details}::text`, ownRules(addresses, holdings, securityAuditLogs.createdAt), tombstoneEmail)}::jsonb`,
   }).where(and(notSubject(securityAuditLogs.userId, userId), eq(securityAuditLogs.targetUserId, userId), mentions(details, pattern)));
   const accepted = acceptedInvitationRow(tx, userId);
   await tx.update(auditLogs).set({
-    details: sql`${swapAddresses(sql`${auditLogs.details}::text`, ownRules(addresses, foreign, auditLogs.createdAt, accepted), tombstoneEmail)}::jsonb`,
+    details: sql`${swapAddresses(sql`${auditLogs.details}::text`, ownRules(addresses, holdings, auditLogs.createdAt, accepted), tombstoneEmail)}::jsonb`,
   }).where(and(or(eq(auditLogs.userId, userId), eq(auditLogs.entityId, userId), accepted),
     mentions(auditLogs.details, pattern)));
 
   // (c) Rows of other subjects: an address only while the user held it.
   await rewriteHeldAddresses(tx, userId, periods, tombstoneEmail);
-
-  // The invitation rows the user accepted hold their address, in a household
-  // that may outlive them. Invitations they sent hold other people's.
-  await tx.update(householdInvitations).set({ email: tombstoneEmail }).where(eq(householdInvitations.acceptedBy, userId));
 
   // The user's own security notices only deliver mail to them; the security
   // event above is the record. Deleting them also stops a pending delivery.
@@ -195,7 +206,7 @@ export async function pseudonymiseErasedIdentity(
   // Other outbox event types about the user lose any of their addresses; the
   // rest are rewritten by period in (c).
   await tx.update(outboxEvents).set({
-    payload: sql`${swapAddresses(sql`${outboxEvents.payload}::text`, ownRules(addresses, foreign, outboxEvents.createdAt), tombstoneEmail)}::jsonb`,
+    payload: sql`${swapAddresses(sql`${outboxEvents.payload}::text`, ownRules(addresses, holdings, outboxEvents.createdAt), tombstoneEmail)}::jsonb`,
   }).where(and(ne(outboxEvents.eventType, EventTypes.SECURITY_NOTICE_REQUESTED),
     sql`${outboxEvents.payload}->>'userId' = ${userId}`, sql`${outboxEvents.payload}::text ~* ${pattern}`));
 }
