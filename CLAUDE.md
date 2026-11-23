@@ -1,84 +1,127 @@
-# CLAUDE.md — Personal Finance App (v1.6)
-
-> **STATUS SUPERSEDED — 2026-06-04.** An independent multi-agent code audit (14 module
-> audits + adversarial verification + full build/test/typecheck runs) supersedes the
-> completion claims in this file. The application is **NOT production-ready**: average
-> verified score ~65/100, **0 of 22 modules production-ready**, with P0 blockers across
-> deployment, security, financial integrity (GRZ Money + audit logging), external-AI PII,
-> and an ungated, partly-fictional test safety net. The "100%" and "COMPLETE" claims below
-> are retained as history but were refuted against code. **Live remediation status lives in
-> Linear, not in this file and not in `docs/`.** This is exactly what Rule 5 (Previous
-> Session Audit Rule) already demands: treat any completion claim as an unverified
-> hypothesis until proven against code and a passing test in CI.
+# CLAUDE.md — Personal Finance App
 
 Full-stack personal finance app: React 18 + TypeScript frontend, Express + PostgreSQL
 backend. Session-based auth, household collaboration, transaction tracking, budgets, goals,
 investments, including GRZ (Government of the Republic of Zambia) sovereign-debt instruments
 (bonds, T-bills, coupons, withholding tax).
 
-Last updated: 2026-06-04 (audit supersession). The prior header asserted "QA Score: 100%" on
-2026-01-29; that claim is false and is retained only for the record.
+Last verified against `main`: 2026-11-23. The rules below are durable; status lines go stale.
+Treat any completion claim, in this file, in `docs/` or in a transcript, as an unverified
+hypothesis until it is proven against code and a green CI run (Verification Rule 5).
 
-**Enforcement (NEW).** The rules below are no longer honour-system only. The remediation
-scaffold enforces the highest-risk ones at the system level, because the audit's root finding
-is that stated discipline failed at scale (213/213 claimed fixed, untrue):
-- Rule 1 (no float money) and Rule 16 (no `as any`) are enforced by a PreToolUse hook that
-  blocks the write before it lands.
-- The Definition of Done is enforced by a Stop hook that blocks ending a turn while
-  `npm run check` or the core tests are red.
-- Rule 5 (do not trust completion claims) is operationalised by an adversarial verifier
-  subagent and by CI. **CI does not exist yet; standing it up is the P0 keystone.**
+## Current state (2026-11-23)
 
-**Version history:** v1.6 audit supersession + enforcement layer. v1.5 AI assistant doc
-alignment. v1.4 Auth overhaul (91/100, claimed). v1.3 module-review lessons (rules 16-18).
+- **Not production-ready.** Open work is tracked in the requirements register (below), not
+  in this file.
+- **Where work happens.** The public repository `Kulebeats/personal-finance-app-public`. The
+  earlier private repository is frozen since the 23 Nov 2026 cutover: open nothing against
+  it. In the owner's checkout the public repository is the git remote `public` and `origin`
+  is the frozen one, so branch from `public/main` and push to `public`.
+- **Everything committed is world-readable.** Commit as author and committer
+  `Kulebeats <209983880+Kulebeats@users.noreply.github.com>`; check `git config user.email`
+  before the first commit. Keep personal e-mail addresses, the operating-system user name,
+  the staging server's address and hostname, and secrets out of diffs, commit messages, PR
+  titles and PR bodies. Scan all of them before every push.
+- **Pull requests.** One branch per task, cut from `main`; one PR straight into `main`,
+  opened READY. A draft gains nothing: every PR into `main` runs the full CI either way, and
+  marking it ready starts the run again. `main` is protected: the `verify` and `e2e` checks
+  must pass, the rule binds admins, and force-push and deletion are blocked. A coordinator
+  session reviews each PR once and merges it on green. Builder ("lane") sessions never merge
+  and never push to `main`.
+- **Where status lives.** Process and day-to-day status: the coordinator's board, a local
+  untracked file at `$(git rev-parse --git-common-dir)/coordinator/goal-safe-to-trust.md`.
+  Codex is reached through the board. Requirements:
+  `docs/reviews/2026-10-15-unified-completion-spec/` (`FINAL_COMPLETION_SPEC.md`,
+  `REGISTER.csv`, `REVIEW_PROTOCOL.md`). The register's status column is not maintained; the
+  scored re-checks and morning reports (`REGISTER-RECHECK-<date>.md`, `MORNING-<date>.md`) sit
+  untracked in the owner's main checkout under that folder's `reviews/` and are not in this
+  repository.
+- **Linear.** This file has said since June 2026 that live remediation status is in Linear.
+  Whether Linear is still in use is an open question with the owner; until it is answered,
+  the Linear lines further down stand as written.
+- **Staging.** An Oracle Cloud VM runs the application on a two-week soak that started
+  23 Nov 2026, with outbound mail through Brevo SMTP. Staging changes only on the owner's
+  typed go, and only through the dedicated `safe-test-site` session. The production host is
+  decided after the soak.
+- **Owner decisions of 23 Nov 2026 (settled; build to them).** MFA is mandatory after a
+  14-day grace period. Securities are an operator-curated catalogue plus household-private
+  custom securities. Runtimes are Node 24 and Postgres 18. The weekly recap is sent on each
+  user's chosen day, in household time. Rate limits are 600/min per user and 10/min per IP
+  for credential attempts.
+- **History.** The January 2026 "100%" and "COMPLETE" claims, and the P4 refactor's
+  verification claims, were refuted against code by the independent audit of 2026-06-04
+  (`docs/reviews/production-readiness-audit-2026-06-04.md`: 213/213 "fixed" was untrue, 0 of
+  22 modules ready). That is why the rules below are enforced by tooling. The P4 plan is
+  `docs/architecture/implementation-plan-p4-refactor-cutover-audit.md`; the pre-audit text of
+  this file is `CLAUDE.md.pre-audit.bak`; later versions are in git history.
+
+## Enforcement (what the tooling blocks)
+
+The June audit's root finding was that stated discipline failed at scale, so the highest-risk
+rules are enforced. Each guard has a narrower reach than its rule; the rule binds everywhere.
+
+- **`.claude/hooks/block-money-floats.mjs`** (PreToolUse on Write/Edit). Blocks `parseFloat(`,
+  `.toFixed(`, `Number(` around an amount, and amount-times-rate arithmetic on code lines, in
+  files whose path contains `server/services`, `server/routes/grz`, `core/calculations`,
+  `currency`, `budget` or `Money`. It does not match `Math.round(` and does not cover most of
+  `server/modules/`.
+- **`.claude/hooks/block-any-casts.mjs`** (PreToolUse on Write/Edit). Blocks `as any`, `: any`
+  and `@ts-ignore` in every `.ts`/`.tsx` write, test files included.
+- **`.claude/hooks/scan-secrets.mjs`** (PreToolUse on Bash). On `git commit`, blocks staged
+  content that looks like an API key or a private key.
+- **`.claude/hooks/stop-gate.mjs`** (Stop). Blocks ending a turn while `npm run check` or the
+  `server/core/calculations` tests are red.
+- **CI, `.github/workflows/ci.yml`.** On every PR into `main` and every push to `main`: job
+  `verify` (dependency audit, runtime, test-target and limiter guards, `npm run check`, server
+  and client suites with coverage floors against a disposable Postgres 18, build, bundle
+  budget), then job `e2e` (Playwright smoke, submit-and-read-back, mutation check). Both are
+  required to merge. `.github/workflows/ai-eval-gate.yml` runs the AI eval pack when
+  `server/modules/ai/**` changes.
+- **Adversarial verifier**, `.claude/agents/verifier.md`: run it after any "fixed" claim
+  (Verification Rule 5).
+
+A hook or guard refusal is a deliberate blocker. Change the code until it passes; do not
+bypass it and do not commit with `--no-verify`.
 
 ---
 
 ## Critical Commands (RUN AFTER EVERY CHANGE)
 
 ```bash
-npm run check              # TypeScript + no-storage-imports guard - MUST PASS before commit
-npm run test:run           # Client tests (single run)
-npm run test:server:run    # Server tests (single run; auto-uses <dbname>_test, NEVER finance_app)
-npm run db:test:setup      # Create the dedicated test DB + push schema (run once)
+npm run check              # Runtime pin, TypeScript, storage-import + LOC + tooling guards - MUST PASS before commit
+npm run test:run           # Client tests (single run; no database, outbound credentials blanked)
+npm run test:server:run    # Server tests (single run; ONLY a declared disposable test target, NEVER finance_app)
+npm run db:test:setup      # Bootstrap the declared test target by applying ./migrations
 npm run dev                # Backend dev server (Express)
 npm run dev:client         # Frontend dev server (Vite port 5000)
-npm run db:push            # drizzle-kit push: IMPERATIVE diff of shared/schema.ts vs the live DB
+npm run db:generate        # drizzle-kit generate: write a versioned migration into ./migrations
+npm run db:migrate         # drizzle-kit migrate: apply ./migrations (what a deploy runs)
+npm run db:push            # drizzle-kit push: IMPERATIVE diff of shared/schema.ts vs a DB - local dev only
 ```
 
-> **Server tests can no longer touch your dev database (enforced 2026-07-20).**
-> `server/vitest.config.ts` loads `.env`, so `DATABASE_URL` used to point the suite at the
-> DEV database — and the real-DB suites DELETE users/households in cleanup. That destroyed
-> live dev data (observed: a fixture vanished mid-session, a working login started 401ing).
-> The config now derives `<dbname>_test`, honours `TEST_DATABASE_URL`, and **refuses to run**
-> against any database that isn't test-scoped. The "NEVER finance_app" rule is enforced, not
-> honour-system. Run `npm run db:test:setup` once to create the database.
+> **Tests cannot touch a real database (enforced).** The real-DB suites DELETE users and
+> households in cleanup; pointed at the dev database through `.env`, they once destroyed live
+> dev data. Every test script now runs through `scripts/run-protected-tests.mjs`, which never
+> loads `.env` and blanks outbound credentials. A database run refuses to start
+> (`REFUSING TEST TARGET`) unless `TEST_DATABASE_URL`, `TEST_RUN_ID` and a
+> `TEST_TARGET_MANIFEST` name the same loopback database, called `pfa_ci_…_<runId>_test` or
+> `pfa_completion_…_<runId>_test`. `DATABASE_URL` is never a fallback. The working recipe is
+> the CI step "Declare and bootstrap disposable server test target" in
+> `.github/workflows/ci.yml` (`scripts/create-test-target.mjs`, then `npm run db:test:setup`);
+> the guard is `server/testing/test-target.mjs`. NEVER aim a test at `finance_app`, staging
+> or any shared database. One file:
+> `node scripts/run-protected-tests.mjs database vitest --server run <path under server/>`.
 
-> **`npm run db:push` does NOT run versioned migrations.** It diffs `shared/schema.ts`
-> against the database and applies changes directly. `./migrations` is inert because
-> `drizzle-kit generate` is never run, so there is no migration history. Production must not
-> deploy by imperative push. **P1 (DEPLOY-MIGRATE):** adopt `drizzle-kit generate` +
-> `migrate` so dev, CI, and prod share one versioned history. Before that, give the long
-> foreign keys explicit names under 63 characters in `schema.ts` (Postgres truncates
-> identifiers at 63 bytes), or generated migrations will churn on every run.
-
----
-
-## P4 Enterprise Refactoring — MERGED 2026-01-13 (verification claims later refuted)
-
-**Merged to main:** 2026-01-13 (76 commits, 1312 files changed)
-**Plan:** `docs/architecture/implementation-plan-p4-refactor-cutover-audit.md`
-
-> The 2026-06-04 audit checked the verification claims below against code. They did not hold.
-> Retained as history; do not treat as current state.
-
-| Component             | Claimed (Jan 2026)   | Verified (2026-06-04)                                                          |
-| --------------------- | -------------------- | ------------------------------------------------------------------------------ |
-| Module Cutover        | DONE                 | 26 legacy route files deleted (plausible)                                      |
-| Feature Flags         | REMOVED              | A dual calculation engine (legacy + new) still runs in parallel                |
-| Audit Logging         | DONE, all covered    | REFUTED: GRZ writes, reports CSV export, and weekly-recap email write no audit row |
-| Controller Splits     | DONE, all <500 LOC   | REFUTED: `BudgetRepository.ts` is 548 LOC, among others                        |
-| Security Verification | PASS, 7/7 P0 items   | REFUTED: `trust proxy` not set in prod, `/uploads` unauthenticated, no DB SSL  |
+> **Schema changes ship as versioned migrations.** `./migrations` holds the history
+> (`meta/_journal.json`). A deploy applies it with `npm run db:migrate` (`render.yaml`
+> `preDeployCommand`), and so does `db:test:setup`. `npm run db:push` does NOT run migrations:
+> it diffs `shared/schema.ts` against a database and applies the difference directly, so it
+> is for local dev only and never for a deployed database (`docs/runbooks/deploy.md`). The
+> coordinator assigns migration numbers: ask before you generate one, and check that the new
+> journal entry's `when` is higher than every earlier entry, because a migrated database
+> silently skips an entry with a lower one. Give long foreign keys explicit names under 63
+> characters in `schema.ts` (Postgres truncates identifiers at 63 bytes), or generated
+> migrations will churn on every run.
 
 ---
 
@@ -87,7 +130,7 @@ npm run db:push            # drizzle-kit push: IMPERATIVE diff of shared/schema.
 ### 1. Money/Arithmetic Rule (HIGH RISK)
 
 **NEVER use `parseFloat()`, `Math.round()`, or `Number()` for financial calculations.**
-*(Enforced: a PreToolUse hook blocks these patterns in financial paths.)*
+*(Partly enforced: see `block-money-floats.mjs` under Enforcement for what the hook matches.)*
 
 - ✅ USE: `Money` class from `server/core/money.ts` with currency context
 - ❌ BAD: `parseFloat(amount)`, `Math.round(x * 100) / 100`
@@ -95,16 +138,16 @@ npm run db:push            # drizzle-kit push: IMPERATIVE diff of shared/schema.
 - Money columns are Postgres `decimal`, returned as STRINGS by the driver; the live danger
   is `parseFloat`/`Number` on a string amount, then arithmetic.
 
-> **GRZ is the highest-risk, never-reviewed money path (audit P0).**
-> `server/services/grz-service.ts` does bond coupon, withholding-tax, discount, and yield
-> math in raw `number` + `.toFixed()`, persists it, and creates real ledger transactions via
-> `server/routes/grz-securities.ts`. This path was never in the "213 fixed" pass. Every
-> monetary line here must go through `Money`, and see Rule 9 for its audit-logging gap.
+> **GRZ is the highest-risk money path.** `server/services/grz-service.ts`,
+> `server/services/grz/` and `server/routes/grz-*.ts` do bond coupon, withholding-tax,
+> discount, and yield math, persist it, and create real ledger transactions. The June audit
+> found this math in raw `number` + `.toFixed()`; it now runs on `Money` and `Decimal`. Every
+> monetary line here must go through `Money`, and every write here must be audited (Rule 9).
 
-> **FX silent fallback (audit P0/P1).** A missing exchange rate must be a logged, surfaced
-> error, never a quiet `rate = 1`. The audit found silent `rate = 1` in
-> `BaseReportRepository.ts` and `transaction/queries.ts`, materially corrupting
-> multi-currency totals.
+> **FX silent fallback.** A missing exchange rate must be a logged, surfaced error, never a
+> quiet `rate = 1`, which materially corrupts multi-currency totals. Reports fail closed:
+> every aggregate that embeds `buildFxRateExpr` (`server/repositories/reports/fxRateExpr.ts`)
+> first calls `assertFxRatesAvailable` (`BaseReportRepository.ts`). Follow that pattern.
 
 **Common Antipatterns Found in Code Reviews (AVOID THESE):**
 
@@ -156,14 +199,11 @@ return toMoneyDto(moneyTotal.toNumber(), household.currency);
   - Existing components don't need splitting unless being significantly modified
   - Apply limit when creating new components or major rewrites
 
-> **Scope correction (2026-07-20).** This rule previously named only
-> `server/routes/`, `server/services/`, and `server/modules/*/controller.ts`.
-> The P4 modular refactor moved most code to `server/modules/{domain}/
-> {domain}.service.ts`, which that wording never covered, so the limit went
-> unenforced across most of the server: a literal-scope audit found 5
-> violations where a full sweep found 23 (plus 7 module routers over 100).
-> The lesson generalises — a rule scoped by directory silently stops applying
-> when the directories move.
+> **Lesson (2026-07-20).** This rule once named three directories; the P4
+> refactor moved most code out of them and the limit went unenforced across
+> most of the server. A rule scoped by directory silently stops applying when
+> the directories move. The history is in the header of
+> `scripts/check-loc-limits.mjs`.
 
 **The guard is a ratchet, not a cliff.** `scripts/loc-baseline.json` records
 every file already over its limit. The build fails when a file **not** in the
@@ -183,18 +223,18 @@ Treat the baseline as a debt register to burn down, not a permission slip.
 
 ### 4. AI Integration Rule (CRITICAL FOR EXTERNAL AI FEATURES)
 
-> **Audit P0 - named violations to fix in the AI module (`server/modules/ai/`):**
-> 1. Only 3 of 12 tools route through the sanitiser; the other 9 send raw DB rows (internal
->    UUIDs, raw account/merchant/goal names) `JSON.stringify`'d into the Gemini prompt.
-> 2. `ai.service.ts` hardcodes `data_sanitized: true` for ALL queries - a false compliance
->    attestation in the audit log. Set it only from the real sanitiser result.
-> 3. The Zod tool-arg schemas in `ai.validation.ts` are dead code (never imported); Gemini
->    tool args are `as`-cast straight into ILIKE/gte/lte SQL filters. Wire them in.
-> 4. The conversation endpoints are stubs (list returns `[]`, get returns a hardcoded 404,
->    delete is a no-op), so chat history never persists. The advertised feature is
->    non-functional.
+> **State of the AI module (`server/modules/ai/`, the "Thandi" assistant).** The provider is
+> Anthropic first with Gemini as fallback (`ai.provider-config.ts`, `ai.claude.ts`,
+> `ai.gemini.ts`). The four violations the June audit named are fixed; keep them fixed:
+> 1. Every tool result passes the central sanitiser, which fails closed when a tool has no
+>    sanitiser (`ai.service.ts`, `ai.sanitizer.ts`). No raw DB rows, internal UUIDs or raw
+>    account/merchant/goal names go to a provider.
+> 2. `data_sanitized` in the audit log comes from the real sanitiser result, never a constant.
+> 3. Tool arguments are parsed with the Zod schemas in `ai.validation.ts` before they reach
+>    any SQL filter.
+> 4. Conversations persist (`ai.conversation.service.ts`, `ai.conversation.repository.ts`).
 
-**WHEN implementing features that use external AI APIs (Google Gemini, OpenAI, etc.):**
+**WHEN implementing features that use external AI APIs (Anthropic, Google Gemini, OpenAI, etc.):**
 
 #### 4.1 Money Class Requirement
 
@@ -251,25 +291,31 @@ server/modules/ai/
 └── __tests__/
 ```
 
+The module has since grown to about 45 files around this core. Four of them are over their
+limit and sit in the LOC baseline as debt (Rule 2): `ai.service.ts`,
+`ai.analytics.service.ts`, `ai.gemini.ts`, `ai.sanitizer.ts`.
+
 #### 4.4 Security Requirements
 
-- ✅ **Rate limiting:** per-household (not per-user). The audit found this cap is an in-process
-  `Map`, so it is not enforced cluster-wide - move to Redis (P1 infra).
+- ✅ **Rate limiting:** per-household (not per-user). The chat quota (50 per rolling 24 hours)
+  is a durable Postgres admission ledger (`ai_requests`, `ai.admission.repository.ts`), so it
+  holds across instances.
 - ✅ **Consent:** check `households.ai_consent_given` before processing
 - ✅ **Data minimization:** top 20 results, summaries only
-- ✅ **No PII:** strip PII before sending to AI (this is the sanitiser that 9 tools bypass)
+- ✅ **No PII:** strip PII before sending to AI (the central sanitiser; every tool must have one)
 - ✅ **API keys:** environment variables, rotate every 90 days
 
 #### 4.5 Type Safety Requirements
 
 - ❌ **NEVER use `any`** in AI tool definitions (enforced by hook; see Rule 16)
 - ✅ **Define proper types** for all tool parameters and return values
-- ✅ **Use Zod** for request validation (and actually import the schemas; see violation 3)
+- ✅ **Use Zod** for request validation (and actually import the schemas; see point 3 above)
 
 #### 4.6 Error Handling Requirements
 
-- ✅ **Use AppError** for AI-specific errors; handle external API failures with retries;
-  return clear errors for rate limits, consent issues, API outages.
+- ✅ **Use the error classes** in `server/core/errors` (base `HttpError`; see Rule 7) for
+  AI-specific errors; handle external API failures with retries; return clear errors for
+  rate limits, consent issues, API outages.
 
 #### 4.7 Testing Requirements
 
@@ -308,8 +354,9 @@ export async function handler(req: Request, res: Response): Promise<void> {
 { success: false, error: { code: string, message: string, details?: any } }
 ```
 
-Helpers from `server/core/http`: `success(res, data)`, `created(res, data)`, `noContent(res)`.
-Pagination: `{ success: true, data: [...], pagination: { total, page, pageSize, hasNext, hasPrev } }`.
+Helpers from `server/core/http`: `success(res, data)`, `created(res, data)`, `noContent(res)`,
+`paginated(res, data, { total, page, pageSize })`.
+Pagination: `{ success: true, data: [...], pagination: { total, page, pageSize, totalPages, hasNext, hasPrev } }`.
 
 ### 7. Error Handling Rules
 
@@ -357,12 +404,13 @@ await businessAuditService.logCreate({
 });
 ```
 
-> **Audit gaps the 2026-06-04 audit found (fix these):** auditing currently lives only in the
-> transactions *controller*, so paths that bypass it are unlogged - **GRZ bond/T-bill/coupon
-> writes**, **reports CSV export** of financial+PII data, and the **weekly-recap email**.
-> Move audit calls into the service/repository layer (inside the same transaction) so
-> controller-bypassing callers are still logged. The weekly recap also needs a per-user
-> consent gate before egress.
+> **Where the audit call goes.** Put it in the service/repository layer, inside the same
+> transaction as the write (every `businessAuditService` method takes an optional `tx`), so
+> callers that bypass a controller are still logged. The June audit found three paths with no
+> audit row: **GRZ bond/T-bill/coupon writes**, **reports CSV export** of financial+PII data,
+> and the **weekly-recap email**. All three now write one, and the recap is withheld without
+> consent (`weekly-recap.email.service.ts`). A new write path or a new egress of financial
+> data needs the same.
 
 ### 10. Database Transaction Rules
 
@@ -401,11 +449,15 @@ return await withTransaction(async (tx) => {
 **When to use FOR UPDATE:** uniqueness checks before insert; balance checks before deduction
 (overdraft races); assignment validation; any read-then-write on the same row.
 
-> **Audit found the transactions/transfer path has NO FOR UPDATE and NO overdraft guard**, and
-> idempotency runs outside the transaction. `transactions.idempotencyKey` is already unique at
-> schema level, so the fix is to run the check inside the txn, not to add a column. Ownership
-> transfer, accept-invite, recurring batch, and default-toggle are also non-atomic. Optimistic
-> locking exists via `budgetPeriods.version`; use it on the recalc path.
+> **Reference implementations.** The June audit found the transfer path with no `FOR UPDATE`,
+> no overdraft guard, and idempotency checked outside the transaction. It now locks, guards
+> and re-checks the key inside the transaction (`server/services/TransferService.ts`,
+> `server/repositories/TransactionTransferRepository.ts`); `transactions.idempotencyKey` is
+> unique at schema level. Ownership transfer (`server/modules/household/ownership.service.ts`)
+> and invite acceptance (`invitations.accept.ts`) are atomic too. The audit also named the
+> recurring batch and default-toggle paths as non-atomic; this refresh did not re-verify
+> those, so check them before you build on them. Optimistic locking exists via
+> `budgetPeriods.version`; use it on the recalc path.
 
 ### 11. Privacy & Visibility Rules
 
@@ -424,15 +476,17 @@ async findByIdWithVisibility(id, householdId, userId) {
 **Cross-entity linking MUST check visibility** (Receipt→Transaction, Recurring→Transaction,
 Goal→Transaction). Use `findByIdWithVisibility`, never `findById`.
 
-> **Audit found a live leak:** `dryRunRule` uses `findById`, so a member can dry-run a rule
-> against another member's private transaction and read its name/amount/category. Use
-> `findByIdWithVisibility`.
+> **Why it matters:** the June audit found `dryRunRule` using `findById`, so a member could
+> dry-run a rule against another member's private transaction and read its
+> name/amount/category. It now uses `findByIdWithVisibility` (`server/services/rule/service.ts`).
+> Any new read on behalf of a member needs the same check.
 
 ### 12. Rate Limiting Rules
 
 **ALL routes MUST have rate limiting.** Tiers (`server/middleware/rateLimit.ts`):
-`generalLimiter` 100/min, `analyticsLimiter` 30/min, `authLimiter` 10/min, `strictLimiter`
-5/min, `uploadLimiter` 20/hour, `expensiveAnalyticsLimiter` 10/min.
+`generalLimiter` 600/min per user, `analyticsLimiter` 30/min, `authLimiter` 10/min,
+`ipAuthLimiter` 10/min per IP (credential attempts), `strictLimiter` 5/min, `uploadLimiter`
+20/hour, `expensiveAnalyticsLimiter` 10/min.
 
 ```typescript
 router.use(generalLimiter);
@@ -440,19 +494,24 @@ router.get("/detect", analyticsLimiter, controller.detect);
 router.get("/sankey", expensiveAnalyticsLimiter, controller.getSankey);
 ```
 
-> **Audit P0 infra:** the limiter store is per-process; a Redis store is built but no limiter
-> uses it, so limits are bypassable across instances. One Redis integration fixes rate-limit +
-> cache + AI cost cap.
+> **Store.** Build every limiter with `createLimiter` in that file: it wires in the shared
+> Redis store, so limits hold across instances. The in-memory store is a dev/test fallback
+> only; production startup requires Redis (`server/utils/validateEnv.ts`). CI runs
+> `npm run test:limiters`, which registers the real routes; a new import that `server/routes.ts`
+> calls at load needs a stub in `scripts/__tests__/limiters.test.mjs`.
 
 ### 13. Caching Rules
 
-Use `withCache()` for expensive operations. TTL presets: `SHORT` 30s, `MEDIUM` 5m, `LONG` 30m,
-`HOUR` 1h. *(Audit: cache is in-memory only and incoherent across instances - move to Redis.)*
+Use `withCache()` (`server/core/cache`) for expensive operations. TTL presets: `SHORT` 30s,
+`MEDIUM` 5m, `LONG` 30m, `HOUR` 1h. The store is Redis when configured and in-memory
+otherwise, so never rely on in-memory state being shared between instances.
 
 ### 14. Event Publishing Rules
 
-Use `outboxEventService.publish({ eventType, aggregateType, aggregateId, householdId, payload })`,
-non-blocking with `.catch()`, minimal payload (IDs + changed fields).
+Use `outboxEventService.publish({ eventType, aggregateType, aggregateId, householdId, payload }, tx)`
+with a minimal payload (IDs + changed fields). Inside `withTransaction`, pass the caller's
+`tx` so the event commits or rolls back with the write. With no surrounding transaction,
+publish non-blocking with `.catch()`.
 
 ### 15. Module Structure Rules
 
@@ -473,7 +532,7 @@ server/modules/{domain}/
 **NEVER use `as any` in production code.** *(Enforced: a PreToolUse hook blocks new `as any`,
 `: any`, and `@ts-ignore` in `.ts`/`.tsx`.)* Use Zod-inferred types, import proper library and
 domain types. Acceptable only in test files and documented third-party workarounds; NEVER for
-financial data or API request/response types.
+financial data or API request/response types. The hook does not exempt test files.
 
 ### 17. Test Coverage Requirements
 
@@ -481,9 +540,12 @@ Minimum: financial operations 80%, reports/analytics 60%, UI 50%. Per endpoint, 
 path, validation failure (400), not found (404), authorization (403/404), privacy (private
 items invisible to other users).
 
-> **Audit reality:** counts are healthy but coverage is thin - "integration" tests are mocked,
-> Goals and Transactions have zero real-DB HTTP tests, and the client coverage config excludes
-> every financial folder. "Integration" must mean a real HTTP request against real Postgres.
+> **What CI gates.** The `verify` job runs both suites with `--coverage`, which arms the
+> thresholds in `server/vitest.config.ts` and `client/vitest.config.ts`. Those are regression
+> floors set at measured coverage, lower than the minimums above; they do not replace them.
+> Goals and Transactions now have real-DB suites (`*.realdb.integration.test.ts`) and the
+> client coverage config includes the financial feature folders; the June audit found
+> neither. "Integration" must mean a real HTTP request against real Postgres.
 
 ### 18. Client-Server Contract Rules
 
@@ -497,20 +559,25 @@ match between client API calls and server routes.
 
 ```text
 client/src/          # React 18 + TypeScript frontend
-  ├── features/      # Feature modules (goals/, settings/)
+  ├── features/      # Feature modules (accounts/, budget/, goals/, investments/, settings/, ...)
   ├── pages/         # Page components
   └── components/    # Shared UI (Radix UI + Tailwind)
 server/
-  ├── modules/       # Modular routes (controller + validation + routes)
-  ├── routes/        # Auth, security, reports (non-modular endpoints)
+  ├── modules/       # Modular routes (controller + validation + routes), one folder per domain
+  ├── routes/        # Non-modular endpoints: GRZ, investment-*, security/MFA, admin, cron, import
   ├── services/      # Business logic layer (split into submodules)
-  ├── core/          # Money class, validation, audit logging, events
-  └── storage.ts     # Database access (Drizzle ORM)
+  ├── repositories/  # Data access (Drizzle ORM); new data access goes here
+  ├── core/          # Money class, calculations, errors, http, validation, cache, events
+  ├── jobs/          # Scheduled workers (run under server/scheduler.ts)
+  ├── testing/       # Test-target guard and test bootstrap
+  └── storage.ts     # Legacy data access, frozen: `npm run check` fails on any new import of it
 shared/schema.ts     # Database schema + Zod validators (single source of truth)
+migrations/          # Versioned Drizzle migrations (see Critical Commands)
 ```
 
-**Tech Stack:** React 18, Express, PostgreSQL, Drizzle ORM, Passport.js sessions, TanStack
-Query, Vitest.
+**Tech Stack:** React 18, Express, PostgreSQL 18, Drizzle ORM, Passport.js sessions, Redis
+(rate limits and cache), TanStack Query, Vitest, Playwright. Node is pinned to 24.22.0
+(`engines` in `package.json`, `.nvmrc`).
 
 **Schema anchors (use these exact names; do not invent identifiers):** DPA audit →
 `auditLogs(userId, householdId, action, entityType, entityId, details, ipAddress)`; auth/security
@@ -523,8 +590,9 @@ idempotencyKey`; optimistic locking → `budgetPeriods.version`; export records 
 
 ## Error Handling & Debugging
 
-- All async operations need try/catch; log errors with context (don't swallow); use `AppError`
-  from `server/core/errors.ts`; return appropriate HTTP status codes.
+- All async operations need try/catch; log errors with context (don't swallow); use the error
+  classes in `server/core/errors` (base `HttpError`, Rule 7); return appropriate HTTP status
+  codes.
 - Debugging: check `audit_logs` for financial writes; verify currency context in Money usage;
   run `npm run dev:client` + `npm run dev` in parallel; `DEBUG=express:*` for route debugging.
 
@@ -545,25 +613,20 @@ no direct DB access in controllers; all financial writes call `BusinessAuditServ
 
 ## Git & Code Review
 
-Conventional commits with co-author. PRs include: summary and rationale, screenshots for UI,
-test coverage notes, breaking changes highlighted. Before committing: `npm run check`,
-`npm run test:run`, `npm run test:server:run` must pass.
+Conventional commits with co-author, under the commit identity and PR flow in Current state.
+PRs include: summary and rationale, screenshots for UI, test coverage notes, breaking changes
+highlighted. Before committing: `npm run check`, `npm run test:run`, `npm run test:server:run`
+must pass. The server suite needs a declared test target (Critical Commands); where the
+coordinator's board limits heavy local runs on the owner's machine, the same suites must be
+green in CI on the PR instead.
 
 ---
 
 ## Verification Workflow (Use After Every Change)
 
-```bash
-# 1. Type check
-npm run check
-# 2. Run affected tests
-npm run test:run              # Client
-npm run test:server:run       # Server
-# 3. Verify LOC limits (if you split files) - PowerShell on Windows
-(Get-Content path/to/file.ts | Measure-Object -Line).Lines
-# Cross-platform alternative (works in the desktop app, WSL, CI):
-node -e "console.log(require('fs').readFileSync('path/to/file.ts','utf8').split(String.fromCharCode(10)).length)"
-```
+1. `npm run check`: the type check plus the storage-import, LOC and tooling guards. The LOC
+   guard reports any file over its limit, so no manual line count is needed after a split.
+2. The affected tests: `npm run test:run` (client), `npm run test:server:run` (server).
 
 ---
 
@@ -628,8 +691,8 @@ Before marking ANY fix as done:
 - [ ] Ran grep to find ALL occurrences; fixed ALL; grep confirms zero remain
 - [ ] A test exercises the change; for data paths, a REAL-DB integration test (not mocked)
 - [ ] `npm run check` clean (no new `as any`; no float money in financial paths)
-- [ ] **The relevant suite is green in CI on the branch** (CI is the P0 keystone; until it
-      exists, this line cannot be satisfied, which is why CI lands first)
+- [ ] **The relevant suite is green in CI on the branch** (the `verify` and `e2e` checks on
+      the PR's newest commit, not an earlier one)
 - [ ] If the change writes financial data: a `BusinessAuditService` row is written and a test
       asserts the `auditLogs` row
 - [ ] If the change touches more than one table/row: it is inside `withTransaction`, with
@@ -641,30 +704,33 @@ Before marking ANY fix as done:
 
 ## Documentation Index
 
+- **Requirements and review protocol:** `docs/reviews/2026-10-15-unified-completion-spec/`
+  (see Current state)
 - **Architecture:** `docs/architecture/implementation-plan-p4-refactor-cutover-audit.md`
-- **Setup:** `docs/setup/database-quickstart.md`
+- **Setup:** `docs/setup/database-setup.md`, `docs/setup/developer-onboarding.md`
+- **Deploy and migrations:** `docs/runbooks/deploy.md`
 - **Schema:** `shared/schema.ts` (database + Zod validators)
-- **Independent audit (authoritative):** `production-readiness-audit-2026-06-04`
+- **Independent audit (June 2026):** `docs/reviews/production-readiness-audit-2026-06-04.md`
 
 > **Source-of-truth note.** `docs/issues/known-issues.md`, `docs/reviews/open-issues-summary.md`,
-> and `docs/risk-register.md` assert resolved items that the 2026-06-04 audit refuted against
-> code. Treat them as historical. **Live status is in Linear.** Do not edit these files to mark
-> a fix done, and do not count `parseFloat → Number()` as a remediation.
-
-> **Module scores below are Jan-2026 review numbers from a different method than the June audit,
-> and they do not even agree with the scores in the summary docs - which is itself the reason to
-> keep one source of truth. Superseded by the 2026-06-04 audit (avg ~65/100, 0/22 ready):**
-> Auth 91, CashFlow 82, Recurring 72, Goals 68, Receipts 65, Reports 52, Investments 45.
+> and `docs/security/risk-register.md` assert resolved items that the 2026-06-04 audit refuted
+> against code, and the January 2026 module scores in older docs do not agree with each other.
+> Treat them as historical. **Live status is in Linear** (open question, see Current state).
+> Do not edit these files to mark a fix done, and do not count `parseFloat → Number()` as a
+> remediation.
 
 ### Code Review Skills (Slash Commands)
 
 `/review-code` (Senior Developer), `/review-qa` (QA Engineer), `/review-fintech` (Compliance),
-`/review-functionality` (Product Manager). These pair with the scaffold's domain subagents
-(fintech-money, concurrency, dpa-compliance, infra-deploy, test-builder) and the verifier.
+`/review-functionality` (Product Manager), `/review-ux` (UI/UX and accessibility), `/verify`
+(the verification suite), all in `.claude/commands/`. These pair with the domain subagents in
+`.claude/agents/` (fintech-money, concurrency, dpa-compliance, infra-deploy, test-builder) and
+the verifier.
 
 ### AI Assistant Feature Documentation
 
-- **Code Audit:** `docs/reviews/ai-assistant-code-audit.md` (15/100 for external code)
+- **Specifications:** `docs/ai-integration/specifications/`
+- **Code Audit (historical):** `docs/reviews/ai-assistant-code-audit.md`
 - **BRD:** `docs/specifications/ai-assistant-brd.md`
 - **User Stories:** `docs/specifications/ai-assistant-user-stories.md`
 - **Technical Design:** `docs/architecture/ai-assistant-technical-design.md`
