@@ -5,6 +5,7 @@ import {
   runMfaGraceReminders, runRecurringReminders, runSipCatchUp, runSnapshots, runStalePriceAlerts, runTBillMaturities,
   runWeeklyRecap,
 } from "./jobRunners";
+import { runReceiptMatching } from "../../jobs/receiptMatcher";
 import type { ScheduledJobDefinition } from "./scheduledJob";
 
 /** The code each catalogued job runs. A catalog entry without one fails to type-check. */
@@ -23,6 +24,7 @@ const RUNNERS: Readonly<Record<ScheduledJobName, ScheduledJobDefinition["run"]>>
   "cleanup.merchant-logos": runMerchantLogoCleanup,
   "cleanup.personal-exports": runPersonalExportCleanup,
   "snapshots.daily": runSnapshots,
+  "receipts.match": runReceiptMatching,
   "security.daily-report": runDailySecurityReport,
   "security.mfa-reminders": runMfaGraceReminders,
   "recap.weekly": runWeeklyRecap,

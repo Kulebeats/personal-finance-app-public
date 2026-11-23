@@ -116,18 +116,18 @@ export class ReceiptMatchingService {
   }
 
   /**
-   * Process background matching jobs (called by cron)
+   * Process the background matching queue (the scheduled job receipts.match).
+   * A receipt whose match attempt throws is counted in `failed`, so the run
+   * reports a partial failure instead of a success.
    */
   async processMatchingQueue(
     attemptMatchCallback: (receiptId: string, householdId: string) => Promise<{ matched: boolean; transactionId?: string }>
-  ): Promise<{
-    processed: number;
-    matched: number;
-  }> {
+  ): Promise<MatchingQueueTotals> {
     const pendingReceipts = await receiptRepository.findForMatching(50);
 
     let processed = 0;
     let matched = 0;
+    let failed = 0;
 
     for (const receipt of pendingReceipts) {
       try {
@@ -135,16 +135,20 @@ export class ReceiptMatchingService {
         processed++;
         if (result.matched) matched++;
       } catch (err) {
+        failed++;
         logger.error(
           "Failed to process receipt",
           { receiptId: receipt.id },
-          err as Error
+          err instanceof Error ? err : new Error(String(err))
         );
       }
     }
 
-    return { processed, matched };
+    return { processed, matched, failed };
   }
 }
+
+// A type alias (not an interface) so the totals stay assignable to JobSummary's index signature.
+export type MatchingQueueTotals = { readonly processed: number; readonly matched: number; readonly failed: number };
 
 export const receiptMatchingService = new ReceiptMatchingService();

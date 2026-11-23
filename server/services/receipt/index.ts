@@ -9,7 +9,7 @@
 
 import type { OcrExtractedData, PendingReceipt } from "@shared/schema";
 import { receiptUploadService } from "./upload.service";
-import { receiptMatchingService } from "./matching.service";
+import { receiptMatchingService, type MatchingQueueTotals } from "./matching.service";
 import { receiptTransactionService } from "./transaction.service";
 import { receiptQueryService } from "./query.service";
 import type { ReceiptUpload } from "./image";
@@ -88,10 +88,7 @@ export class ReceiptService {
     );
   }
 
-  async processMatchingQueue(): Promise<{
-    processed: number;
-    matched: number;
-  }> {
+  async processMatchingQueue(): Promise<MatchingQueueTotals> {
     return receiptMatchingService.processMatchingQueue(
       (receiptId, householdId) => this.attemptMatch(receiptId, householdId)
     );
