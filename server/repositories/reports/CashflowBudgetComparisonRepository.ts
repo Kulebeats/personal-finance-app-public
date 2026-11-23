@@ -16,7 +16,6 @@ import {
   budgets,
   budgetPeriods,
   transactionSplits,
-  providerFxQuotes,
   households,
   householdMembers,
 } from "@shared/schema";
@@ -27,6 +26,7 @@ import { ForbiddenError } from "../../core/errors";
 import { readableMembershipPredicate, visibleTransactionPredicate } from "../../core/authz/transaction-visibility";
 import { can } from "../../core/authz/capabilities";
 import { BaseReportRepository } from "./BaseReportRepository";
+import { resolvedFxRate } from "../fx/resolvedFxRate";
 import { toMoneyDtoSafe } from "./moneyUtils";
 import {
   compareBudgetsToActuals,
@@ -223,12 +223,9 @@ export class CashflowBudgetComparisonRepository extends BaseReportRepository {
         GROUP BY p.id,p.amount HAVING sum(s.amount) IS DISTINCT FROM p.amount
           OR bool_or(s.amount<0 OR s.amount::text !~ '^[0-9]+([.][0-9]+)?$')
       ), rated AS (
-        SELECT e.*,CASE WHEN e.currency=${currency}::text THEN 1 ELSE (
-          SELECT q.rate FROM ${providerFxQuotes} q WHERE q.from_currency=e.currency AND q.to_currency=${currency}::text
-            AND q.effective_date<=e.date AND q.valid_through>=e.date AND q.quoted_at<=transaction_timestamp()
-            AND q.provider IN ('yahoo_finance','exchangerate_api')
-          ORDER BY q.effective_date DESC,q.quoted_at DESC,q.provider LIMIT 1
-        ) END AS rate FROM eligible e WHERE e.amount<>0
+        SELECT e.*,CASE WHEN e.currency=${currency}::text THEN 1
+          ELSE ${resolvedFxRate(householdId, sql`e.currency`, currency, sql`e.date`)} END AS rate
+        FROM eligible e WHERE e.amount<>0
       ), totals AS (
         SELECT category_id,category_name,sum(amount*rate) AS amount FROM rated GROUP BY category_id,category_name
         HAVING sum(amount*rate)>0

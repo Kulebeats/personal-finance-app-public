@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { BudgetRecalculationPreview as Preview } from "@shared/budget-recalculation-preview";
 import type { MoneyDto } from "@shared/money";
-import { accounts, auditLogs, budgetPeriods, budgets, categories, categoryGroups, fxRates, householdMembers, households, providerFxQuotes, transactions, transactionSplits } from "@shared/schema";
+import { accounts, auditLogs, budgetPeriods, budgets, categories, categoryGroups, fxRates, householdMembers, households, transactions, transactionSplits } from "@shared/schema";
 import { db } from "../../../db";
 import { a, b, actors, app, ids, reset, start, stop, type Role } from "../../tags/__tests__/completion-r04.tags.fixture";
 
@@ -39,13 +39,13 @@ async function clean() {
   await db.delete(categories).where(inArray(categories.householdId, [a, b]));
   await db.delete(categoryGroups).where(inArray(categoryGroups.householdId, [a, b]));
   await db.delete(fxRates).where(eq(fxRates.id, quoteId));
-  if (trustedQuotes.length) await db.delete(providerFxQuotes).where(inArray(providerFxQuotes.id, trustedQuotes.splice(0)));
+  if (trustedQuotes.length) await db.delete(fxRates).where(inArray(fxRates.id, trustedQuotes.splice(0)));
 }
-async function trustedQuote(effectiveDate: string, validThrough = effectiveDate) {
+// FIN-06: the preview reads the rate Reports uses, the latest shared fx_rates
+// row dated on or before the flow (the market refresh's mirror). Synthetic.
+async function trustedQuote(rateDate: string) {
   const id = randomUUID(); trustedQuotes.push(id);
-  // Synthetic inputs to the independently guarded trusted store. No provider call.
-  await db.insert(providerFxQuotes).values({ id, fromCurrency: "USD", toCurrency: "ZMW", provider: "yahoo_finance",
-    rate: "2", effectiveDate, validThrough, quotedAt: new Date(`${effectiveDate}T10:00:00Z`) });
+  await db.insert(fxRates).values({ id, fromCurrency: "USD", toCurrency: "ZMW", rate: "2", date: rateDate, source: "yahoo_finance" });
 }
 async function financialState() {
   const budgetIds = [groceryBudget, diningBudget, foreignBudget, groupBudgetId, incomeBudget, ungroupedBudget];
@@ -289,13 +289,20 @@ describe("FIN-07 fresh signed historical preview preserves manual financial stat
     expectGroceries((await post({ months: 3 }).expect(200)).body.data, "700.00", "233.33");
     expectGroceries((await post({ months: 3 }, "owner").expect(200)).body.data);
   });
-  it.each([false, true])("surfaces visible missing/unverified FX without writing limits (legacy rate present=%s)", async legacyRate => {
+  it("surfaces visible missing FX without writing limits", async () => {
     await db.insert(accounts).values({ id: fxAccount, householdId: a, name: "Visible foreign history", type: "checking", currency: "QPX" });
     await source({ amount: "10", accountId: fxAccount, currency: "QPX" });
-    if (legacyRate) await db.insert(fxRates).values({ id: quoteId, fromCurrency: "QPX", toCurrency: "ZMW", rate: "25", date: `${periods[2]}-15`, source: "yahoo_finance" });
     const before = await financialState(), response = await post({ months: 3 }).expect(422);
     expect(response.body).toMatchObject({ success: false, error: { code: "FINANCIAL_DATA_UNAVAILABLE" } });
     expect(response.body.data).toBeUndefined();
+    expect(await financialState()).toEqual(before);
+  });
+  it("converts with the shared rate Reports would use for the same flow, still without writing limits (FIN-06)", async () => {
+    await db.insert(accounts).values({ id: fxAccount, householdId: a, name: "Visible foreign history", type: "checking", currency: "QPX" });
+    await source({ amount: "10", accountId: fxAccount, currency: "QPX" });
+    await db.insert(fxRates).values({ id: quoteId, fromCurrency: "QPX", toCurrency: "ZMW", rate: "25", date: `${periods[2]}-15`, source: "yahoo_finance" });
+    const before = await financialState();
+    expectGroceries((await post({ months: 3 }).expect(200)).body.data, "800.00", "266.67");
     expect(await financialState()).toEqual(before);
   });
   it("does not reveal a private unpriceable source through availability or warnings", async () => {
@@ -307,7 +314,7 @@ describe("FIN-07 fresh signed historical preview preserves manual financial stat
     expect((await post({ months: 3 }).expect(200)).body.data).toEqual(before);
     expect((await post({ months: 3 }, "owner").expect(422)).body.error.code).toBe("FINANCIAL_DATA_UNAVAILABLE");
   });
-  it("converts ordinary and split history using an actual same-day trusted observation", async () => {
+  it("converts ordinary and split history at the dated shared rate", async () => {
     await db.insert(accounts).values({ id: fxAccount, householdId: a, name: "Trusted USD history", type: "checking", currency: "USD" });
     await trustedQuote(`${periods[2]}-15`);
     await source({ amount: "10", accountId: fxAccount, currency: "USD" });
@@ -317,10 +324,16 @@ describe("FIN-07 fresh signed historical preview preserves manual financial stat
     expectGroceries((await get().expect(200)).body.data, "582.00", "194.00");
     expect(await financialState()).toEqual(before);
   });
-  it.each(["prior carry", "later observation"] as const)("does not adopt %s as a same-day budget rate", async kind => {
-    await db.insert(accounts).values({ id: fxAccount, householdId: a, name: "Unsupported dated USD history", type: "checking", currency: "USD" });
+  it("carries the latest earlier shared rate forward, as Reports does", async () => {
+    await db.insert(accounts).values({ id: fxAccount, householdId: a, name: "Earlier-rated USD history", type: "checking", currency: "USD" });
     await source({ amount: "10", accountId: fxAccount, currency: "USD" });
-    await trustedQuote(`${periods[2]}-${kind === "prior carry" ? "14" : "16"}`, `${periods[2]}-16`);
+    await trustedQuote(`${periods[2]}-14`);
+    expectGroceries((await post({ months: 3 }).expect(200)).body.data, "570.00", "190.00");
+  });
+  it("does not adopt a shared rate dated after the flow", async () => {
+    await db.insert(accounts).values({ id: fxAccount, householdId: a, name: "Later-rated USD history", type: "checking", currency: "USD" });
+    await source({ amount: "10", accountId: fxAccount, currency: "USD" });
+    await trustedQuote(`${periods[2]}-16`);
     const before = await financialState(), response = await post({ months: 3 }).expect(422);
     expect(response.body.error.code).toBe("FINANCIAL_DATA_UNAVAILABLE");
     expect(await financialState()).toEqual(before);

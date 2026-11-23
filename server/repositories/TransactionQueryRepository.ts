@@ -22,7 +22,7 @@ import {
 } from "drizzle-orm";
 import { db } from "../db";
 import { postedTransactionPredicate } from "./postedTransactionPredicate";
-import { providerFlowRate } from "./reports/providerFxQuote";
+import { resolvedFxRate } from "./fx/resolvedFxRate";
 import {
   transactions,
   accounts,
@@ -215,7 +215,7 @@ export class TransactionQueryRepository {
         ...(options?.summaryCurrency ? {
           summaryRate: sql<string | null>`CASE WHEN ${transactions.type} IN ('income', 'expense')
             AND ${transactions.isExcludedFromReports} IS NOT TRUE AND ${transactions.amount} <> 0
-            THEN (${providerFlowRate(sql`${transactions.currency}`, options.summaryCurrency, sql`${transactions.date}`, sql`transaction_timestamp()`)})::text END`,
+            THEN (${resolvedFxRate(householdId, sql`${transactions.currency}`, options.summaryCurrency, sql`${transactions.date}`)})::text END`,
         } : {}),
         ...(options?.includeSplits ? {
         splits: sql<NonNullable<TransactionWithNames["splits"]>>`COALESCE((SELECT jsonb_agg(jsonb_build_object(
