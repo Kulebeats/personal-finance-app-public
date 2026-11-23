@@ -1,16 +1,17 @@
 import { and, eq, gte, lte, sql } from "drizzle-orm";
-import { accounts, budgetPeriods, budgets, categories, categoryGroups, householdMembers, households, providerFxQuotes, transactions, transactionSplits } from "@shared/schema";
+import { accounts, budgetPeriods, budgets, categories, categoryGroups, householdMembers, households, transactions, transactionSplits } from "@shared/schema";
 import type { db } from "../db";
 import { visibleTransactionPredicate } from "../core/authz/transaction-visibility";
 import { ForbiddenError } from "../core/errors";
 import { BUDGET_GROUP_TYPES } from "./budgetGroupTypes";
+import { budgetFlowRates } from "./fx/budgetFlowRates";
 
 type ReadTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type BudgetPreviewInputs = {
   allowed: boolean; observedAt: string; targetPeriod: string; periods: string[]; currency: string | null;
   categories: Array<{ id: string; groupId: string | null; mode: string; type: string | null }>;
   flows: Array<{ categoryId: string; date: string; currency: string | null; type: "expense" | "income"; amount: string; invalid: boolean }>;
-  quotes: Array<{ id: string; from: string; to: string; rate: string; provider: string; quotedAt: string; date: string; validThrough: string }>;
+  quotes: Array<{ from: string; rate: string; date: string }>;
   budgets: Array<{ id: string; categoryId: string | null; categoryGroupId: string | null; amount: string | null; currency: string | null }>;
   overrides: Array<{ id: string; budgetId: string; from: string; to: string; amount: string; currency: string | null; version: number }>;
   invalidSplits: boolean;
@@ -64,11 +65,7 @@ export async function readBudgetPreviewInputs(tx: ReadTransaction, householdId: 
     group by p.id,p.amount having sum(s.amount) is distinct from p.amount
       or bool_or(s.amount<0 or s.amount::text !~ '^[0-9]+([.][0-9]+)?$')
   ), selected_quotes as (
-    select distinct on(q.from_currency,q.effective_date) q.* from ${providerFxQuotes} q cross join base cross join clock
-    where q.to_currency=base.currency and q.from_currency<>base.currency and q.quoted_at<=clock.observed
-      and q.provider in ('yahoo_finance','exchangerate_api') and q.valid_through>=q.effective_date
-      and exists(select 1 from grouped_flows f where f.currency=q.from_currency and f.date=q.effective_date and f.amount<>0)
-    order by q.from_currency,q.effective_date,q.quoted_at desc,q.provider
+    ${budgetFlowRates(householdId, sql`(select currency from base)`)}
   ), current_budgets as (
     select b.id,b.category_id,b.category_group_id,b.amount,b.currency from ${budgets} b
     where b.household_id=${householdId}::uuid and b.is_active=true and b.is_flex_bucket=false
@@ -88,10 +85,8 @@ export async function readBudgetPreviewInputs(tx: ReadTransaction, householdId: 
       from eligible_categories),'[]'::jsonb) as categories,
     coalesce((select jsonb_agg(jsonb_build_object('categoryId',category_id::text,'date',to_char(date,'YYYY-MM-DD'),
       'currency',currency,'type',type::text,'amount',amount::text,'invalid',invalid) order by category_id,date,currency,type) from grouped_flows),'[]'::jsonb) as flows,
-    coalesce((select jsonb_agg(jsonb_build_object('id',id::text,'from',from_currency,'to',to_currency,'rate',rate::text,'provider',provider,
-      'quotedAt',to_char(quoted_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-      'date',to_char(effective_date,'YYYY-MM-DD'),'validThrough',to_char(valid_through,'YYYY-MM-DD')) order by from_currency,effective_date)
-      from selected_quotes),'[]'::jsonb) as quotes,
+    coalesce((select jsonb_agg(jsonb_build_object('from',from_currency,'rate',rate::text,'date',to_char(effective_date,'YYYY-MM-DD'))
+      order by from_currency,effective_date) from selected_quotes where rate is not null),'[]'::jsonb) as quotes,
     coalesce((select jsonb_agg(jsonb_build_object('id',id::text,'categoryId',category_id::text,'categoryGroupId',category_group_id::text,
       'amount',amount::text,'currency',currency) order by id) from current_budgets),'[]'::jsonb) as budgets,
     coalesce((select jsonb_agg(jsonb_build_object('id',id::text,'budgetId',budget_id::text,'from',to_char(start_date,'YYYY-MM-DD'),

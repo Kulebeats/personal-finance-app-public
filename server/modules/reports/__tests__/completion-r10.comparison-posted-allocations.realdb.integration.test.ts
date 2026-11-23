@@ -1,15 +1,15 @@
 import { randomUUID } from "node:crypto";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { eq, inArray } from "drizzle-orm";
-import { budgets, budgetPeriods, categories, categoryGroups, dataExports, fxRates, households, providerFxQuotes, transactions, transactionSplits } from "@shared/schema";
+import { eq, inArray, sql } from "drizzle-orm";
+import { budgets, budgetPeriods, categories, categoryGroups, dataExports, fxRates, householdFxRateOverrides, households, transactions, transactionSplits } from "@shared/schema";
 import { db } from "../../../db";
 import { Money } from "../../../core/money";
 import { a, b, actors, app, ids, resetAccountsAndMembership, start, stop, type Role } from "../../tags/__tests__/completion-r04.tags.fixture";
 
 const group = randomUUID(), grocery = randomUUID(), dining = randomUUID(), transport = randomUUID(), foreign = randomUUID();
 const first = "2026-10-01", last = "2026-10-31", day = "2026-10-15";
-const quoteIds: string[] = [], manualRateIds: string[] = [];
+const rateIds: string[] = [];
 type Part = { categoryId: string | null; amount: string };
 type Options = { categoryId?: string | null; currency?: string | null; date?: string; pending?: boolean;
   status?: "pending" | "cleared" | "reconciled" | null; type?: "income" | "expense" | "transfer" | "balance_adjustment";
@@ -54,18 +54,19 @@ async function unavailable() {
     expect(JSON.stringify(response.body)).not.toContain(secret); expect(JSON.stringify(download.body)).not.toContain(secret);
   }
 }
-async function trusted(date = day, validThrough = date) {
-  const id = randomUUID(); quoteIds.push(id);
-  await db.insert(providerFxQuotes).values({ id, fromCurrency: "USD", toCurrency: "ZMW", rate: "2", provider: "yahoo_finance",
-    effectiveDate: date, validThrough, quotedAt: new Date(`${date}T10:00:00Z`) });
+// FIN-06: the comparison reads the rate Reports uses, the latest shared
+// fx_rates row dated on or before the flow, unless the household set its own.
+async function trusted(date = day, rate = "2") {
+  const id = randomUUID(); rateIds.push(id);
+  await db.insert(fxRates).values({ id, fromCurrency: "USD", toCurrency: "ZMW", rate, date, source: "yahoo_finance" });
 }
 async function clean() {
   await db.delete(dataExports).where(inArray(dataExports.householdId, [a, b]));
   await db.delete(budgets).where(inArray(budgets.householdId, [a, b]));
   await db.delete(categories).where(inArray(categories.householdId, [a, b]));
   await db.delete(categoryGroups).where(inArray(categoryGroups.householdId, [a, b]));
-  if (quoteIds.length) await db.delete(providerFxQuotes).where(inArray(providerFxQuotes.id, quoteIds.splice(0)));
-  if (manualRateIds.length) await db.delete(fxRates).where(inArray(fxRates.id, manualRateIds.splice(0)));
+  await db.delete(householdFxRateOverrides).where(inArray(householdFxRateOverrides.householdId, [a, b]));
+  if (rateIds.length) await db.delete(fxRates).where(inArray(fxRates.id, rateIds.splice(0)));
 }
 
 describe("NEW-14 signed budget comparison and CSV use posted expense allocations", () => {
@@ -195,21 +196,29 @@ describe("NEW-14 signed budget comparison and CSV use posted expense allocations
     await posting("90", [{ categoryId: grocery, amount: "60" }, { categoryId: dining, amount: "30" }], { currency });
     await unavailable();
   });
-  it("uses an in-validity trusted dated quote for ordinary and split allocations, ignoring editable fx_rates", async () => {
-    await trusted("2026-10-14", "2026-10-15");
-    const id = randomUUID(); manualRateIds.push(id);
-    await db.insert(fxRates).values({ id, fromCurrency: "USD", toCurrency: "ZMW", rate: "999", date: day, source: "manual" });
+  it("uses the latest earlier shared rate for ordinary and split allocations, ignoring a later-dated one", async () => {
+    await trusted("2026-10-14");
+    await trusted("2026-10-16", "999");
     await posting("3", undefined, { currency: "USD" });
     await posting("10", [{ categoryId: grocery, amount: "6" }, { categoryId: dining, amount: "4" }], { currency: "USD" });
     const response = await report().expect(200); expect(values(response)).toEqual({ Groceries: "18.00", Dining: "8.00" });
     expect(response.body.data.summary.totalActual).toEqual({ amount: "26.00", currency: "ZMW" });
     const download = await csv(); expect(download.status).toBe(200); expect(csvValues(download.text)).toEqual({ Groceries: "18.00", Dining: "8.00" });
   });
-  it.each(["missing", "expired", "future", "editable only"] as const)("rejects %s conversion evidence for contributing posted allocations", async evidence => {
-    if (evidence === "expired") await trusted("2026-10-13", "2026-10-14");
-    if (evidence === "future") await trusted("2026-10-16");
-    if (evidence === "editable only") {
-      const id = randomUUID(); manualRateIds.push(id); await db.insert(fxRates).values({ id, fromCurrency: "USD", toCurrency: "ZMW", rate: "2", date: day, source: "manual" });
+  it("prefers the household's own manual rate to the shared rate", async () => {
+    await trusted("2026-10-14");
+    await db.insert(householdFxRateOverrides).values({ householdId: a, actorUserId: actors.get("owner")!.id, fromCurrency: "USD", toCurrency: "ZMW",
+      effectiveDate: first, validThrough: last, rate: "3" });
+    await posting("10", [{ categoryId: grocery, amount: "6" }, { categoryId: dining, amount: "4" }], { currency: "USD" });
+    expect(values(await report().expect(200))).toEqual({ Groceries: "18.00", Dining: "12.00" });
+  });
+  it.each(["missing", "later-dated", "another household's"] as const)("rejects %s conversion rates for contributing posted allocations", async evidence => {
+    const earlier = await db.select({ id: fxRates.id }).from(fxRates).where(sql`${fxRates.fromCurrency}='USD' and ${fxRates.toCurrency}='ZMW' and ${fxRates.date}<=${day}::date`);
+    expect(earlier).toEqual([]);
+    if (evidence === "later-dated") await trusted("2026-10-16");
+    if (evidence === "another household's") {
+      await db.insert(householdFxRateOverrides).values({ householdId: b, actorUserId: actors.get("outsider")!.id, fromCurrency: "USD", toCurrency: "ZMW",
+        effectiveDate: first, validThrough: last, rate: "2" });
     }
     await posting("10", [{ categoryId: grocery, amount: "6" }, { categoryId: dining, amount: "4" }], { currency: "USD" });
     await unavailable();
