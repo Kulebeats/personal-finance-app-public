@@ -15,7 +15,12 @@ export const LOCK_LOST = "LOCK_LOST";
 /** The work ran, but the journal row could not be closed: its outcome is not recorded. */
 export const JOB_OUTCOME_UNKNOWN = "JOB_OUTCOME_UNKNOWN";
 
-/** Thrown when the work ran but closing its journal row failed; never retry it as "not started". */
+/**
+ * Thrown when the work ran but closing its journal row failed. The row stays
+ * `running`, so the period is not done: a later run of it (the door, or the
+ * scheduler's recovery tick) closes that row as RUN_SUPERSEDED and runs the
+ * work again. Callers must not report it as "not started".
+ */
 export class JobOutcomeUnknownError extends Error {
   readonly code = JOB_OUTCOME_UNKNOWN;
 
