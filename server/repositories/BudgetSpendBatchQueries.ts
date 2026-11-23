@@ -1,5 +1,5 @@
 import { and, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
-import { accounts, categories, categoryGroups, providerFxQuotes, transactions, transactionSplits } from "@shared/schema";
+import { accounts, categories, categoryGroups, transactions, transactionSplits } from "@shared/schema";
 import { isCurrencyCode } from "@shared/denomination";
 import { db } from "../db";
 import { readableMembershipPredicate, visibleTransactionPredicate } from "../core/authz/transaction-visibility";
@@ -7,6 +7,7 @@ import { ConflictError, ForbiddenError } from "../core/errors";
 import { Money } from "../core/money";
 import { BudgetDenominationUnavailable } from "../core/money/budget-denomination";
 import { assertBudgetReadContext, type BudgetReadContext } from "./BudgetReadContext";
+import { budgetFlowRates } from "./fx/budgetFlowRates";
 import { BUDGET_GROUP_TYPES } from "./budgetGroupTypes";
 
 export type BudgetSpendFlow = { categoryId: string; groupId: string | null; type: string; date: string; currency: string | null; amount: string; invalid: boolean };
@@ -61,18 +62,13 @@ async function readInputs(householdId: string, from: string, to: string, currenc
     group by p.id,p.amount having sum(s.amount) is distinct from p.amount
       or bool_or(s.amount<0 or s.amount::text !~ '^[0-9]+([.][0-9]+)?$')
   ), selected_quotes as (
-    select distinct on(q.from_currency,q.effective_date) q.from_currency,q.effective_date,q.rate
-    from ${providerFxQuotes} q where q.to_currency=${currency}::text and q.from_currency<>${currency}::text
-      and q.provider in ('yahoo_finance','exchangerate_api') and q.quoted_at<=transaction_timestamp()
-      and (q.quoted_at at time zone 'UTC')::date=q.effective_date and q.valid_through>=q.effective_date
-      and exists(select 1 from grouped_flows f where f.currency=q.from_currency and f.date=q.effective_date and f.amount<>0)
-    order by q.from_currency,q.effective_date,q.quoted_at desc,q.provider,q.id
+    ${budgetFlowRates(householdId, currency)}
   ) select ${permitted} as allowed,
     coalesce((select jsonb_agg(jsonb_build_object('categoryId',category_id::text,'groupId',group_id::text,
       'type',type::text,'date',to_char(date,'YYYY-MM-DD'),'currency',currency,'amount',amount::text,'invalid',invalid)
       order by category_id,type,date,currency) from grouped_flows),'[]'::jsonb) as flows,
     coalesce((select jsonb_agg(jsonb_build_object('from',from_currency,'date',to_char(effective_date,'YYYY-MM-DD'),
-      'rate',rate::text) order by from_currency,effective_date) from selected_quotes),'[]'::jsonb) as quotes,
+      'rate',rate::text) order by from_currency,effective_date) from selected_quotes where rate is not null),'[]'::jsonb) as quotes,
     exists(select 1 from invalid_splits) as "invalidSplits"`);
   const row = result.rows[0];
   if (!row?.allowed) throw new ForbiddenError("Budget progress access denied");

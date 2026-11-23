@@ -21,47 +21,11 @@
  */
 
 import { sql, type SQL } from "drizzle-orm";
-import { fxRates, householdFxRateOverrides } from "@shared/schema";
+import { resolvedFxRate } from "../fx/resolvedFxRate";
 
-/**
- * The resolved rate for one currency on one date, or NULL when none exists.
- *
- * @param householdId - The household whose own manual rates may apply
- * @param currencyExpr - SQL expression yielding the source currency
- * @param baseCurrency - Target (household base) currency code
- * @param dateExpr - SQL expression for the conversion date; when absent, the
- *                   household rate must be valid today and the latest shared
- *                   rate applies
- */
-export function resolvedFxRate(
-  householdId: string,
-  currencyExpr: SQL,
-  baseCurrency: string,
-  dateExpr?: SQL,
-): SQL {
-  const onDate = dateExpr ?? sql`(transaction_timestamp() AT TIME ZONE 'UTC')::date`;
-  const sharedDateClause = dateExpr ? sql`AND hfx_shared.date <= ${dateExpr}` : sql``;
-  return sql`COALESCE(
-    (SELECT hfx_own.rate::numeric
-     FROM ${householdFxRateOverrides} hfx_own
-     WHERE hfx_own.household_id = ${householdId}::uuid
-       AND hfx_own.from_currency = ${currencyExpr}
-       AND hfx_own.to_currency = ${baseCurrency}::text
-       AND hfx_own.effective_date <= ${onDate}
-       AND hfx_own.valid_through >= ${onDate}
-     ORDER BY hfx_own.effective_date DESC
-     LIMIT 1),
-    (SELECT hfx_shared.rate::numeric
-     FROM ${fxRates} hfx_shared
-     WHERE hfx_shared.from_currency = ${currencyExpr}
-       AND hfx_shared.to_currency = ${baseCurrency}::text
-       ${sharedDateClause}
-     -- fx_rates has no unique (from, to, date): the lower id breaks a same-day
-     -- tie, as in the investments datedRateRow.
-     ORDER BY hfx_shared.date DESC, hfx_shared.id ASC
-     LIMIT 1)
-  )`;
-}
+// FIN-06: the resolution itself is shared with Budgets and the transaction
+// summary; it lives in repositories/fx/resolvedFxRate.
+export { resolvedFxRate };
 
 /**
  * Build the SQL expression resolving a row's FX rate to the base currency.

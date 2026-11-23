@@ -1,5 +1,5 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
-import { accounts, budgetPeriods, budgets, categories, categoryGroups, householdMembers, householdPreferences, households, notifications, providerFxQuotes, transactions, transactionSplits, userNotificationPreferences, userPushSubscriptions, users, type Notification } from "@shared/schema";
+import { accounts, budgetPeriods, budgets, categories, categoryGroups, fxRates, householdFxRateOverrides, householdMembers, householdPreferences, households, notifications, transactions, transactionSplits, userNotificationPreferences, userPushSubscriptions, users, type Notification } from "@shared/schema";
 import { NOTIFICATION_TYPES, type NotificationType } from "@shared/notificationTypes";
 import { db } from "../../db";
 import { isHouseholdRole } from "../../core/authz/capabilities";
@@ -44,7 +44,11 @@ async function withCurrentCrossing<T>(userId: string, householdId: string, year:
         .where(inArray(transactionSplits.transactionId, targets.transactions)).orderBy(transactionSplits.id).for("share");
       await tx.select({ id: budgets.id }).from(budgets).where(inArray(budgets.id, targets.budgets)).orderBy(budgets.id).for("update");
       await tx.select({ id: budgetPeriods.id }).from(budgetPeriods).where(inArray(budgetPeriods.id, targets.periods)).orderBy(budgetPeriods.id).for("share");
-      await tx.select({ id: providerFxQuotes.id }).from(providerFxQuotes).where(inArray(providerFxQuotes.id, targets.quotes)).orderBy(providerFxQuotes.id).for("share");
+      // FIN-06: hold exactly the rate rows the shared resolver used (a household
+      // manual rate or a shared fx_rates row). A newer rate that would win is a
+      // phantom; the final statement's to_jsonb comparison refuses it.
+      await tx.select({ id: householdFxRateOverrides.id }).from(householdFxRateOverrides).where(inArray(householdFxRateOverrides.id, targets.fxOverrides)).orderBy(householdFxRateOverrides.id).for("share");
+      await tx.select({ id: fxRates.id }).from(fxRates).where(inArray(fxRates.id, targets.fxRates)).orderBy(fxRates.id).for("share");
       const input = await readBudgetProgressInputs(householdId, year, month,
         { kind: "actor", actor: { householdId, userId, role: member.role } }, tx);
       if (JSON.stringify(input.lockTargets) !== JSON.stringify(targets)) throw new ConflictError("Budget publication audience changed");
@@ -75,7 +79,7 @@ export async function publishBudgetReview(userId: string, householdId: string, y
     const metadata = { internalBudgetDeliveryClaim: !channels.inAppEnabled,
       delivery: { email: channels.emailEnabled ? "claimed" : "disabled", push: channels.pushEnabled ? "claimed" : "disabled" } };
     // The final financial read and insert share one statement snapshot. A new
-    // competing quote (or other phantom source) cannot enter between them.
+    // competing rate (or other phantom source) cannot enter between them.
     const created = await tx.execute<{ id: string }>(sql`with final_input as materialized (
       ${budgetProgressInputsQuery(householdId, year, month, context)}
     ) insert into ${notifications} (user_id, household_id, type, title, body, action_url, dedupe_key, is_archived, metadata)
