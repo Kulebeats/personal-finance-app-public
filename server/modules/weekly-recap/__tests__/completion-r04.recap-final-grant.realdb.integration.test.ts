@@ -448,7 +448,8 @@ describe("R04 recap final recipient grant and protected recurring query failures
         expect(smtp).toHaveBeenCalledOnce();
         expect(smtp.mock.calls[0][0].html).toMatch(/Spending<\/div>\s*<div class="metric-value">ZMW\s*200\.00<\/div>/);
       } else {
-        expect(outcome).toBe("failed");
+        // OPS-007 P2: a missing rate is the digest's own data, settled rather than retried every tick.
+        expect(outcome).toBe("unbuildable");
         expect(smtp).not.toHaveBeenCalled();
       }
     } finally {
