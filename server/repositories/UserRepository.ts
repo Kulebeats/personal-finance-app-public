@@ -1,5 +1,5 @@
 import { effectiveRecapEmail } from "./UserNotificationPreferences";
-import { and, desc, eq, ne } from "drizzle-orm";
+import { and, desc, eq, ne, sql, type SQL } from "drizzle-orm";
 import { db } from "../db";
 import { ensureDisplaySettings, patchDisplaySettings } from "./UserDisplayPreferences";
 import {
@@ -41,6 +41,9 @@ type CreateUserSessionInput = {
   expiresAt: Date;
 };
 
+/** One address is one identity whatever its case (unique index on lower(email)). */
+export const sameEmail = (email: string): SQL => sql`lower(${users.email}) = lower(${email})`;
+
 export class UserRepository {
   async findById(id: string): Promise<User | undefined> {
     const result = await db
@@ -51,11 +54,13 @@ export class UserRepository {
     return result[0];
   }
 
+  /** Case-insensitive. While legacy case-variant rows exist, an exact match wins, then the oldest. */
   async findByEmail(email: string): Promise<User | undefined> {
     const result = await db
       .select()
       .from(users)
-      .where(eq(users.email, email))
+      .where(sameEmail(email))
+      .orderBy(sql`${users.email} = ${email} desc`, users.createdAt)
       .limit(1);
     return result[0];
   }
