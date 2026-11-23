@@ -203,9 +203,23 @@ describe("NEW-13 securities catalogue: curated list plus household-private custo
         (household_id, security_id, actor_user_id, effective_date, valid_through, price, currency)
         values ($1, $2, $3, $4, $5, '1', 'ZMW')`, [fixture.homeHouseholdId, fixture.referenceSecurityId, fixture.home.id, from, through]);
     }
-    const history = await signed(app, fixture, "home", "get", `/api/investments/securities/${fixture.referenceSecurityId}/prices`);
-    expect(history.status).toBe(200);
-    expect(history.body.data).toEqual([]);
+    for (const [date, price] of [["2026-01-10", "1.0000"], ["2026-02-10", "2.0000"], ["2026-03-10", "3.0000"]]) {
+      await pool.query("insert into security_prices (security_id, date, price, source) values ($1, $2, $3, 'synthetic')",
+        [fixture.referenceSecurityId, date, price]);
+    }
+    const history = async (query = "") => {
+      const response = await signed(app, fixture, "home", "get", `/api/investments/securities/${fixture.referenceSecurityId}/prices${query}`);
+      expect(response.status, `history${query}`).toBe(200);
+      return (response.body.data as Array<{ date: string; price: string; securityId: string }>)
+        .map(row => ({ date: row.date, price: row.price, securityId: row.securityId }));
+    };
+    const row = (date: string, price: string) => ({ date, price, securityId: fixture.referenceSecurityId });
+    // Newest first, and each filter narrows exactly as asked.
+    expect(await history()).toEqual([row("2026-03-10", "3.0000"), row("2026-02-10", "2.0000"), row("2026-01-10", "1.0000")]);
+    expect(await history("?startDate=2026-02-01")).toEqual([row("2026-03-10", "3.0000"), row("2026-02-10", "2.0000")]);
+    expect(await history("?endDate=2026-02-28")).toEqual([row("2026-02-10", "2.0000"), row("2026-01-10", "1.0000")]);
+    expect(await history("?startDate=2026-02-01&endDate=2026-02-28")).toEqual([row("2026-02-10", "2.0000")]);
+    expect(await history("?limit=1")).toEqual([row("2026-03-10", "3.0000")]);
   });
 
   it("audits an operator's curated row with the operator and no household", async () => {
@@ -241,7 +255,6 @@ describe("NEW-13 securities catalogue: curated list plus household-private custo
     vi.spyOn(marketDataService, "updateFXRates").mockRejectedValue(new Error("Synthetic internal detail"));
     const failed = await request(app).post("/api/investments/market/refresh").set("Cookie", operator.cookie).expect(500);
     expect(JSON.stringify(failed.body), "no internal error text").not.toContain("Synthetic internal detail");
-    vi.unstubAllGlobals();
   });
 
   it("only the operator can start a manual market refresh", async () => {
