@@ -13,7 +13,7 @@ test("an owner saves a shared view that persists and applies to Transactions", a
 
   await page.goto("/settings/members");
   await expect(page.getByText("Shared views", { exact: true }).first()).toBeVisible();
-  await expect(page.locator("main")).not.toContainText(/premium|upgrade|your plan|unlimited|advisor access/i);
+  await expect(page.locator("body")).not.toContainText(/premium|upgrade|your plan|unlimited|advisor access/i);
 
   await page.getByRole("button", { name: "New view", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "New shared view" });
