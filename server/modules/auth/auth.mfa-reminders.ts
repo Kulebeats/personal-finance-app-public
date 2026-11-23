@@ -71,11 +71,17 @@ async function findDueMembers(now: Date): Promise<DueMember[]> {
   return rows.map(toMember);
 }
 
-/** The member as they are now, or null when they no longer owe MFA or the deadline moved. */
+/**
+ * The member as they are now, or null when they no longer owe MFA or the deadline moved.
+ * The deadline is compared after both reads pass through the driver: Postgres keeps
+ * microseconds and a JS Date only milliseconds, so an SQL equality with the earlier
+ * read would never match a deadline written as `now() + interval`.
+ */
 async function rereadMember(member: DueMember, now: Date): Promise<DueMember | null> {
   const [row] = await db.select(DUE_COLUMNS).from(users)
-    .where(and(eq(users.id, member.id), owesMfa(now), eq(users.mfaGraceEndsAt, member.graceEndsAt))).limit(1);
-  return row ? toMember(row) : null;
+    .where(and(eq(users.id, member.id), owesMfa(now))).limit(1);
+  if (!row || row.graceEndsAt.getTime() !== member.graceEndsAt.getTime()) return null;
+  return toMember(row);
 }
 
 async function sendReminder(due: DueMember, now: Date): Promise<ChannelResult> {
