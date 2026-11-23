@@ -136,7 +136,8 @@ describe("R02 mounted session access (actual registration, mocked mail, disposab
     const lookup = vi.spyOn(householdRepository, "findByUserId");
     const member = vi.spyOn(householdRepository, "findMember");
     // AH-11: these members have no MFA yet and are inside the 14-day grace.
-    const grace = { state: "grace", graceEndsAt: expect.any(String), daysRemaining: 14 };
+    // daysRemaining compares the Node clock with Postgres now(); its value is pinned in the AH-11 suite.
+    const grace = { state: "grace", graceEndsAt: expect.any(String), daysRemaining: expect.any(Number) };
     try {
       expect((await readStatus(pending.cookie)).body).toEqual({ success: true, data: { state: "verification_pending", subject: { id: pending.id, email: pending.email, displayName: null } } });
       expect((await readStatus(mfa.cookie)).body).toEqual({ success: true, data: { state: "mfa_pending" } });

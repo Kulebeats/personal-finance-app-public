@@ -40,6 +40,23 @@ describe.each(guards)("R02 %s verifies current identity before downstream work",
     expect(householdRepository.findByUserId).not.toHaveBeenCalled();
     expect(householdRepository.findMember).not.toHaveBeenCalled();
   });
+  // AH-11 follow-up: every guard, including the explicit-household pair, applies the MFA gate.
+  it("denies a member past the MFA grace without MFA before any membership read", async () => {
+    const fixture = setup();
+    vi.mocked(userRepository.findById).mockResolvedValue({ ...current, mfaEnabled: false, mfaGraceEndsAt: new Date(Date.now() - 60_000) });
+    await guard(fixture.req, fixture.res, fixture.next);
+    expect(fixture.status).toHaveBeenCalledWith(403);
+    expect(fixture.json).toHaveBeenCalledWith(expect.objectContaining({ error: expect.objectContaining({ code: "MFA_ENROLMENT_REQUIRED" }) }));
+    expect(fixture.next).not.toHaveBeenCalled();
+    expect(householdRepository.findMember).not.toHaveBeenCalled();
+  });
+  it("admits a member without MFA inside the grace", async () => {
+    const fixture = setup();
+    vi.mocked(userRepository.findById).mockResolvedValue({ ...current, mfaEnabled: false, mfaGraceEndsAt: new Date(Date.now() + 86_400_000) });
+    await guard(fixture.req, fixture.res, fixture.next);
+    expect(fixture.next).toHaveBeenCalledTimes(1);
+    expect(fixture.status).not.toHaveBeenCalled();
+  });
   it.each([{}, { mfaPendingUserId: userId, mfaPendingSecurityGeneration: 2 }])("denies anonymous and MFA-only identities without promoting the session", async (identity) => {
     const fixture = setup(identity);
     await guard(fixture.req, fixture.res, fixture.next);
