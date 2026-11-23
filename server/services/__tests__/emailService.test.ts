@@ -134,7 +134,7 @@ describe("emailService SMTP configuration guard", () => {
     });
     expect(sendMailMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        from: '"Personal Finance App" <no-reply@example.com>',
+        from: { name: "Personal Finance App", address: "no-reply@example.com" },
         to: "person@example.com",
         subject: "Configured SMTP",
         html: "<p>Body</p>",
