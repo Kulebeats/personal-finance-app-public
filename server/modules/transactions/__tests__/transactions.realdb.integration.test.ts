@@ -42,7 +42,6 @@ import {
   auditLogs,
   outboxEvents,
   fxRates,
-  providerFxQuotes,
   securityAuditLogs,
   session,
   type Transaction,
@@ -326,7 +325,7 @@ describe("Transactions REAL-DB Integration (SCP-316)", () => {
   });
 
   describe("FIN-17 dated flow FX over signed HTTP", () => {
-    const quoteIds: string[] = [], legacyIds: string[] = [];
+    const legacyIds: string[] = [];
     const headers = () => ({ Cookie: authCookie, "X-Capital-Subject": userId, "X-Capital-Household": householdId });
     let fxService: ReturnType<typeof createFXRateService>;
     beforeAll(async () => {
@@ -336,14 +335,13 @@ describe("Transactions REAL-DB Integration (SCP-316)", () => {
       fxService = createFXRateService(createFXRateRepository(db, fxRates), { cacheTtlSeconds: 0, baseCurrency: "USD", fallbackDays: 30 });
       setGlobalFXService(fxService);
       const id = randomUUID(); legacyIds.push(id);
-      // A provider-shaped label in the legacy store is not provider evidence.
-      // The far later date also exposes accidental latest/spot conversion.
+      // FIN-06: the summary resolves rates as Reports does. A far later shared
+      // rate must never convert an earlier posting (no latest/spot conversion).
       await db.insert(fxRates).values({ id, fromCurrency: "USD", toCurrency: "ZMW", date: "2199-12-31", rate: "99.9900", source: "yahoo_finance" });
     });
     afterAll(async () => {
       try {
         await db.transaction(async tx => {
-          if (quoteIds.length) await tx.delete(providerFxQuotes).where(inArray(providerFxQuotes.id, quoteIds));
           if (legacyIds.length) await tx.delete(fxRates).where(inArray(fxRates.id, legacyIds));
         });
       } finally { fxService?.clearCache(); }
@@ -355,12 +353,10 @@ describe("Transactions REAL-DB Integration (SCP-316)", () => {
         currency, isAsset: true, isPrivate: false, initialBalance: "1000.00", balance: "1000.00" });
       return id;
     }
-    async function observe(effectiveDate: string, validThrough: string, rate: string, provider: "yahoo_finance" | "exchangerate_api" = "yahoo_finance", hour = "10") {
-      const id = randomUUID(); quoteIds.push(id);
-      // Synthetic trusted-store input, not a claim that a real provider/network
-      // observation occurred. Explicit instants satisfy storage provenance checks.
-      await db.insert(providerFxQuotes).values({ id, fromCurrency: "USD", toCurrency: "ZMW", provider, effectiveDate, validThrough, rate,
-        quotedAt: new Date(`${effectiveDate}T${hour}:00:00Z`), recordedAt: new Date(`${effectiveDate}T23:00:00Z`) });
+    async function observe(date: string, rate: string, fromCurrency = "USD") {
+      const id = randomUUID(); legacyIds.push(id);
+      // Synthetic shared rate shaped like the market refresh's fx_rates mirror.
+      await db.insert(fxRates).values({ id, fromCurrency, toCurrency: "ZMW", date, rate, source: "yahoo_finance" });
       return id;
     }
     const post = (id: string, date: string, type: "income" | "expense", amount: string, currency = "USD") => request(app)
@@ -368,8 +364,8 @@ describe("Transactions REAL-DB Integration (SCP-316)", () => {
     const summary = (id: string, startDate: string, endDate = startDate) => request(app)
       .get("/api/transactions/summary").set(headers()).query({ accountId: id, startDate, endDate });
     const money = (amount: string) => ({ amount, currency: "ZMW" });
-    async function assertNoOtherQuotes(start: string, end: string) {
-      const existing = await pool.query("SELECT id FROM provider_fx_quotes WHERE from_currency='USD' AND to_currency='ZMW' AND effective_date BETWEEN $1::date AND $2::date", [start, end]);
+    async function assertNoOtherQuotes(start: string, end: string, fromCurrency = "USD") {
+      const existing = await pool.query("SELECT id FROM fx_rates WHERE from_currency=$3 AND to_currency='ZMW' AND date BETWEEN $1::date AND $2::date", [start, end, fromCurrency]);
       expect(existing.rows).toEqual([]);
     }
 
@@ -418,15 +414,13 @@ describe("Transactions REAL-DB Integration (SCP-316)", () => {
     it("uses each posting date, inclusive prior validity and household currency instead of either later trap", async () => {
       const id = await freshAccount();
       await assertNoOtherQuotes("1976-04-07", "1976-04-18");
-      const early = await observe("1976-04-10", "1976-04-13", "25.123400000000");
-      // Earlier observation on the same effective day must not win over10:00.
-      await observe("1976-04-10", "1976-04-13", "20.000000000000", "exchangerate_api", "09");
-      const later = await observe("1976-04-14", "1976-04-17", "26.500000000000", "exchangerate_api");
-      await observe("1976-04-15", "1976-04-18", "90.000000000000");
-      const stored = await db.select().from(providerFxQuotes).where(inArray(providerFxQuotes.id, [early, later]));
+      const early = await observe("1976-04-10", "25.1234");
+      const later = await observe("1976-04-14", "26.5000");
+      await observe("1976-04-15", "90.0000");
+      const stored = await db.select().from(fxRates).where(inArray(fxRates.id, [early, later]));
       expect(stored).toEqual(expect.arrayContaining([
-        expect.objectContaining({ id: early, rate: "25.123400000000", effectiveDate: "1976-04-10", validThrough: "1976-04-13" }),
-        expect.objectContaining({ id: later, rate: "26.500000000000", effectiveDate: "1976-04-14", validThrough: "1976-04-17" }),
+        expect.objectContaining({ id: early, rate: "25.1234", date: "1976-04-10" }),
+        expect.objectContaining({ id: later, rate: "26.5000", date: "1976-04-14" }),
       ]));
       const empty = await summary(id, "1976-04-10", "1976-04-14").expect(200);
       expect(empty.body.data).toMatchObject({ currency: "ZMW", transactionCount: 0, totalIncome: money("0.00"), totalExpenses: money("0.00"), netFlow: money("0.00") });
@@ -463,7 +457,7 @@ describe("Transactions REAL-DB Integration (SCP-316)", () => {
     it("aggregates fractional-cent flows before rounding and derives dates only from list-eligible rows", async () => {
       const id = await freshAccount(), date = "1980-02-10";
       await assertNoOtherQuotes("1980-02-07", "1980-02-15");
-      await observe(date, "1980-02-13", "0.600000000000");
+      await observe(date, "0.6000");
       const hiddenFirst = await post(id, "1980-02-08", "expense", "7.00").expect(201);
       const excludedFirst = await post(id, "1980-02-09", "expense", "13.00").expect(201);
       const tiny = [
@@ -497,8 +491,8 @@ describe("Transactions REAL-DB Integration (SCP-316)", () => {
     it("keeps signed net equal to displayed buckets when dated sub-cent income and expense round differently", async () => {
       const id = await freshAccount();
       await assertNoOtherQuotes("1982-03-07", "1982-03-14");
-      await observe("1982-03-10", "1982-03-13", "0.600000000000");
-      await observe("1982-03-11", "1982-03-14", "0.400000000000");
+      await observe("1982-03-10", "0.6000");
+      await observe("1982-03-11", "0.4000");
       const income = await post(id, "1982-03-10", "income", "0.01").expect(201);
       const expense = await post(id, "1982-03-11", "expense", "0.01").expect(201);
       expect((await pool.query("SELECT id, date::text, type, amount, currency FROM transactions WHERE account_id=$1 ORDER BY date", [id])).rows).toEqual([
@@ -548,23 +542,24 @@ describe("Transactions REAL-DB Integration (SCP-316)", () => {
         largestIncome: money("0.00"), largestExpense: money("0.00"), firstTransactionDate: date, lastTransactionDate: date });
     });
 
+    // Each scenario uses its own currency: shared rates carry forward, so a USD
+    // rate left by an earlier case would otherwise price these flows.
     it.each([
-      { label: "missing provider observation", date: "1977-06-10", start: "1977-06-07", end: "1977-06-13", quote: null },
-      { label: "only an observation after the flow date", date: "1977-07-10", start: "1977-07-07", end: "1977-07-14", quote: ["1977-07-11", "1977-07-14"] },
-      { label: "expired prior validity", date: "1977-08-10", start: "1977-08-06", end: "1977-08-13", quote: ["1977-08-06", "1977-08-09"] },
-      { label: "future observed and recorded timestamps", date: "2097-09-10", start: "2097-09-07", end: "2097-09-13", quote: ["2097-09-10", "2097-09-13"] },
-    ])("requires dated evidence for $label despite the provider-shaped legacy trap", async scenario => {
-      const id = await freshAccount();
-      await assertNoOtherQuotes(scenario.start, scenario.end);
-      if (scenario.quote) await observe(scenario.quote[0], scenario.quote[1], "26.500000000000");
-      const created = await post(id, scenario.date, "expense", "1.00").expect(201);
+      { label: "no rate at all", currency: "NAD", date: "1977-06-10", rateDate: null },
+      { label: "only a rate dated after the flow", currency: "LSL", date: "1977-07-10", rateDate: "1977-07-11" },
+    ])("fails closed with $label despite the later legacy trap", async scenario => {
+      const id = await freshAccount(scenario.currency);
+      await assertNoOtherQuotes("1900-01-01", scenario.date, scenario.currency);
+      if (scenario.rateDate) await observe(scenario.rateDate, "26.5000", scenario.currency);
+      const created = await post(id, scenario.date, "expense", "1.00", scenario.currency);
+      expect(created.status, JSON.stringify(created.body)).toBe(201);
       expect((await pool.query("SELECT date::text, currency, amount FROM transactions WHERE id=$1", [created.body.data.id])).rows)
-        .toEqual([{ date: scenario.date, currency: "USD", amount: "1.00" }]);
+        .toEqual([{ date: scenario.date, currency: scenario.currency, amount: "1.00" }]);
       const result = await summary(id, scenario.date);
       expect.soft(result.status).toBe(422);
       expect.soft(result.body).toMatchObject({ success: false, error: { code: "FINANCIAL_DATA_UNAVAILABLE" } });
       const diagnostic = JSON.stringify(result.body.error ?? result.body);
-      for (const value of ["USD", "ZMW", scenario.date]) expect.soft(diagnostic).toContain(value);
+      for (const value of [scenario.currency, "ZMW", scenario.date]) expect.soft(diagnostic).toContain(value);
     });
 
     it("does not require FX for an excluded or currently invisible signed foreign posting", async () => {

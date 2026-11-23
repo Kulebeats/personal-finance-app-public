@@ -17,9 +17,10 @@ function amount(value: string, currency: string) {
   return result;
 }
 function rateFor(input: BudgetPreviewInputs, currency: string, date: string) {
-  const quote = input.quotes.find(row => row.from === currency && row.to === input.currency && row.date === date);
-  if (!quote || !["yahoo_finance", "exchangerate_api"].includes(quote.provider) || quote.validThrough < date ||
-      quote.quotedAt.slice(0, 10) !== date || quote.quotedAt > input.observedAt) throw new BudgetPreviewUnavailable();
+  // FIN-06: the shared resolver already chose this day's rate (household
+  // manual rate, else the shared rate on or before the date); none fails closed.
+  const quote = input.quotes.find(row => row.from === currency && row.date === date);
+  if (!quote) throw new BudgetPreviewUnavailable();
   const rate = amount(quote.rate, currency);
   if (rate.isZero()) throw new BudgetPreviewUnavailable();
   return rate.amount;
