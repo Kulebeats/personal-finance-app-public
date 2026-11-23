@@ -1,7 +1,9 @@
 import { eq, and, sql, desc } from "drizzle-orm";
 import { db } from "../db";
-import { rules } from "@shared/schema";
-import { withTransaction } from "../utils/withTransaction";
+import { householdMembers, households, rules } from "@shared/schema";
+import { withTransaction, type TransactionType } from "../utils/withTransaction";
+import { can } from "../core/authz/capabilities";
+import { ForbiddenError, NotFoundError } from "../core/errors";
 
 // Use Drizzle inferred types from schema
 export type Rule = typeof rules.$inferSelect;
@@ -15,6 +17,19 @@ export type InsertRule = typeof rules.$inferInsert;
  * Returns typed results matching schema definitions.
  */
 export class RuleRepository {
+  /** Fence live author access before rule and tag locks, in tag-writer order. */
+  async lockAuthorContext(householdId: string, userId: string, tx: TransactionType): Promise<void> {
+    const [household] = await tx.select({ id: households.id }).from(households)
+      .where(eq(households.id, householdId)).for("key share").limit(1);
+    if (!household) throw new NotFoundError("Household not found");
+    const [member] = await tx.select({ role: householdMembers.role }).from(householdMembers)
+      .where(and(eq(householdMembers.householdId, householdId), eq(householdMembers.userId, userId)))
+      .for("share").limit(1);
+    if (!member || !can(member.role, "financial.write")) {
+      throw new ForbiddenError("Rule write access required");
+    }
+  }
+
   /**
    * Find all rules for a household, ordered by priority
    */
@@ -66,11 +81,26 @@ export class RuleRepository {
     return result[0];
   }
 
+  /** Lock the persisted action set before a merged update or enable. */
+  async findByIdAndHouseholdForUpdate(
+    id: string,
+    householdId: string,
+    tx: TransactionType,
+  ): Promise<Rule | undefined> {
+    const [rule] = await tx
+      .select()
+      .from(rules)
+      .where(and(eq(rules.id, id), eq(rules.householdId, householdId)))
+      .for("update")
+      .limit(1);
+    return rule;
+  }
+
   /**
    * Create a new rule
    */
-  async create(data: InsertRule): Promise<Rule> {
-    const result = await db
+  async create(data: InsertRule, tx?: TransactionType): Promise<Rule> {
+    const result = await (tx ?? db)
       .insert(rules)
       .values({
         ...data,
@@ -99,9 +129,10 @@ export class RuleRepository {
   async updateByHousehold(
     id: string,
     householdId: string,
-    data: Partial<Rule>
+    data: Partial<Rule>,
+    tx?: TransactionType,
   ): Promise<Rule | undefined> {
-    const result = await db
+    const result = await (tx ?? db)
       .update(rules)
       .set({ ...data, updatedAt: new Date() })
       .where(and(eq(rules.id, id), eq(rules.householdId, householdId)))
@@ -119,8 +150,8 @@ export class RuleRepository {
   /**
    * Delete a rule within a specific household (with security check)
    */
-  async deleteByHousehold(id: string, householdId: string): Promise<Rule | undefined> {
-    const result = await db
+  async deleteByHousehold(id: string, householdId: string, tx?: TransactionType): Promise<Rule | undefined> {
+    const result = await (tx ?? db)
       .delete(rules)
       .where(and(eq(rules.id, id), eq(rules.householdId, householdId)))
       .returning();
@@ -155,9 +186,18 @@ export class RuleRepository {
    * Reorder rules atomically
    * Updates priority for multiple rules in a single transaction
    */
-  async reorder(householdId: string, orderedIds: string[]): Promise<void> {
-    // Use transaction wrapper utility for automatic rollback
-    await withTransaction(async (tx) => {
+  async reorder(householdId: string, orderedIds: string[], userId?: string, externalTx?: TransactionType): Promise<void> {
+    const operation = async (tx: TransactionType) => {
+      if (userId) {
+        await this.lockAuthorContext(householdId, userId, tx);
+        // The HTTP writer shares bulk-enable's canonical lock order while
+        // retaining requested priority assignments below.
+        const lockIds = Array.from(new Set(orderedIds.map((id) => id.toLowerCase()))).sort();
+        for (const id of lockIds) {
+          // A rule outside the caller's household is reported as missing, never reordered.
+          if (!(await this.findByIdAndHouseholdForUpdate(id, householdId, tx))) throw new NotFoundError("Rule");
+        }
+      }
       // Update each rule's priority
       for (let i = 0; i < orderedIds.length; i++) {
         await tx
@@ -170,7 +210,9 @@ export class RuleRepository {
             )
           );
       }
-    });
+    };
+    if (externalTx) return operation(externalTx);
+    return withTransaction(operation);
   }
 
   /**

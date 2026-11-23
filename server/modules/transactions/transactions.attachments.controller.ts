@@ -10,6 +10,8 @@
 import { Request, Response } from "express";
 import * as fs from "fs/promises";
 import { attachmentService } from "../../services/AttachmentService";
+import { readUploadObject } from "../../core/storage/upload-objects";
+import { sendUploadContent } from "../../core/storage/upload-response";
 import { logger } from "../../utils/logger";
 import { success, created } from "../../core/http";
 import { ValidationError } from "../../core/errors";
@@ -35,7 +37,7 @@ export async function uploadAttachment(
   req: Request,
   res: Response
 ): Promise<void> {
-  const { householdId, userId } = req.householdContext!;
+  const { householdId, userId, role } = req.householdContext!;
   const { id } = req.params;
 
   if (!req.file) {
@@ -54,7 +56,8 @@ export async function uploadAttachment(
         filename: req.file.filename,
       },
       householdId,
-      userId
+      userId,
+      role
     );
   } catch (error) {
     await cleanupTempUpload(req.file);
@@ -74,10 +77,10 @@ export async function listAttachments(
   req: Request,
   res: Response
 ): Promise<void> {
-  const { householdId } = req.householdContext!;
+  const { householdId, userId } = req.householdContext!;
   const { id } = req.params;
 
-  const attachments = await attachmentService.getAttachments(id, householdId);
+  const attachments = await attachmentService.getAttachments(id, householdId, userId);
 
   success(res, attachments);
 }
@@ -90,18 +93,28 @@ export async function downloadAttachment(
   req: Request,
   res: Response
 ): Promise<void> {
-  const { householdId } = req.householdContext!;
+  const { householdId, userId } = req.householdContext!;
   const { attachmentId } = req.params;
 
   const result = await attachmentService.getAttachment(
     attachmentId,
-    householdId
+    householdId,
+    userId
   );
 
   if (!result) {
     res.status(404).json({
       success: false,
       error: { code: "NOT_FOUND", message: "Attachment not found" },
+    });
+    return;
+  }
+
+  const content = await readUploadObject(result.filePath, householdId);
+  if (!content) {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: "Attachment file not found" },
     });
     return;
   }
@@ -118,8 +131,7 @@ export async function downloadAttachment(
     "Content-Disposition",
     `attachment; filename="${sanitizedFilename}"; filename*=UTF-8''${encodedFilename}`
   );
-  res.setHeader("Content-Type", result.attachment.mimeType);
-  res.sendFile(result.filePath);
+  sendUploadContent(res, content, result.filePath, result.attachment.mimeType);
 }
 
 /**
@@ -130,10 +142,10 @@ export async function deleteAttachment(
   req: Request,
   res: Response
 ): Promise<void> {
-  const { householdId, userId } = req.householdContext!;
+  const { householdId, userId, role } = req.householdContext!;
   const { attachmentId } = req.params;
 
-  await attachmentService.deleteAttachment(attachmentId, householdId, userId);
+  await attachmentService.deleteAttachment(attachmentId, householdId, userId, role);
 
   logger.request(req, "Deleted attachment", { attachmentId });
 

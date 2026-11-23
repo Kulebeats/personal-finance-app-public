@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Dashboard from "../Dashboard";
 
 type ApiErrorLike = Error & { code?: string; status?: number };
@@ -20,15 +20,19 @@ function noHouseholdError(message = "No household found"): ApiErrorLike {
 }
 
 const mocks = vi.hoisted(() => ({
+  householdProbe: vi.fn(),
   householdState: {
     error: null,
     isLoading: false,
   } as { error: (Error & { code?: string; status?: number }) | null; isLoading: boolean },
-  profile: { firstName: "Ada", displayName: "Ada" } as {
-    firstName?: string | null;
-    displayName?: string | null;
-    fullName?: string | null;
+  profile: { firstName: "Ada", displayName: "Ada" } as { firstName: string | null; displayName: string | null; fullName?: string | null } | undefined,
+  display: { data: { timezone: "Africa/Lusaka" }, isLoading: false, isError: false } as {
+    data: { timezone: string } | undefined; isLoading: boolean; isError: boolean;
   },
+  widgetSave: { saveStatus: "idle", saveError: null } as { saveStatus: string; saveError: string | null },
+  retrySave: vi.fn(),
+  load: { loadError: null } as { loadError: string | null },
+  retryLoad: vi.fn(),
 }));
 
 type ChildrenProps = { children?: React.ReactNode };
@@ -37,6 +41,9 @@ vi.mock("@/components/Layout", () => ({
   default: ({ children }: ChildrenProps) => <div>{children}</div>,
 }));
 
+vi.mock("@/components/dashboard/GettingStartedChecklist", () => ({
+  GettingStartedChecklist: () => null,
+}));
 vi.mock("@/components/dashboard/NetWorthWidget", () => ({
   default: () => <div data-testid="widget-net-worth" />,
 }));
@@ -131,10 +138,11 @@ vi.mock("@/hooks/use-format", () => ({
 }));
 
 vi.mock("@/hooks/use-settings", () => ({
+  useDisplaySettings: () => mocks.display,
   useProfile: () => ({
     data: mocks.profile,
   }),
-  useHousehold: () => mocks.householdState,
+  useHousehold: () => { mocks.householdProbe(); return mocks.householdState; },
 }));
 
 vi.mock("@/hooks/useDashboardWidgets", () => ({
@@ -143,6 +151,10 @@ vi.mock("@/hooks/useDashboardWidgets", () => ({
     toggleWidget: vi.fn(),
     reorderWidgets: vi.fn(),
     isLoading: false,
+    ...mocks.widgetSave,
+    retrySave: mocks.retrySave,
+    ...mocks.load,
+    retryLoad: mocks.retryLoad,
   }),
 }));
 
@@ -152,30 +164,149 @@ vi.mock("@/hooks/useRefetchOnFocus", () => ({
 
 describe("Dashboard", () => {
   beforeEach(() => {
+    mocks.householdProbe.mockClear();
     mocks.householdState = { error: null, isLoading: false };
+    mocks.display = { data: { timezone: "Africa/Lusaka" }, isLoading: false, isError: false };
     mocks.profile = { firstName: "Ada", displayName: "Ada" };
+    mocks.widgetSave = { saveStatus: "idle", saveError: null };
+    mocks.retrySave.mockClear();
+    mocks.load = { loadError: null };
+    mocks.retryLoad.mockClear();
+  });
+  afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  it("greets using the saved display timezone instead of a fixed morning message", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-30T12:00:00Z"));
+    const view = render(<Dashboard />);
+    expect(screen.getByText("Good afternoon, Ada")).toBeInTheDocument();
+    mocks.display = { data: { timezone: "Asia/Tokyo" }, isLoading: false, isError: false };
+    view.rerender(<Dashboard />);
+    expect(screen.getByText("Good evening, Ada")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["2026-10-30T02:59:59Z", "Good evening"],
+    ["2026-10-30T03:00:00Z", "Good morning"],
+    ["2026-10-30T09:59:59Z", "Good morning"],
+    ["2026-10-30T10:00:00Z", "Good afternoon"],
+    ["2026-10-30T15:59:59Z", "Good afternoon"],
+    ["2026-10-30T16:00:00Z", "Good evening"],
+  ])("uses the correct Lusaka greeting at %s", (instant, greeting) => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date(instant));
+    render(<Dashboard />);
+    expect(screen.getByText(`${greeting}, Ada`)).toBeInTheDocument();
+  });
+
+  it("updates exactly at noon without remounting or user interaction", () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-30T09:59:59Z"));
+    render(<Dashboard />);
+    expect(screen.getByText("Good morning, Ada")).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.getByText("Good afternoon, Ada")).toBeInTheDocument();
+  });
+
+  it.each(["loading", "error", "missing", "empty", "invalid"])("uses a neutral greeting for %s timezone settings", (kind) => {
+    mocks.display = { data: kind === "missing" ? undefined : { timezone: kind === "invalid" ? "Invalid/Zone" : kind === "empty" ? "" : "Asia/Tokyo" },
+      isLoading: kind === "loading", isError: kind === "error" };
+    render(<Dashboard />);
+    expect(screen.getByText("Hello, Ada")).toBeInTheDocument();
+  });
+
+  it("uses a display name when first name is whitespace and does not invent a missing name", () => {
+    mocks.display.data = undefined;
+    mocks.profile = { firstName: "  ", displayName: "  Ada L.  " };
+    const view = render(<Dashboard />);
+    expect(screen.getByText("Hello, Ada L.")).toBeInTheDocument();
+    mocks.profile = { firstName: null, displayName: "  " };
+    view.rerender(<Dashboard />);
+    expect(screen.getByText("Hello")).toBeInTheDocument();
+    expect(screen.queryByText(/User/)).not.toBeInTheDocument();
+    mocks.profile = undefined;
+    view.rerender(<Dashboard />);
+    expect(screen.getByText("Hello")).toBeInTheDocument();
   });
 
   it("greets by the first word of fullName when no first or display name is set", () => {
-    mocks.profile = { fullName: "Ada Lovelace", firstName: null, displayName: null };
-
+    mocks.display.data = undefined;
+    mocks.profile = { firstName: null, displayName: "  ", fullName: " Ada Lovelace " };
     render(<Dashboard />);
-
-    expect(screen.getByText("Good morning, Ada")).toBeInTheDocument();
+    expect(screen.getByText("Hello, Ada")).toBeInTheDocument();
   });
 
-  it("shows onboarding when the household query fails with the structural HOUSEHOLD_NOT_FOUND signal", () => {
+  it("refreshes after a clock jump on focus and removes timers on unmount", () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-30T08:00:00Z"));
+    const view = render(<Dashboard />);
+    vi.setSystemTime(new Date("2026-10-30T18:00:00Z"));
+    fireEvent(window, new Event("focus"));
+    expect(screen.getByText("Good evening, Ada")).toBeInTheDocument();
+    view.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("stops its timer while hidden and refreshes when visible again", () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-30T08:00:00Z"));
+    let visibility: DocumentVisibilityState = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    render(<Dashboard />);
+    visibility = "hidden";
+    fireEvent(document, new Event("visibilitychange"));
+    expect(vi.getTimerCount()).toBe(0);
+    vi.setSystemTime(new Date("2026-10-30T18:00:00Z"));
+    visibility = "visible";
+    fireEvent(document, new Event("visibilitychange"));
+    expect(screen.getByText("Good evening, Ada")).toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("does not restart its timer on focus or visibility events after unmount", () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const view = render(<Dashboard />);
+    expect(vi.getTimerCount()).toBe(1);
+    view.unmount();
+    fireEvent(window, new Event("focus"));
+    fireEvent(document, new Event("visibilitychange"));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("shows a failed layout load and lets the user retry before customizing", () => {
+    mocks.load = { loadError: "Unable to load display settings" };
+    render(<Dashboard />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Unable to load display settings");
+    expect(screen.getByRole("button", { name: "Customize" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry Loading Layout" }));
+    expect(mocks.retryLoad).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows an unsaved failure with an actionable retry and only shows saved after acknowledgement", () => {
+    mocks.widgetSave = { saveStatus: "error", saveError: "Connection lost" };
+    const view = render(<Dashboard />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Dashboard layout is not saved. Connection lost");
+    fireEvent.click(screen.getByRole("button", { name: "Retry Save" }));
+    expect(mocks.retrySave).toHaveBeenCalledTimes(1);
+    mocks.widgetSave = { saveStatus: "saving", saveError: null };
+    view.rerender(<Dashboard />);
+    expect(screen.getByRole("status")).toHaveTextContent("Saving dashboard layout…");
+    expect(screen.queryByText("Dashboard layout saved")).not.toBeInTheDocument();
+    mocks.widgetSave = { saveStatus: "saved", saveError: null };
+    view.rerender(<Dashboard />);
+    expect(screen.getByRole("status")).toHaveTextContent("Dashboard layout saved");
+  });
+
+  it("leaves household onboarding authority to the actual App boundary", () => {
     mocks.householdState = { error: noHouseholdError(), isLoading: false };
 
     render(<Dashboard />);
 
-    expect(screen.getByText("Welcome to Capital!")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
+    expect(mocks.householdProbe).not.toHaveBeenCalled();
   });
 
-  // FIX P7b-3: the whole point of the fix - if the server's error message is
-  // reworded (translation, copy update, whatever), the onboarding gate must
-  // still trigger because it keys off `code`/`status`, not message prose.
-  it("still shows onboarding when the server's error message is reworded, as long as the structural signal is present", () => {
+  // Actual root and direct-financial onboarding are covered with production
+  // App/providers/fetchers in App.session-access.test.tsx. The authorized leaf
+  // must not introduce a second household probe or message-based authority.
+  it("does not introduce a duplicate probe when old household error copy changes", () => {
     mocks.householdState = {
       error: noHouseholdError("Le foyer n'existe pas encore pour cet utilisateur"),
       isLoading: false,
@@ -183,7 +314,8 @@ describe("Dashboard", () => {
 
     render(<Dashboard />);
 
-    expect(screen.getByText("Welcome to Capital!")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
+    expect(mocks.householdProbe).not.toHaveBeenCalled();
   });
 
   it("does NOT show onboarding merely because the message happens to contain the old prose, without the structural signal", () => {
@@ -202,13 +334,14 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     expect(screen.queryByText("Welcome to Capital!")).not.toBeInTheDocument();
+    expect(mocks.householdProbe).not.toHaveBeenCalled();
   });
 
-  it("keeps hook order stable when household state moves from missing to loaded", () => {
+  it("keeps the App-authorized leaf stable across rerenders without household lookup", () => {
     mocks.householdState = { error: noHouseholdError(), isLoading: false };
     const { rerender } = render(<Dashboard />);
 
-    expect(screen.getByText("Welcome to Capital!")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
 
     mocks.householdState = {
       error: null,
@@ -218,5 +351,6 @@ describe("Dashboard", () => {
     expect(() => rerender(<Dashboard />)).not.toThrow();
     expect(screen.getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
     expect(screen.getByTestId("widget-budget-summary")).toBeInTheDocument();
+    expect(mocks.householdProbe).not.toHaveBeenCalled();
   });
 });

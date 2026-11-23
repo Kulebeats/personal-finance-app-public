@@ -165,8 +165,11 @@ export const assignAccountSchema = z
     accountId: z.string().uuid(),
     assignmentType: z.enum(["full_balance", "partial_balance"]),
     partialAmount: positiveMoneyAmountSchema.optional().nullable(),
-    autoUpdate: z.boolean().default(true),
+    // FIN-09: the default follows the type, so a partial request that omits it
+    // is valid (a partial assignment never auto-updates).
+    autoUpdate: z.boolean().optional(),
   })
+  .transform((data) => ({ ...data, autoUpdate: data.autoUpdate ?? data.assignmentType === "full_balance" }))
   .refine(
     (data) => data.assignmentType !== "partial_balance" || data.partialAmount,
     {
@@ -180,8 +183,11 @@ export const goalTransferSchema = z
   .object({
     fromGoalId: z.string().uuid(),
     toGoalId: z.string().uuid(),
-    amount: positiveMoneyAmountSchema,
+    // A-06: the amount keeps its currency; the locked write refuses one unlike the goals'.
+    amount: positiveMoneyDtoSchema,
     reason: z.string().max(500).optional().nullable(),
+    // Taking the receiving goal past its target needs confirmation (goals QA F5).
+    confirmOverfund: z.boolean().optional().default(false),
   })
   .refine((data) => data.fromGoalId !== data.toGoalId, {
     message: "Cannot transfer to the same goal",
@@ -189,18 +195,42 @@ export const goalTransferSchema = z
   });
 
 // Transaction linking
+// An explicit amount keeps its currency, which must be the transaction's; one
+// that takes a contribution past the target needs confirmOverfund (NEW-29).
 export const linkTransactionSchema = z.object({
   transactionId: z.string().uuid(),
   linkType: z.enum(["contribution", "spending"]),
-  amount: positiveMoneyAmountSchema.optional(),
+  amount: positiveMoneyDtoSchema.optional(),
+  confirmOverfund: z.boolean().optional().default(false),
 });
 
 // Add contribution (manual)
+// NEW-29: the amount is validated money (positive, at most 2 dp, within the
+// column range) and keeps its currency, which must be the goal's. Taking the
+// goal past its target needs confirmOverfund: true.
 export const addContributionSchema = z.object({
-  amount: positiveMoneyAmountSchema,
+  amount: positiveMoneyDtoSchema,
   date: validDateSchema.optional(),
   notes: z.string().max(500).optional(),
   transactionId: z.string().uuid().optional(),
+  confirmOverfund: z.boolean().optional().default(false),
+});
+
+// A contribution paid from an account: the expense and its link, as one write
+// (#245). The key is the client's, one per contribution, so a repeat replays.
+export const accountContributionSchema = z.object({
+  accountId: z.string().uuid(),
+  amount: positiveMoneyDtoSchema,
+  date: validDateSchema,
+  reason: z.string().trim().max(500).optional(),
+  categoryId: z.string().uuid().optional(),
+  confirmOverfund: z.boolean().optional().default(false),
+  idempotencyKey: z.string().uuid(),
+});
+
+// A mistaken contribution is reversed by an audited correction row.
+export const reverseContributionSchema = z.object({
+  reason: z.string().trim().max(500).optional(),
 });
 
 // Payoff calculation (pay_down goals)
@@ -260,6 +290,7 @@ export type AssignAccountInput = z.infer<typeof assignAccountSchema>;
 export type GoalTransferInput = z.infer<typeof goalTransferSchema>;
 export type LinkTransactionInput = z.infer<typeof linkTransactionSchema>;
 export type AddContributionInput = z.infer<typeof addContributionSchema>;
+export type ReverseContributionInput = z.infer<typeof reverseContributionSchema>;
 export type CalculatePayoffInput = z.infer<typeof calculatePayoffSchema>;
 export type DebtStrategyInput = z.infer<typeof debtStrategySchema>;
 export type CalculateProjectionInput = z.infer<

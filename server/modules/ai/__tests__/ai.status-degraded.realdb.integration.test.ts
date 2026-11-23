@@ -31,6 +31,7 @@ import {
 } from "../../../__tests__/fixtures";
 import { hashPassword } from "../../../auth";
 import { geminiClient } from "../ai.gemini";
+import { claudeClient } from "../ai.claude";
 
 describe("AI Status degraded field REAL-DB HTTP (v1.1 Workstream E4)", () => {
   let app: Express;
@@ -123,6 +124,8 @@ describe("AI Status degraded field REAL-DB HTTP (v1.1 Workstream E4)", () => {
     // exactly as the sibling configured-case test does — proves the mapping
     // deterministically on any runner. The request still goes over real HTTP
     // against real Postgres.
+    // R17: Claude is the primary; neither provider configured is degraded.
+    vi.spyOn(claudeClient, "isAvailable").mockReturnValue(false);
     vi.spyOn(geminiClient, "isAvailable").mockReturnValue(false);
 
     const res = await request(app)
@@ -133,8 +136,11 @@ describe("AI Status degraded field REAL-DB HTTP (v1.1 Workstream E4)", () => {
     expect(res.body.degraded).toBe(true);
   });
 
-  it("reports degraded: false when the real Gemini client reports configured", async () => {
-    vi.spyOn(geminiClient, "isAvailable").mockReturnValue(true);
+  it("reports degraded: false when the primary (Claude) client reports configured", async () => {
+    // R17: degraded tracks the PRIMARY provider. Gemini alone is the backup
+    // operating, which is degraded (see completion-r17.status suite).
+    vi.spyOn(claudeClient, "isAvailable").mockReturnValue(true);
+    vi.spyOn(claudeClient, "configuredModel").mockReturnValue(`status-degraded-${Date.now()}`);
 
     const res = await request(app)
       .get("/api/ai/status")

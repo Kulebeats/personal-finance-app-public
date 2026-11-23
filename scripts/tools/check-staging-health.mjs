@@ -30,23 +30,38 @@ const PROBES = [
     id: "HEALTH-003",
     path: "/health/ready",
     expectedStatus: 200,
+    // The public body is the status only; with CRON_SECRET set this probe asks
+    // for the operator view and then also requires a healthy database check.
+    operator: true,
+    // "degraded" means a scheduled job is stale; the dependencies still answer.
     validate(body) {
-      return body?.status === "healthy" && body?.checks?.database?.status === "healthy";
+      if (!["healthy", "degraded"].includes(body?.status)) return false;
+      return body?.checks === undefined || body.checks.database?.status === "healthy";
     },
     summarize(body) {
+      if (body?.checks === undefined) {
+        return `status=${body?.status ?? "missing"}; details=redacted (set CRON_SECRET for the operator view)`;
+      }
       const database = body?.checks?.database?.status ?? "missing";
       const cache = body?.checks?.cache?.status ?? "missing";
-      return `status=${body?.status ?? "missing"}; database=${database}; cache=${cache}`;
+      const jobs = body?.scheduledJobs?.status ?? "missing";
+      return `status=${body?.status ?? "missing"}; database=${database}; cache=${cache}; scheduledJobs=${jobs}; revision=${body?.revision ?? "none"}`;
     },
   },
   {
     id: "HEALTH-004",
     path: "/health/startup",
     expectedStatus: 200,
+    // Startup is redacted exactly like readiness.
+    operator: true,
     validate(body) {
-      return body?.status === "healthy" && body?.checks?.database?.status === "healthy";
+      if (!["healthy", "degraded"].includes(body?.status)) return false;
+      return body?.checks === undefined || body.checks.database?.status === "healthy";
     },
     summarize(body) {
+      if (body?.checks === undefined) {
+        return `status=${body?.status ?? "missing"}; details=redacted (set CRON_SECRET for the operator view)`;
+      }
       const database = body?.checks?.database?.status ?? "missing";
       const cache = body?.checks?.cache?.status ?? "missing";
       return `status=${body?.status ?? "missing"}; database=${database}; cache=${cache}`;
@@ -98,13 +113,13 @@ function normalizeBaseUrl(value) {
   return parsed.toString().replace(/\/$/, "");
 }
 
-async function fetchJson(url, timeoutMs) {
+async function fetchJson(url, timeoutMs, extraHeaders = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(url, {
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", ...extraHeaders },
       signal: controller.signal,
     });
     const text = await response.text();
@@ -134,7 +149,10 @@ async function runProbe(baseUrl, probe, timeoutMs) {
   const startedAt = new Date().toISOString();
 
   try {
-    const response = await fetchJson(url, timeoutMs);
+    // The secret is only ever sent as a header, never printed or written out.
+    const operatorHeaders = probe.operator && process.env.CRON_SECRET
+      ? { Authorization: `Bearer ${process.env.CRON_SECRET}` } : {};
+    const response = await fetchJson(url, timeoutMs, operatorHeaders);
     const statusMatches = response.status === probe.expectedStatus;
     const bodyMatches = probe.validate(response.body);
     const passed = statusMatches && bodyMatches;

@@ -8,19 +8,22 @@
  */
 
 import { Request, Response, NextFunction } from "express";
-import { weeklyRecapService } from "./weekly-recap.service";
+import { requireRecapRecipient, weeklyRecapService } from "./weekly-recap.service";
 import { logger } from "../../utils/logger";
 import { z } from "zod";
 import { businessAuditService } from "../../services/BusinessAuditService";
-import { householdRepository } from "../../repositories/HouseholdRepository";
-import { NOTIFICATION_TYPES } from "@shared/notificationTypes";
+import { resolveRequestHousehold } from "../../core/authz/session-preconditions";
+import { ValidationError } from "../../core/errors";
+import { getWeeklyRecapSettings, patchWeeklyRecapSettings } from "../../repositories/UserDisplayPreferences";
 import {
   weeklyRecapQuerySchema,
   generateRecapSchema,
 } from "./weekly-recap.validation";
-import { db } from "../../db";
-import { and, eq } from "drizzle-orm";
-import { userDisplaySettings, userNotificationPreferences } from "@shared/schema";
+import { readRecipientWorth, readRecipientWorthBatch } from "./recap-worth.reader";
+import { parseRecapWeek, readRecapCalendar, recentWeeks, weekContaining, type RecapWeek } from "./recap-week";
+import { feedbackSchema, recordRecapFeedback } from "./weekly-recap.feedback";
+
+const HISTORY_WEEKS = 8;
 
 function success<T>(
   res: Response,
@@ -32,104 +35,29 @@ function success<T>(
 }
 
 /**
- * Map day name to day number (0 = Sunday)
+ * NEW-31 / R16.3: an explicit window must be exactly seven real dates; with
+ * none, the current week of the household's calendar starts on the user's
+ * first day of the week.
  */
-const DAY_MAP: Record<string, number> = {
-  Sunday: 0,
-  Monday: 1,
-  Tuesday: 2,
-  Wednesday: 3,
-  Thursday: 4,
-  Friday: 5,
-  Saturday: 6,
-};
-
-const DAY_NAMES = [
-  "Sunday",
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday",
-] as const;
-
-type WeeklyRecapStoredSettings = {
-  dayOfWeek?: number;
-  includeGoals?: boolean;
-  includeRecurring?: boolean;
-};
-
-function getStoredWeeklyRecapSettings(
-  dashboardWidgets: unknown
-): WeeklyRecapStoredSettings {
-  if (!dashboardWidgets || typeof dashboardWidgets !== "object") {
-    return {};
+async function requestedWeek(query: Request["query"], householdId: string, userId: string): Promise<RecapWeek> {
+  const { weekStart, weekEnd } = query;
+  if (weekStart === undefined && weekEnd === undefined) {
+    const calendar = await readRecapCalendar(householdId, userId);
+    return weekContaining(calendar.today, calendar.firstDay);
   }
-
-  const weeklyRecap = (dashboardWidgets as Record<string, unknown>)
-    .weeklyRecap;
-  if (!weeklyRecap || typeof weeklyRecap !== "object") {
-    return {};
+  const week = parseRecapWeek(weekStart, weekEnd);
+  if (!week) {
+    throw new ValidationError("Invalid recap week", [{
+      field: "weekEnd", message: "A recap week is seven consecutive dates (YYYY-MM-DD)",
+    }]);
   }
-
-  return weeklyRecap as WeeklyRecapStoredSettings;
+  return week;
 }
-
-/**
- * Helper to get week dates, respecting user's first day of week setting
- */
-async function getWeekDates(
-  userId: string,
-  weekStart?: string,
-  weekEnd?: string
-): Promise<{ start: Date; end: Date }> {
-  if (weekStart && weekEnd) {
-    return { start: new Date(weekStart), end: new Date(weekEnd) };
-  }
-
-  // Get user's first day of week setting
-  const settings = await db.query.userDisplaySettings.findFirst({
-    where: (settings, { eq }) => eq(settings.userId, userId),
-  });
-
-  const firstDayOfWeek = settings?.firstDayOfWeek || "Sunday";
-  const userFirstDay = DAY_MAP[firstDayOfWeek] ?? 0;
-
-  const now = new Date();
-  const dayOfWeek = now.getDay(); // 0 = Sunday, 1 = Monday, etc.
-
-  // Calculate offset to get to the start of the week
-  let offset = dayOfWeek - userFirstDay;
-  if (offset < 0) offset += 7;
-
-  const start = new Date(now);
-  start.setDate(now.getDate() - offset);
-  start.setHours(0, 0, 0, 0);
-
-  const end = new Date(start);
-  end.setDate(start.getDate() + 6);
-  end.setHours(23, 59, 59, 999);
-
-  return { start, end };
-}
-
-function formatDate(date: Date): string {
-  return date.toISOString().split("T")[0];
-}
-
-// CONTRACT-006: Accept both "wrap-up" (client) and "overall" (legacy) values
-const feedbackSchema = z.object({
-  weekStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  weekEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  step: z.enum(["net-worth", "spending", "recurring", "goals", "wrap-up", "overall"]),
-  feedback: z.enum(["positive", "negative"]),
-});
 
 const updateSettingsSchema = z.object({
   enabled: z.boolean().optional(),
   emailEnabled: z.boolean().optional(),
-  dayOfWeek: z.number().min(0).max(6).optional(),
+  dayOfWeek: z.number().int().min(0).max(6).optional(),
   includeGoals: z.boolean().optional(),
   includeRecurring: z.boolean().optional(),
 });
@@ -142,15 +70,7 @@ export const weeklyRecapController = {
     try {
       const { householdId } = req.householdContext!;
       const userId = req.session.userId!;
-      const { weekStart, weekEnd } = req.query;
-
-      const { start, end } = await getWeekDates(
-        userId,
-        weekStart as string,
-        weekEnd as string
-      );
-      const from = formatDate(start);
-      const to = formatDate(end);
+      const { from, to } = await requestedWeek(req.query, householdId, userId);
 
       // Get real recap data from service
       const weeklyRecap = await weeklyRecapService.getRecap(
@@ -160,6 +80,8 @@ export const weeklyRecapController = {
         to
       );
 
+      await requireRecapRecipient(householdId, userId);
+      weeklyRecap.netWorth = await readRecipientWorth(householdId, userId, from, to);
       return success(res, weeklyRecap);
     } catch (error) {
       logger.error("GET /api/weekly-recap error", {}, error as Error);
@@ -168,10 +90,11 @@ export const weeklyRecapController = {
   },
 
   /**
-   * Submit feedback on weekly recap
+   * Submit feedback on weekly recap (NEW-31: stored as a structured row)
    */
   async submitFeedback(req: Request, res: Response, next: NextFunction) {
     try {
+      const { householdId } = req.householdContext!;
       const userId = req.session.userId!;
       const parseResult = feedbackSchema.safeParse(req.body);
       if (!parseResult.success) {
@@ -181,37 +104,9 @@ export const weeklyRecapController = {
         });
       }
 
-      // Log feedback (could store in DB for analytics later)
-      logger.info("Weekly recap feedback", {
-        userId: userId.substring(0, 8) + "...",
-        ...parseResult.data,
-      });
-
-      // Audit logging (non-blocking)
-      try {
-        const household = await householdRepository.findByUserId(userId);
-        if (household) {
-          await businessAuditService.log({
-            householdId: household.id,
-            userId,
-            action: "CREATE",
-            entityType: "user",
-            entityId: userId,
-            details: {
-              action: "weekly_recap_feedback",
-              step: parseResult.data.step,
-              feedback: parseResult.data.feedback,
-              weekStart: parseResult.data.weekStart,
-              weekEnd: parseResult.data.weekEnd,
-            },
-            ipAddress: businessAuditService.getIpAddress(req),
-          });
-        }
-      } catch {
-        // Non-blocking - audit failure shouldn't affect user flow
-      }
-
-      return success(res, { recorded: true }, "Feedback recorded");
+      const { id } = await recordRecapFeedback(householdId, userId, parseResult.data,
+        businessAuditService.getIpAddress(req));
+      return success(res, { recorded: true, id }, "Feedback recorded");
     } catch (error) {
       next(error);
     }
@@ -223,43 +118,7 @@ export const weeklyRecapController = {
    */
   async getSettings(req: Request, res: Response, next: NextFunction) {
     try {
-      const userId = req.session.userId!;
-
-      const [prefs] = await db
-        .select({
-          inAppEnabled: userNotificationPreferences.inAppEnabled,
-          emailEnabled: userNotificationPreferences.emailEnabled,
-        })
-        .from(userNotificationPreferences)
-        .where(
-          and(
-            eq(userNotificationPreferences.userId, userId),
-            eq(
-              userNotificationPreferences.notificationType,
-              NOTIFICATION_TYPES.WEEKLY_RECAP
-            )
-          )
-        )
-        .limit(1);
-
-      const displaySettings = await db.query.userDisplaySettings.findFirst({
-        where: (settings, { eq }) => eq(settings.userId, userId),
-      });
-      const stored = getStoredWeeklyRecapSettings(
-        displaySettings?.dashboardWidgets
-      );
-
-      const settings = {
-        enabled: prefs?.inAppEnabled ?? true,
-        emailEnabled: prefs?.emailEnabled ?? false,
-        dayOfWeek:
-          stored.dayOfWeek ??
-          DAY_MAP[displaySettings?.firstDayOfWeek ?? "Sunday"] ??
-          0,
-        includeGoals: stored.includeGoals ?? true,
-        includeRecurring: stored.includeRecurring ?? true,
-      };
-
+      const settings = await getWeeklyRecapSettings(req.session.userId!);
       return success(res, settings);
     } catch (error) {
       next(error);
@@ -282,94 +141,7 @@ export const weeklyRecapController = {
       }
 
       const data = parseResult.data;
-      const [existingPrefs] = await db
-        .select()
-        .from(userNotificationPreferences)
-        .where(
-          and(
-            eq(userNotificationPreferences.userId, userId),
-            eq(
-              userNotificationPreferences.notificationType,
-              NOTIFICATION_TYPES.WEEKLY_RECAP
-            )
-          )
-        )
-        .limit(1);
-
-      const currentDisplaySettings = await db.query.userDisplaySettings.findFirst({
-        where: (settings, { eq }) => eq(settings.userId, userId),
-      });
-      const currentStored = getStoredWeeklyRecapSettings(
-        currentDisplaySettings?.dashboardWidgets
-      );
-
-      const nextSettings = {
-        enabled: data.enabled ?? existingPrefs?.inAppEnabled ?? true,
-        emailEnabled: data.emailEnabled ?? existingPrefs?.emailEnabled ?? false,
-        dayOfWeek:
-          data.dayOfWeek ??
-          currentStored.dayOfWeek ??
-          DAY_MAP[currentDisplaySettings?.firstDayOfWeek ?? "Sunday"] ??
-          0,
-        includeGoals: data.includeGoals ?? currentStored.includeGoals ?? true,
-        includeRecurring:
-          data.includeRecurring ?? currentStored.includeRecurring ?? true,
-      };
-
-      if (existingPrefs) {
-        await db
-          .update(userNotificationPreferences)
-          .set({
-            inAppEnabled: nextSettings.enabled,
-            emailEnabled: nextSettings.emailEnabled,
-            updatedAt: new Date(),
-          })
-          .where(eq(userNotificationPreferences.id, existingPrefs.id));
-      } else {
-        await db.insert(userNotificationPreferences).values({
-          userId,
-          notificationType: NOTIFICATION_TYPES.WEEKLY_RECAP,
-          inAppEnabled: nextSettings.enabled,
-          emailEnabled: nextSettings.emailEnabled,
-          pushEnabled: false,
-        });
-      }
-
-      const existingDashboardWidgets =
-        currentDisplaySettings?.dashboardWidgets &&
-        typeof currentDisplaySettings.dashboardWidgets === "object"
-          ? (currentDisplaySettings.dashboardWidgets as Record<
-              string,
-              unknown
-            >)
-          : {};
-      const mergedDashboardWidgets = {
-        ...existingDashboardWidgets,
-        weeklyRecap: {
-          dayOfWeek: nextSettings.dayOfWeek,
-          includeGoals: nextSettings.includeGoals,
-          includeRecurring: nextSettings.includeRecurring,
-        },
-      };
-
-      const firstDayOfWeek = DAY_NAMES[nextSettings.dayOfWeek] ?? "Sunday";
-
-      if (currentDisplaySettings) {
-        await db
-          .update(userDisplaySettings)
-          .set({
-            firstDayOfWeek,
-            dashboardWidgets: mergedDashboardWidgets,
-            updatedAt: new Date(),
-          })
-          .where(eq(userDisplaySettings.userId, userId));
-      } else {
-        await db.insert(userDisplaySettings).values({
-          userId,
-          firstDayOfWeek,
-          dashboardWidgets: mergedDashboardWidgets,
-        });
-      }
+      const nextSettings = await patchWeeklyRecapSettings(userId, data);
 
       // Log the settings update
       logger.info("Weekly recap settings updated", {
@@ -379,7 +151,7 @@ export const weeklyRecapController = {
 
       // Audit logging (non-blocking)
       try {
-        const household = await householdRepository.findByUserId(userId);
+        const household = await resolveRequestHousehold(req, userId);
         if (household) {
           await businessAuditService.log({
             householdId: household.id,
@@ -405,7 +177,8 @@ export const weeklyRecapController = {
   },
 
   /**
-   * Get historical weekly recaps
+   * Get historical weekly recaps: the current week of the household calendar
+   * and the seven before it, each exactly seven dates.
    * GET /api/weekly-recap/history
    */
   async getHistory(req: Request, res: Response, next: NextFunction) {
@@ -421,7 +194,6 @@ export const weeklyRecapController = {
         });
       }
 
-      // Get past 8 weeks of recaps
       const history: Array<{
         weekStart: string;
         weekEnd: string;
@@ -432,40 +204,28 @@ export const weeklyRecapController = {
           spending: number;
         };
       }> = [];
-      const now = new Date();
+      const weeks = recentWeeks(await readRecapCalendar(householdId, userId), HISTORY_WEEKS);
 
-      for (let i = 0; i < 8; i++) {
-        const weekEnd = new Date(now);
-        weekEnd.setDate(now.getDate() - (i * 7));
-        weekEnd.setHours(23, 59, 59, 999);
-
-        const weekStart = new Date(weekEnd);
-        weekStart.setDate(weekEnd.getDate() - 6);
-        weekStart.setHours(0, 0, 0, 0);
-
-        const from = formatDate(weekStart);
-        const to = formatDate(weekEnd);
-
-        try {
-          const recap = await weeklyRecapService.getRecap(
-            householdId,
-            userId,
-            from,
-            to
-          );
-          history.push({
-            weekStart: from,
-            weekEnd: to,
-            summary: {
-              netWorth: recap.netWorth,
-              spending: recap.spending?.total || 0,
-            },
-          });
-        } catch (error) {
-          logger.warn("Failed to fetch historical recap", { from, to, error });
-        }
+      for (const { from, to } of weeks) {
+        const recap = await weeklyRecapService.getRecap(
+          householdId,
+          userId,
+          from,
+          to
+        );
+        history.push({
+          weekStart: from,
+          weekEnd: to,
+          summary: {
+            netWorth: recap.netWorth,
+            spending: recap.spending?.total || 0,
+          },
+        });
       }
 
+      await requireRecapRecipient(householdId, userId);
+      const worth = await readRecipientWorthBatch(householdId, userId, history.map(item => ({ from: item.weekStart, to: item.weekEnd })));
+      history.forEach((item, index) => { item.summary.netWorth = worth[index]; });
       return success(res, { history });
     } catch (error) {
       next(error);
@@ -473,7 +233,7 @@ export const weeklyRecapController = {
   },
 
   /**
-   * Generate a weekly recap for a specific week
+   * Generate a weekly recap for the week that contains a date
    * POST /api/weekly-recap/generate
    */
   async generateRecap(req: Request, res: Response, next: NextFunction) {
@@ -490,32 +250,8 @@ export const weeklyRecapController = {
       }
 
       const { weekOf } = parseResult.data;
-
-      // Calculate week range from weekOf date, respecting user settings
-      const settings = await db.query.userDisplaySettings.findFirst({
-        where: (settings, { eq }) => eq(settings.userId, userId),
-      });
-
-      const firstDayOfWeek = settings?.firstDayOfWeek || "Sunday";
-      const userFirstDay = DAY_MAP[firstDayOfWeek] ?? 0;
-
-      const date = new Date(weekOf);
-      const dayOfWeek = date.getDay();
-
-      // Calculate offset to get to the start of the week
-      let offset = dayOfWeek - userFirstDay;
-      if (offset < 0) offset += 7;
-
-      const weekStart = new Date(date);
-      weekStart.setDate(date.getDate() - offset);
-      weekStart.setHours(0, 0, 0, 0);
-
-      const weekEnd = new Date(weekStart);
-      weekEnd.setDate(weekStart.getDate() + 6);
-      weekEnd.setHours(23, 59, 59, 999);
-
-      const from = formatDate(weekStart);
-      const to = formatDate(weekEnd);
+      const { firstDay } = await readRecapCalendar(householdId, userId);
+      const { from, to } = weekContaining(weekOf, firstDay);
 
       // Generate recap
       const recap = await weeklyRecapService.getRecap(
@@ -544,6 +280,8 @@ export const weeklyRecapController = {
         // Non-blocking
       }
 
+      await requireRecapRecipient(householdId, userId);
+      recap.netWorth = await readRecipientWorth(householdId, userId, from, to);
       return success(res, recap);
     } catch (error) {
       next(error);

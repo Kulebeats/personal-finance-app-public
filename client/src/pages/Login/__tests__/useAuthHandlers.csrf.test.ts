@@ -136,7 +136,7 @@ describe("auth handlers CSRF coverage", () => {
         {
           success: false,
           error: {
-            code: "FORBIDDEN",
+            code: "EMAIL_VERIFICATION_REQUIRED",
             message: "Email not verified. Please check your inbox.",
           },
         },
@@ -152,12 +152,12 @@ describe("auth handlers CSRF coverage", () => {
       }),
     ).resolves.toEqual({
       success: false,
-      message: "Email not verified. Please check your inbox.",
+      message: "Verify your email address before signing in.",
       isEmailNotVerified: true,
     });
   });
 
-  it("keeps the invalid login response message when JSON parsing fails", async () => {
+  it("shows the generic sign-in line when the response is not JSON", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
@@ -172,7 +172,7 @@ describe("auth handlers CSRF coverage", () => {
       }),
     ).resolves.toEqual({
       success: false,
-      message: "Server returned invalid response",
+      message: "Sign-in failed. Please try again.",
       isEmailNotVerified: false,
     });
   });

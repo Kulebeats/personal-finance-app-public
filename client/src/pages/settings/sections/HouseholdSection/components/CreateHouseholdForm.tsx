@@ -1,3 +1,4 @@
+import { toastActionError } from "@/lib/actionErrorToast";
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -14,6 +15,7 @@ import {
 } from "@/components/ui/select";
 import { HouseholdData } from "../types";
 import { apiCall } from "@/lib/api";
+import { invalidateSession } from "@/lib/session";
 
 // Exported for tests: goes through apiCall so the POST carries x-csrf-token
 // (raw fetch 403s in a real browser session).
@@ -30,7 +32,7 @@ export async function createHousehold(data: {
 
 interface CreateHouseholdFormProps {
   currencies: { code: string; name: string; symbol: string }[];
-  onSuccess: () => void;
+  onSuccess?: () => void;
 }
 
 export function CreateHouseholdForm({
@@ -44,10 +46,11 @@ export function CreateHouseholdForm({
     mutationFn: createHousehold,
     onSuccess: () => {
       toast.success("Household created successfully!");
-      onSuccess();
+      onSuccess?.();
+      invalidateSession();
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to create household");
+      toastActionError("Failed to create household", error);
     },
   });
 

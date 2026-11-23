@@ -50,7 +50,7 @@ export function ProfileMenu({ profile }: ProfileMenuProps) {
         className="w-12 h-12 rounded-full flex items-center justify-center font-bold text-sm border-2 border-white shadow-sm hover:shadow-md transition-all overflow-hidden bg-gray-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
       >
         {profile?.profilePictureUrl ? (
-          <img
+          <ProtectedImage
             src={profile.profilePictureUrl}
             alt=""
             className="w-full h-full object-cover object-center"
@@ -82,7 +82,7 @@ export function ProfileMenu({ profile }: ProfileMenuProps) {
                 className="w-24 h-24 rounded-full flex items-center justify-center font-bold text-2xl border-4 border-white shadow-lg overflow-hidden bg-gray-400"
               >
                 {profile?.profilePictureUrl ? (
-                  <img
+                  <ProtectedImage
                     src={profile.profilePictureUrl}
                     alt=""
                     className="w-full h-full object-cover object-center"
@@ -153,3 +153,4 @@ export function ProfileMenu({ profile }: ProfileMenuProps) {
     </div>
   );
 }
+import { ProtectedImage } from "@/components/session/ProtectedImage";

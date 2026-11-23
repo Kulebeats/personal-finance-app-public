@@ -1,7 +1,7 @@
 import { eq, and, gte, lte, asc, sql } from "drizzle-orm";
 import { db } from "../db";
 import { accountBalanceSnapshots, netWorthSnapshots } from "@shared/schema";
-import { withTransaction } from "../utils/withTransaction";
+import { withTransaction, type TransactionType } from "../utils/withTransaction";
 import { Money } from "../core/money";
 
 /**
@@ -154,12 +154,15 @@ export class AccountSnapshotRepository {
   async importBalanceSnapshots(
     accountId: string,
     data: { date: string; balance: string }[],
+    callerTx?: TransactionType,
   ): Promise<number> {
     if (data.length === 0) return 0;
 
-    // Use upsert to handle existing dates
+    // Use upsert to handle existing dates. With callerTx the rows commit with
+    // the caller's audit row (NEW-32).
     let imported = 0;
-    await withTransaction(async (tx) => {
+    const run = (body: (tx: TransactionType) => Promise<void>) => callerTx ? body(callerTx) : withTransaction(body);
+    await run(async (tx) => {
       for (const entry of data) {
         await tx
           .insert(accountBalanceSnapshots)

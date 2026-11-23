@@ -11,7 +11,8 @@ import {
   useReportsNetWorth,
 } from "@/hooks/use-reports";
 import { useDrillDown } from "@/hooks/use-drilldown";
-import { ComparisonWidget } from "./ComparisonWidget";
+import { ComparisonWidget, type ComparisonDataPoint } from "./ComparisonWidget";
+import { groupByPeriod, sumField } from "./annualPeriods";
 import { toMoneyNumber } from "@/lib/money";
 import { AggregationLevel } from "./AggregationFilter";
 import {
@@ -29,58 +30,25 @@ interface BaseWidgetProps {
 export const IncomeVsExpensesComparisonWidget: React.FC<BaseWidgetProps> = (
   props,
 ) => {
-  const { from } = useCurrentYearRange();
+  const { year } = useCurrentYearRange();
   const { drillDown } = useDrillDown();
-  const { data, isLoading, error } = useReportsAnnual({
-    year: new Date(from).getFullYear(),
-  });
+  const { data, isLoading, error } = useReportsAnnual({ year });
 
-  const handleBarClick = (datum: { label: string }) => {
-    // Find month index from label (e.g., "Jan")
-    const months = [
-      "Jan",
-      "Feb",
-      "Mar",
-      "Apr",
-      "May",
-      "Jun",
-      "Jul",
-      "Aug",
-      "Sep",
-      "Oct",
-      "Nov",
-      "Dec",
-    ];
-    const monthIdx = months.indexOf(datum.label) + 1;
-
-    if (monthIdx > 0) {
-      const year = new Date(from).getFullYear();
-      const monthStart = `${year}-${String(monthIdx).padStart(2, "0")}-01`;
-      const monthEnd = new Date(year, monthIdx, 0).toISOString().split("T")[0];
-      drillDown({ from: monthStart, to: monthEnd });
+  // R12.3: drill into the clicked period by its own dates, never its label.
+  const handleBarClick = (datum: ComparisonDataPoint) => {
+    if (typeof datum.periodStart === "string" && typeof datum.periodEnd === "string") {
+      drillDown({ from: datum.periodStart, to: datum.periodEnd });
     }
   };
 
-  const compData = useMemo(() => {
-    const raw = data?.monthly || [];
-    if (props.aggregation === "quarterly") {
-      const quarters = ["Q1", "Q2", "Q3", "Q4"];
-      return quarters.map((q, i) => {
-        const slice = raw.filter((m) => Math.floor(m.monthIndex / 3.01) === i);
-        return {
-          label: q,
-          primary: slice.reduce((sum, m) => sum + toMoneyNumber(m.income), 0),
-          secondary: slice.reduce(
-            (sum, m) => sum + toMoneyNumber(m.expenses),
-            0,
-          ),
-        };
-      });
-    }
-    return raw.map((m) => ({
-      label: m.month,
-      primary: toMoneyNumber(m.income),
-      secondary: toMoneyNumber(m.expenses),
+  const compData = useMemo((): ComparisonDataPoint[] => {
+    const grouping = props.aggregation === "quarterly" ? "quarterly" : "monthly";
+    return groupByPeriod(data?.monthly ?? [], grouping).map((bucket) => ({
+      label: grouping === "monthly" ? bucket.rows[0].month : bucket.label,
+      periodStart: bucket.periodStart,
+      periodEnd: bucket.periodEnd,
+      primary: toMoneyNumber(sumField(bucket, (m) => m.income)),
+      secondary: toMoneyNumber(sumField(bucket, (m) => m.expenses)),
     }));
   }, [data, props.aggregation]);
 
@@ -106,10 +74,8 @@ export const IncomeVsExpensesComparisonWidget: React.FC<BaseWidgetProps> = (
 export const IncomeVsSavedComparisonWidget: React.FC<BaseWidgetProps> = (
   props,
 ) => {
-  const { from } = useCurrentYearRange();
-  const { data, isLoading, error } = useReportsAnnual({
-    year: new Date(from).getFullYear(),
-  });
+  const { year } = useCurrentYearRange();
+  const { data, isLoading, error } = useReportsAnnual({ year });
 
   const compData = useMemo(() => {
     return (data?.monthly || []).map((m) => ({
@@ -138,10 +104,8 @@ export const IncomeVsSavedComparisonWidget: React.FC<BaseWidgetProps> = (
 export const DebtToIncomeComparisonWidget: React.FC<BaseWidgetProps> = (
   props,
 ) => {
-  const { from } = useCurrentYearRange();
-  const { data, isLoading, error } = useReportsAnnual({
-    year: new Date(from).getFullYear(),
-  });
+  const { year } = useCurrentYearRange();
+  const { data, isLoading, error } = useReportsAnnual({ year });
 
   const compData = useMemo(() => {
     return (data?.monthly || []).map((m) => ({

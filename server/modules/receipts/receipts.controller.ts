@@ -8,8 +8,8 @@
  */
 
 import { Request, Response, NextFunction } from "express";
-import * as fs from "fs/promises";
-import * as path from "path";
+import { readReceiptFile } from "../../core/storage/receipt-files";
+import { sendUploadContent } from "../../core/storage/upload-response";
 import { receiptService } from "./receipts.service";
 import { logger } from "../../utils/logger";
 import { NotFoundError, ValidationError } from "../../utils/errorHandler";
@@ -20,6 +20,7 @@ import {
   createTransactionSchema,
   listQuerySchema,
 } from "./receipts.validation";
+import { toReceiptDto } from "./receipts.helpers";
 
 function success<T>(
   res: Response,
@@ -36,8 +37,6 @@ export const receiptsController = {
    */
   async list(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
-
       const parseResult = listQuerySchema.safeParse(req.query);
       if (!parseResult.success) {
         throw new ValidationError("Invalid query parameters");
@@ -45,7 +44,8 @@ export const receiptsController = {
 
       const { status, search, limit, offset } = parseResult.data;
       const statusFilter = status === "all" ? undefined : status;
-      const result = await receiptService.getPendingReceipts(householdId, {
+      // Rule 11: the actor, not just the household, so private receipts stay out.
+      const result = await receiptService.getPendingReceipts(req.householdContext!, {
         status: statusFilter,
         search,
         limit,
@@ -53,7 +53,7 @@ export const receiptsController = {
       });
       return res.status(200).json({
         success: true,
-        data: result.receipts,
+        data: result.receipts.map(toReceiptDto),
         pagination: {
           total: result.total,
           limit,
@@ -74,8 +74,8 @@ export const receiptsController = {
       const { householdId } = req.householdContext!;
       const { id } = req.params;
 
-      const receipt = await receiptService.getReceipt(id, householdId);
-      return success(res, receipt);
+      const receipt = await receiptService.getVisibleReceipt(id, req.householdContext!);
+      return success(res, toReceiptDto(receipt));
     } catch (error) {
       logger.error(
         "GET /api/receipts/:id error",
@@ -110,8 +110,7 @@ export const receiptsController = {
           mimeType: req.file.mimetype,
           size: req.file.size,
         },
-        householdId,
-        userId,
+        req.householdContext!,
         idempotencyKey
       );
 
@@ -169,21 +168,11 @@ export const receiptsController = {
         parseResult.data.transactionId,
         householdId,
         userId,
-        { skipAmountValidation: parseResult.data.skipAmountValidation }
+        {
+          skipAmountValidation: parseResult.data.skipAmountValidation,
+          ipAddress: businessAuditService.getIpAddress(req),
+        }
       );
-
-      // Audit log for receipt-transaction link
-      await businessAuditService.log({
-        userId,
-        householdId,
-        action: "LINK",
-        entityType: "receipt",
-        entityId: id,
-        details: {
-          transactionId: parseResult.data.transactionId,
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
 
       return success(res, {
         matched: true,
@@ -212,7 +201,7 @@ export const receiptsController = {
       // Get receipt before deletion for audit
       const receipt = await receiptService.getReceipt(id, householdId);
 
-      await receiptService.deleteReceipt(id, householdId);
+      await receiptService.deleteReceipt(id, req.householdContext!);
 
       // Audit log for receipt deletion
       await businessAuditService.logDelete({
@@ -255,10 +244,10 @@ export const receiptsController = {
 
       const matchResult = await receiptService.storeOcrResults(
         id,
-        householdId,
+        req.householdContext!,
         ocrData,
         confidence,
-        rawText
+        rawText,
       );
 
       await businessAuditService.logUpdate({
@@ -328,40 +317,9 @@ export const receiptsController = {
       }
 
       const result = await receiptService.createTransactionFromReceipt(
-        id,
-        householdId,
-        userId,
-        parseResult.data
+        id, householdId, userId, parseResult.data,
+        { ipAddress: businessAuditService.getIpAddress(req) },
       );
-
-      // Audit log for transaction creation from receipt
-      await businessAuditService.logCreate({
-        userId,
-        householdId,
-        entityType: "transaction",
-        entityId: result.transactionId,
-        newValue: {
-          source: "receipt",
-          receiptId: id,
-          amount: parseResult.data.amount,
-          name: parseResult.data.name,
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
-        metadata: { operation: "createFromReceipt" },
-      });
-
-      await businessAuditService.log({
-        userId,
-        householdId,
-        action: "LINK",
-        entityType: "receipt",
-        entityId: id,
-        details: {
-          transactionId: result.transactionId,
-          method: "create",
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
 
       return success(
         res,
@@ -369,8 +327,8 @@ export const receiptsController = {
           transactionId: result.transactionId,
           receiptId: id,
         },
-        "Transaction created from receipt",
-        201
+        result.replayed ? "Receipt conversion already recorded" : "Transaction created from receipt",
+        result.replayed ? 200 : 201
       );
     } catch (error) {
       logger.error(
@@ -387,23 +345,19 @@ export const receiptsController = {
    */
   async getThumbnail(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
       const { id } = req.params;
 
-      const receipt = await receiptService.getReceipt(id, householdId);
+      const receipt = await receiptService.getVisibleReceipt(id, req.householdContext!);
       if (!receipt.thumbnailPath) {
         throw new ValidationError("Receipt thumbnail not available");
       }
 
-      const filePath = path.isAbsolute(receipt.thumbnailPath)
-        ? receipt.thumbnailPath
-        : path.join(process.cwd(), receipt.thumbnailPath);
-      try {
-        await fs.access(filePath);
-      } catch {
+      // Only this receipt's own thumbnail: a stale path naming another file reads as absent.
+      const content = await readReceiptFile(receipt, "receipt-thumbnail");
+      if (!content) {
         throw new NotFoundError("Receipt thumbnail not found");
       }
-      return res.sendFile(filePath);
+      return sendUploadContent(res, content, receipt.thumbnailPath);
     } catch (error) {
       logger.error(
         "GET /api/receipts/:id/thumbnail error",
@@ -419,19 +373,15 @@ export const receiptsController = {
    */
   async getOcrImage(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
       const { id } = req.params;
 
-      const receipt = await receiptService.getReceipt(id, householdId);
-      const filePath = path.isAbsolute(receipt.storagePath)
-        ? receipt.storagePath
-        : path.join(process.cwd(), receipt.storagePath);
-      try {
-        await fs.access(filePath);
-      } catch {
+      const receipt = await receiptService.getVisibleReceipt(id, req.householdContext!);
+      // Only this receipt's own image: a stale path naming another file reads as absent.
+      const content = await readReceiptFile(receipt, "receipt");
+      if (!content) {
         throw new NotFoundError("Receipt image not found");
       }
-      return res.sendFile(filePath);
+      return sendUploadContent(res, content, receipt.storagePath);
     } catch (error) {
       logger.error(
         "GET /api/receipts/:id/ocr-image error",
@@ -450,7 +400,7 @@ export const receiptsController = {
       const { householdId } = req.householdContext!;
       const { id } = req.params;
 
-      const result = await receiptService.attemptMatch(id, householdId);
+      const result = await receiptService.attemptMatch(id, householdId, req.session.userId!);
       return success(res, {
         matched: result.matched,
         transactionId: result.transactionId ?? null,

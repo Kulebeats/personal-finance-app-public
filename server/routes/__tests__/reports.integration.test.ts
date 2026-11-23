@@ -1,6 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import express from "express";
 import request from "supertest";
+import type { SessionData } from "express-session";
+import type { User } from "@shared/schema";
+import type { HouseholdContext } from "../../middleware/householdGuard";
+
+type ControllerFixtureRequest = {
+  householdContext?: HouseholdContext;
+  user?: Pick<User, "id" | "securityGeneration">;
+  session?: Pick<SessionData, "userId" | "securityGeneration">;
+  sessionID?: string;
+};
 
 // Mock services
 const { mockAnalyticsService } = vi.hoisted(() => {
@@ -32,12 +42,37 @@ const { mockReportsExportService } = vi.hoisted(() => {
   return {
     mockReportsExportService: {
       listExports: vi.fn(),
-      createExport: vi.fn(),
       getExportById: vi.fn(),
       generateExportFile: vi.fn(),
     },
   };
 });
+
+const { mockReportExportCreation, mockReportCsvPublication } = vi.hoisted(() => ({
+  mockReportExportCreation: vi.fn<typeof import("../../modules/reports/reportExportCreation").createAuthorizedReportExport>(),
+  mockReportCsvPublication: vi.fn<typeof import("../../modules/reports/reportCsvPublication").generateAuthorizedReportCsv>(),
+}));
+
+const { mockExportMetadata, mockBusinessAuditService, controllerIdentity } = vi.hoisted(() => ({
+  mockExportMetadata: {
+    list: vi.fn<typeof import("../../modules/reports/reportExportMetadata").listAuthorizedExportMetadata>(),
+    read: vi.fn<typeof import("../../modules/reports/reportExportMetadata").readAuthorizedExportMetadata>(),
+  },
+  mockBusinessAuditService: {
+    log: vi.fn().mockResolvedValue(undefined),
+    getIpAddress: vi.fn().mockReturnValue("127.0.0.1"),
+  },
+  controllerIdentity: {
+    includeUser: true,
+    sessionUserId: "user-1" as string | undefined,
+  },
+}));
+
+const expectedExportSession = {
+  snapshot: { id: "user-1", securityGeneration: 3 },
+  sessionId: "reports-controller-unit-session",
+  generation: 3,
+};
 
 const money = (value: number, currency: string = "USD") => ({
   amount: value.toFixed(2),
@@ -59,14 +94,37 @@ vi.mock("../../modules/reports/reports.export.service", () => {
   };
 });
 
+// Controller-wiring unit boundaries only. These mocks do not prove signed
+// session authority, locked database selection, publication or persisted audit.
+vi.mock("../../modules/reports/reportExportMetadata", () => ({
+  listAuthorizedExportMetadata: mockExportMetadata.list,
+  readAuthorizedExportMetadata: mockExportMetadata.read,
+}));
+vi.mock("../../modules/reports/reportExportCreation", () => ({
+  createAuthorizedReportExport: mockReportExportCreation,
+}));
+vi.mock("../../modules/reports/reportCsvPublication", () => ({
+  generateAuthorizedReportCsv: mockReportCsvPublication,
+}));
+vi.mock("../../services/BusinessAuditService", () => ({
+  businessAuditService: mockBusinessAuditService,
+}));
+
 // Mock middleware
 vi.mock("../../middleware/householdGuard", () => ({
-  householdGuard: (req: any, res: any, next: any) => {
+  householdGuard: (req: ControllerFixtureRequest, _res: unknown, next: () => void) => {
     req.householdContext = {
       householdId: "house-1",
       userId: "user-1",
       role: "owner",
     };
+    if (controllerIdentity.includeUser) {
+      req.user = { id: "user-1", securityGeneration: 3 };
+    }
+    if (controllerIdentity.sessionUserId !== undefined) {
+      req.session = { userId: controllerIdentity.sessionUserId, securityGeneration: 3 };
+      req.sessionID = "reports-controller-unit-session";
+    }
     next();
   },
 }));
@@ -102,6 +160,8 @@ app.use("/api/reports", reportsRouter);
 describe("Reports Routes Integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    controllerIdentity.includeUser = true;
+    controllerIdentity.sessionUserId = "user-1";
   });
 
   // ==========================================================================
@@ -742,7 +802,7 @@ describe("Reports Routes Integration", () => {
   // ==========================================================================
   describe("GET /api/reports/exports", () => {
     it("should return export history", async () => {
-      mockReportsExportService.listExports.mockResolvedValue({
+      mockExportMetadata.list.mockResolvedValue({
         exports: [
           {
             id: "exp-1",
@@ -765,12 +825,18 @@ describe("Reports Routes Integration", () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.data.exports).toHaveLength(1);
+      expect(mockExportMetadata.list).toHaveBeenCalledWith(
+        { householdId: "house-1", userId: "user-1", role: "owner" },
+        expectedExportSession,
+        { limit: 5 },
+      );
+      expect(mockReportsExportService.listExports).not.toHaveBeenCalled();
     });
   });
 
   describe("POST /api/reports/exports", () => {
     it("should create export", async () => {
-      mockReportsExportService.createExport.mockResolvedValue({
+      mockReportExportCreation.mockResolvedValue({
         id: "exp-2",
         userId: "user-1",
         householdId: "house-1",
@@ -794,13 +860,21 @@ describe("Reports Routes Integration", () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.data.id).toBe("exp-2");
+      // Non-transaction exports go through the current-grant authority boundary.
+      expect(mockReportExportCreation).toHaveBeenCalledWith(
+        { householdId: "house-1", userId: "user-1", role: "owner" },
+        expectedExportSession,
+        "household",
+        expect.objectContaining({ reportType: "cashflow", format: "csv" }),
+        "127.0.0.1",
+      );
     });
   });
 
   describe("GET /api/reports/exports/:id", () => {
     it("should return export metadata", async () => {
       const exportId = "00000000-0000-0000-0000-000000000002";
-      mockReportsExportService.getExportById.mockResolvedValue({
+      const exportMetadata = {
         id: exportId,
         userId: "user-1",
         householdId: "house-1",
@@ -812,13 +886,21 @@ describe("Reports Routes Integration", () => {
         recordCount: 2,
         status: "completed",
         createdAt: "2024-02-01T00:00:00Z",
-      });
+      };
+      mockReportsExportService.getExportById.mockResolvedValue(exportMetadata);
+      mockExportMetadata.read.mockResolvedValue(exportMetadata);
 
       const res = await request(app).get(`/api/reports/exports/${exportId}`);
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.data.id).toBe(exportId);
+      expect(mockExportMetadata.read).toHaveBeenCalledWith(
+        { householdId: "house-1", userId: "user-1", role: "owner" },
+        expectedExportSession,
+        exportId,
+      );
+      expect(mockReportsExportService.getExportById).toHaveBeenCalledWith(exportId, "house-1", "user-1");
     });
   });
 
@@ -838,7 +920,7 @@ describe("Reports Routes Integration", () => {
         status: "completed",
         createdAt: "2024-02-01T00:00:00Z",
       });
-      mockReportsExportService.generateExportFile.mockResolvedValue({
+      mockReportCsvPublication.mockResolvedValue({
         content: "col1,col2\n1,2",
         fileName: "cashflow_2024-01-01_2024-01-31.csv",
       });
@@ -850,6 +932,48 @@ describe("Reports Routes Integration", () => {
       expect(res.status).toBe(200);
       expect(res.header["content-type"]).toContain("text/csv");
       expect(res.text).toContain("col1,col2");
+      // Authority, regeneration and the PROCESS audit commit inside this
+      // boundary; the signed real-DB C3-13 suite proves them end to end.
+      expect(mockReportCsvPublication).toHaveBeenCalledWith(
+        { householdId: "house-1", userId: "user-1", role: "owner" },
+        exportId,
+        expectedExportSession,
+        "127.0.0.1",
+      );
+      expect(mockReportsExportService.generateExportFile).not.toHaveBeenCalled();
+      expect(mockExportMetadata.read).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Export controller identity guard", () => {
+    it.each([
+      "/api/reports/exports",
+      "/api/reports/exports/00000000-0000-0000-0000-000000000002",
+      "/api/reports/exports/00000000-0000-0000-0000-000000000002?download=true",
+    ])("rejects missing request identity before export work at %s", async path => {
+      controllerIdentity.includeUser = false;
+
+      const res = await request(app).get(path);
+
+      expect(res.status).toBe(401);
+      expect(res.body.error.code).toBe("UNAUTHORIZED");
+      expect(mockExportMetadata.list).not.toHaveBeenCalled();
+      expect(mockExportMetadata.read).not.toHaveBeenCalled();
+      expect(mockReportsExportService.getExportById).not.toHaveBeenCalled();
+      expect(mockReportsExportService.generateExportFile).not.toHaveBeenCalled();
+      expect(mockReportCsvPublication).not.toHaveBeenCalled();
+      expect(mockBusinessAuditService.log).not.toHaveBeenCalled();
+    });
+
+    it.each([undefined, "another-user"])("rejects absent or mismatched session user %s", async sessionUserId => {
+      controllerIdentity.sessionUserId = sessionUserId;
+
+      const res = await request(app).get("/api/reports/exports");
+
+      expect(res.status).toBe(401);
+      expect(res.body.error.code).toBe("UNAUTHORIZED");
+      expect(mockExportMetadata.list).not.toHaveBeenCalled();
+      expect(mockReportsExportService.listExports).not.toHaveBeenCalled();
     });
   });
 

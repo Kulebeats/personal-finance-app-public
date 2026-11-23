@@ -94,3 +94,28 @@ describe("MessageBubble — timestamp (E1)", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("MessageBubble — answer provenance label (R17)", () => {
+  it.each([
+    ["claude", /answered using claude/i],
+    ["gemini", /answered using gemini — backup provider/i],
+    ["local", /limited local summary/i],
+  ] as const)("labels a %s answer", (answerMode, label) => {
+    render(<MessageBubble message={{ ...assistantMessage, answerMode }} />);
+    expect(screen.getByText(label)).toBeInTheDocument();
+  });
+
+  it("adds no provider label to an unavailable reply or a message without a mode", () => {
+    const { rerender } = render(
+      <MessageBubble message={{ ...assistantMessage, answerMode: "unavailable" }} />,
+    );
+    expect(screen.queryByText(/answered using/i)).not.toBeInTheDocument();
+    rerender(<MessageBubble message={assistantMessage} />);
+    expect(screen.queryByText(/answered using|limited local summary/i)).not.toBeInTheDocument();
+  });
+
+  it("never labels the user's own message", () => {
+    render(<MessageBubble message={{ ...userMessage, answerMode: "claude" }} />);
+    expect(screen.queryByText(/answered using/i)).not.toBeInTheDocument();
+  });
+});

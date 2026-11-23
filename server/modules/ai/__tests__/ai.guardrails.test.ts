@@ -17,7 +17,7 @@ import {
 
 describe("ai.guardrails", () => {
   it("should expose canonical defaults", () => {
-    expect(DEFAULT_AI_REQUEST_TOKEN_BUDGET).toBe(2000);
+    expect(DEFAULT_AI_REQUEST_TOKEN_BUDGET).toBe(8000);
     expect(AI_TOOL_CALL_CAP).toBe(2);
   });
 

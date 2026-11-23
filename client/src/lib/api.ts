@@ -12,6 +12,11 @@ import type {
   ActionType,
 } from "@shared/ruleConditions";
 import { getCsrfToken, clearCsrfToken } from "./csrf";
+import { assertOperationLifetime, captureOperationLifetime, type OperationLifetime } from "./operation-lifetime";
+import { beginSessionTransition, completeSessionTransition } from "./session";
+import { protectedFetch } from "./protected-fetch";
+import { throwIfResNotOk } from "./queryClient";
+import { unsubscribeThisBrowserFromPush } from "./push-signout";
 export type { MoneyDto };
 
 // API response types
@@ -136,7 +141,7 @@ export interface Account {
   currency: string;
   isAsset: boolean;
   isPrivate: boolean;
-  ownerUserId?: string;
+  ownerUserId?: string | null;
   isHidden: boolean;
   isArchived: boolean;
   excludeFromNetWorth?: boolean;
@@ -188,6 +193,10 @@ export interface NetWorthSummary {
   totalLiabilities: number;
   netWorth: number;
   currency?: string; // TODO-006: Added base currency
+  scope?: "visible_account_linked";
+  complete?: false;
+  valuationDate?: string;
+  fxPolicy?: "trusted_same_day_only";
 }
 
 export interface BalanceHistoryPoint {
@@ -200,16 +209,26 @@ export interface NetWorthHistoryPoint {
   assets: number;
   liabilities: number;
   netWorth: number;
+  currency?: string;
+  provenance?: "captured_snapshot";
 }
 
 export interface NetWorthHistory {
   series: NetWorthHistoryPoint[];
+  /** Requested only by the registered account page; shares current frame authority. */
+  accounts?: Account[];
+  accessibleAccountCount?: number;
   latest: {
     assets: number;
     liabilities: number;
     netWorth: number;
-  };
+    currency?: string;
+    valuationDate?: string;
+  } | null;
   scope?: "household" | "user"; // TODO-009: Added scope metadata
+  currentStatus?: "available" | "unavailable";
+  historyCoverage?: "verified_snapshots_only";
+  unattestedHistory?: "not_charted";
 }
 
 export interface AccountSettings {
@@ -228,12 +247,44 @@ export interface TransactionImportRow {
   tags?: string;
 }
 
+/** NEW-17: a row the member chose to post although it may repeat a transaction already on the account. */
+export interface TransactionImportPossibleDuplicate {
+  row: number;
+  transactionId: string;
+  matchesTransactionId: string;
+}
+
+export interface TransactionImportResult {
+  imported: number;
+  totalAmount: MoneyDto;
+  skipped: number;
+  possibleDuplicates: TransactionImportPossibleDuplicate[];
+  /** A-01: flagged rows the member chose to skip. */
+  reviewSkipped?: number;
+}
+
+/** A-01: the member's choice for a flagged row, bound to the transaction it was shown against. */
+export interface TransactionImportDecision {
+  row: number;
+  matchesTransactionId: string;
+  decision: "post" | "skip";
+}
+
+/** A-01: a row the import refused to post until the member decides (409 IMPORT_REVIEW_REQUIRED). */
+export interface TransactionImportReviewItem {
+  row: number;
+  matchesTransactionId: string;
+  match: { name: string; date: string; type: string; amount: { amount: string; currency: string } };
+}
+
+export const IMPORT_REVIEW_REQUIRED = "IMPORT_REVIEW_REQUIRED";
+
 // Transaction types (matching server schema)
 export interface Transaction {
   id: string;
   householdId: string;
   accountId: string;
-  ownerUserId?: string;
+  ownerUserId?: string | null;
   date: string;
   name: string;
   originalName?: string;
@@ -265,14 +316,16 @@ export interface Transaction {
   merchantLogoUrl?: string | null;
   categoryName?: string | null;
   accountName?: string | null;
-  currency?: string;
+  currency?: string | null;
   // Split transaction data (when transaction has splits)
   splits?: Array<{
     id: string;
-    amount: MoneyDto;
-    categoryId?: string;
+    amount: MoneyDto | { amount: string; currency: null };
+    categoryId?: string | null;
+    merchantId?: string | null;
+    displayOrder?: number;
     categoryName?: string;
-    notes?: string;
+    notes?: string | null;
   }>;
 }
 
@@ -305,6 +358,7 @@ export interface CreateTransferInput {
 }
 
 export interface UpdateTransferInput {
+  expectedUpdatedAt?: string;
   fromAccountId: string;
   toAccountId: string;
   amount: MoneyDto;
@@ -324,8 +378,10 @@ export interface UpdateTransactionInput {
   isExcludedFromBudget?: boolean;
   notes?: string | null;
   ownerUserId?: string | null;
+  isPrivate?: boolean;
   updatedAt?: string;
-  splits?: Array<{ amount: MoneyDto; categoryId: string; notes?: string }>;
+  expectedUpdatedAt?: string;
+  splits?: Array<{ amount: MoneyDto; categoryId: string | null; merchantId?: string | null; notes?: string; displayOrder?: number }>;
 }
 
 export interface TransactionSummary {
@@ -333,6 +389,11 @@ export interface TransactionSummary {
   totalExpenses: MoneyDto;
   netFlow: MoneyDto;
   transactionCount: number;
+  // Full-period eligible flows, already converted to the same household currency.
+  largestIncome?: MoneyDto | null;
+  largestExpense?: MoneyDto | null;
+  firstTransactionDate?: string | null;
+  lastTransactionDate?: string | null;
 }
 
 export interface ListTransactionsParams {
@@ -370,13 +431,19 @@ export function registerStepUpHandler(handler: StepUpHandler | null): void {
   stepUpHandler = handler;
 }
 
+export function requestStepUp(level: string): Promise<boolean> {
+  return stepUpHandler ? stepUpHandler(level) : Promise.resolve(false);
+}
+
 // Helper function for API calls
 export async function apiCall<T>(
   endpoint: string,
   options: RequestInit = {},
   retryOnStepUp = true,
   csrfRetried = false,
+  operation: OperationLifetime | null = captureOperationLifetime(),
 ): Promise<T> {
+  assertOperationLifetime(operation);
   const method = (options.method || "GET").toUpperCase();
   const isMutating = ["POST", "PUT", "DELETE", "PATCH"].includes(method);
 
@@ -395,11 +462,13 @@ export async function apiCall<T>(
     headers["x-csrf-token"] = csrfToken;
   }
 
-  const response = await fetch(`/api${endpoint}`, {
+  assertOperationLifetime(operation);
+  const response = await protectedFetch(`/api${endpoint}`, {
     ...options,
     headers,
     credentials: "include",
-  });
+  }, operation);
+  assertOperationLifetime(operation);
 
   // 204 No Content carries an EMPTY body, so response.json() would reject with
   // a SyntaxError. Endpoints that answer 204 (e.g. DELETE
@@ -411,6 +480,7 @@ export async function apiCall<T>(
   }
 
   const data = await response.json();
+  assertOperationLifetime(operation);
 
   if (!response.ok) {
     // Clear CSRF token on 403 (might be invalid)
@@ -419,7 +489,7 @@ export async function apiCall<T>(
       // A stale CSRF token (e.g. login regenerated the session) self-heals: drop
       // the cached token and retry the mutation once with a freshly fetched one.
       if (isMutating && data.error?.code === "CSRF_INVALID" && !csrfRetried) {
-        return apiCall<T>(endpoint, options, retryOnStepUp, true);
+        return apiCall<T>(endpoint, options, retryOnStepUp, true, operation);
       }
     }
 
@@ -431,9 +501,11 @@ export async function apiCall<T>(
       (data?.error?.code === "STEP_UP_REQUIRED" || data?.requiresStepUp) &&
       stepUpHandler
     ) {
+      assertOperationLifetime(operation);
       const verified = await stepUpHandler(data?.level ?? "SETTINGS");
+      assertOperationLifetime(operation);
       if (verified) {
-        return apiCall<T>(endpoint, options, false);
+        return apiCall<T>(endpoint, options, false, csrfRetried, operation);
       }
     }
 
@@ -464,10 +536,20 @@ export function generateIdempotencyKey(): string {
 
 export const authApi = {
   async logout(): Promise<void> {
-    await apiCall<ApiResponse<unknown>>("/auth/logout", { method: "POST" });
-    clearCsrfToken();
+    const operation = beginSessionTransition(true);
+    try { await apiCall<ApiResponse<unknown>>("/auth/logout", { method: "POST" }, false, false, operation); }
+    finally { completeSessionTransition(operation); }
+    await unsubscribeThisBrowserFromPush();
   },
 };
+
+async function readAccountExportBlob(response: Response, operation: OperationLifetime | null): Promise<Blob> {
+  await throwIfResNotOk(response);
+  assertOperationLifetime(operation);
+  const blob = await response.blob();
+  assertOperationLifetime(operation);
+  return blob;
+}
 
 // ============================================================================
 // ACCOUNTS API
@@ -607,8 +689,12 @@ export const accountsApi = {
   async getNetWorthHistory(
     dateRange: string = "1m",
     scope: "user" | "household" = "user",
+    includeAccounts = false,
+    accountOwnerUserId?: string | null,
   ): Promise<NetWorthHistory> {
     const query = new URLSearchParams({ dateRange, scope });
+    if (includeAccounts) query.set("includeAccounts", "true");
+    if (includeAccounts && accountOwnerUserId !== undefined) query.set("ownerUserId", accountOwnerUserId === null ? "shared" : accountOwnerUserId);
     const response = await apiCall<ApiResponse<NetWorthHistory>>(
       `/accounts/net-worth/history?${query.toString()}`,
     );
@@ -621,30 +707,30 @@ export const accountsApi = {
   async exportTransactions(
     id: string,
     options?: { startDate?: string; endDate?: string },
+    operation = captureOperationLifetime(),
   ): Promise<Blob> {
     const query = new URLSearchParams();
     if (options?.startDate) query.set("startDate", options.startDate);
     if (options?.endDate) query.set("endDate", options.endDate);
     const queryStr = query.toString();
-    const response = await fetch(
+    const response = await protectedFetch(
       `/api/accounts/${id}/transactions/export${
         queryStr ? `?${queryStr}` : ""
       }`,
       { credentials: "include" },
+      operation,
     );
-    if (!response.ok) throw new Error("Failed to export transactions");
-    return response.blob();
+    return readAccountExportBlob(response, operation);
   },
 
   /**
    * Export balance history as CSV
    */
-  async exportBalanceHistory(id: string): Promise<Blob> {
-    const response = await fetch(`/api/accounts/${id}/balance-history/export`, {
+  async exportBalanceHistory(id: string, operation = captureOperationLifetime()): Promise<Blob> {
+    const response = await protectedFetch(`/api/accounts/${id}/balance-history/export`, {
       credentials: "include",
-    });
-    if (!response.ok) throw new Error("Failed to export balance history");
-    return response.blob();
+    }, operation);
+    return readAccountExportBlob(response, operation);
   },
 
   /**
@@ -671,12 +757,13 @@ export const accountsApi = {
     id: string,
     transactions: TransactionImportRow[],
     adjustBalance: boolean = false,
-  ): Promise<{ imported: number; totalAmount: number }> {
+    possibleDuplicateDecisions: TransactionImportDecision[] = [],
+  ): Promise<TransactionImportResult> {
     const response = await apiCall<
-      ApiResponse<{ imported: number; totalAmount: number }>
+      ApiResponse<TransactionImportResult>
     >(`/accounts/${id}/transactions/import`, {
       method: "POST",
-      body: JSON.stringify({ transactions, adjustBalance }),
+      body: JSON.stringify({ transactions, adjustBalance, possibleDuplicateDecisions }),
     });
     return response.data;
   },
@@ -701,18 +788,42 @@ export const accountsApi = {
   /**
    * Export accounts summary as CSV
    */
-  async exportSummary(): Promise<Blob> {
-    const response = await fetch("/api/accounts/summary/export", {
+  async exportSummary(operation = captureOperationLifetime()): Promise<Blob> {
+    const response = await protectedFetch("/api/accounts/summary/export", {
       credentials: "include",
-    });
-    if (!response.ok) throw new Error("Failed to export summary");
-    return response.blob();
+    }, operation);
+    return readAccountExportBlob(response, operation);
   },
 };
 
 // ============================================================================
 // TRANSACTIONS API
 // ============================================================================
+
+function transactionQueryParams(params?: ListTransactionsParams) {
+  const query = new URLSearchParams();
+  if (params?.limit) query.set("limit", params.limit.toString());
+  if (params?.offset) query.set("offset", params.offset.toString());
+  if (params?.accountId) query.set("accountId", params.accountId);
+  if (params?.categoryId) query.set("categoryId", params.categoryId);
+  if (params?.merchantId) query.set("merchantId", params.merchantId);
+  if (params?.type) query.set("type", params.type);
+  if (params?.startDate) query.set("startDate", params.startDate);
+  if (params?.endDate) query.set("endDate", params.endDate);
+  if (params?.ownerUserId !== undefined) {
+    query.set("ownerUserId", params.ownerUserId || "shared");
+  }
+  if (params?.search) query.set("search", params.search);
+  if (params?.amountMin !== undefined)
+    query.set("amountMin", params.amountMin.toString());
+  if (params?.amountMax !== undefined)
+    query.set("amountMax", params.amountMax.toString());
+  if (params?.reviewed) query.set("reviewed", params.reviewed);
+  if (params?.tagIds && params.tagIds.length > 0) {
+    query.set("tags", params.tagIds.join(","));
+  }
+  return query;
+}
 
 export const transactionsApi = {
   /**
@@ -734,27 +845,7 @@ export const transactionsApi = {
       hasPrev: boolean;
     };
   }> {
-    const query = new URLSearchParams();
-    if (params?.limit) query.set("limit", params.limit.toString());
-    if (params?.offset) query.set("offset", params.offset.toString());
-    if (params?.accountId) query.set("accountId", params.accountId);
-    if (params?.categoryId) query.set("categoryId", params.categoryId);
-    if (params?.merchantId) query.set("merchantId", params.merchantId);
-    if (params?.type) query.set("type", params.type);
-    if (params?.startDate) query.set("startDate", params.startDate);
-    if (params?.endDate) query.set("endDate", params.endDate);
-    if (params?.ownerUserId !== undefined) {
-      query.set("ownerUserId", params.ownerUserId || "shared");
-    }
-    if (params?.search) query.set("search", params.search);
-    if (params?.amountMin !== undefined)
-      query.set("amountMin", params.amountMin.toString());
-    if (params?.amountMax !== undefined)
-      query.set("amountMax", params.amountMax.toString());
-    if (params?.reviewed) query.set("reviewed", params.reviewed);
-    if (params?.tagIds && params.tagIds.length > 0) {
-      query.set("tags", params.tagIds.join(","));
-    }
+    const query = transactionQueryParams(params);
     const queryStr = query.toString();
     const response = await apiCall<PaginatedResponse<Transaction[]>>(
       `/transactions${queryStr ? `?${queryStr}` : ""}`,
@@ -776,28 +867,10 @@ export const transactionsApi = {
    * Get transaction summary for a date range
    * R-09: Extended to accept ownerUserId, type, and accountId filters
    */
-  async getSummary(params: {
-    startDate: string;
-    endDate: string;
-    ownerUserId?: string | null;
-    type?: string;
-    accountId?: string;
-    tagIds?: string[];
-  }): Promise<TransactionSummary> {
-    const query = new URLSearchParams();
-    query.set("startDate", params.startDate);
-    query.set("endDate", params.endDate);
-    if (params.ownerUserId !== undefined) {
-      // null means "shared" (no owner), empty string signals "all"
-      query.set("ownerUserId", params.ownerUserId ?? "");
-    }
-    if (params.type) query.set("type", params.type);
-    if (params.accountId) query.set("accountId", params.accountId);
-    if (params.tagIds && params.tagIds.length > 0) {
-      query.set("tags", params.tagIds.join(","));
-    }
+  async getSummary(params: Omit<ListTransactionsParams, "limit" | "offset"> & { startDate: string; endDate: string }, signal?: AbortSignal): Promise<TransactionSummary> {
+    const query = transactionQueryParams(params);
     const response = await apiCall<ApiResponse<TransactionSummary>>(
-      `/transactions/summary?${query.toString()}`,
+      `/transactions/summary?${query.toString()}`, { signal },
     );
     return response.data;
   },
@@ -1228,7 +1301,7 @@ export interface RuleCondition {
 
 export interface SplitConfig {
   categoryId?: string;
-  amount?: number;
+  amount?: string; // decimal money string ("25.00"), never a float
   percentage?: number;
   note?: string;
   merchantName?: string;

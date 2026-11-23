@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { FullConfig } from "@playwright/test";
+import { prepareBrowserClient } from "../server/testing/browser-client.mjs";
 
 const DEFAULT_BASE_URL = "http://localhost:5000";
 const BASE_TEST_USER = {
@@ -324,6 +325,7 @@ const resolveTestUser = async (baseURL: string) => {
 
 export default async function globalSetup(config: FullConfig) {
   const baseURL = resolveBaseUrl(config);
+  await prepareBrowserClient(baseURL);
   console.log(`[e2e] globalSetup start baseURL=${baseURL}`);
   await waitForServer(baseURL, 60_000);
   console.log("[e2e] server ready");

@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/select";
 import type { Account } from "@/lib/api";
 import type { PayDownGoalType, PayoffMethod } from "@/hooks/useGoals";
+import { goalFieldErrorProps, type GoalFieldErrors } from "./goalRequiredFields";
 
 export type PayDownGoalDraft = {
   name: string;
@@ -46,11 +47,13 @@ export function PayDownGoalForm({
   onChange,
   accounts,
   accountsLoading,
+  errors = {},
 }: {
   value: PayDownGoalDraft;
   onChange: (next: PayDownGoalDraft) => void;
   accounts: Account[];
   accountsLoading: boolean;
+  errors?: GoalFieldErrors;
 }) {
   const update = (patch: Partial<PayDownGoalDraft>) => {
     onChange({ ...value, ...patch });
@@ -62,6 +65,7 @@ export function PayDownGoalForm({
         <Label htmlFor="pay-down-name">Goal name</Label>
         <Input
           id="pay-down-name"
+          {...goalFieldErrorProps(errors, "pay-down-name")}
           value={value.name}
           onChange={(event) => update({ name: event.target.value })}
           placeholder="e.g. Visa payoff"
@@ -97,6 +101,7 @@ export function PayDownGoalForm({
           <Label htmlFor="pay-down-other-type">Please specify</Label>
           <Input
             id="pay-down-other-type"
+            {...goalFieldErrorProps(errors, "pay-down-other-type")}
             value={value.otherGoalType}
             onChange={(event) => update({ otherGoalType: event.target.value })}
             placeholder="e.g. Business loan"
@@ -111,7 +116,7 @@ export function PayDownGoalForm({
           onValueChange={(val) => update({ debtAccountId: val })}
           disabled={accountsLoading}
         >
-          <SelectTrigger id="pay-down-debt-account">
+          <SelectTrigger id="pay-down-debt-account" {...goalFieldErrorProps(errors, "pay-down-debt-account")}>
             <SelectValue
               placeholder={
                 accountsLoading ? "Loading accounts..." : "Select debt account"
@@ -133,6 +138,7 @@ export function PayDownGoalForm({
           <Label htmlFor="pay-down-interest">Interest rate (%)</Label>
           <Input
             id="pay-down-interest"
+            {...goalFieldErrorProps(errors, "pay-down-interest")}
             type="number"
             inputMode="decimal"
             value={value.interestRate}
@@ -143,6 +149,7 @@ export function PayDownGoalForm({
           <Label htmlFor="pay-down-minimum">Minimum payment</Label>
           <Input
             id="pay-down-minimum"
+            {...goalFieldErrorProps(errors, "pay-down-minimum")}
             type="number"
             inputMode="decimal"
             value={value.minimumPayment}
@@ -156,6 +163,7 @@ export function PayDownGoalForm({
           <Label htmlFor="pay-down-monthly">Monthly payment</Label>
           <Input
             id="pay-down-monthly"
+            {...goalFieldErrorProps(errors, "pay-down-monthly")}
             type="number"
             inputMode="decimal"
             value={value.monthlyPayment}

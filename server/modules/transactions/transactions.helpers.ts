@@ -6,7 +6,16 @@
  * @module modules/transactions/transactions.helpers
  */
 
-import { toMoneyDto } from "../../core/money";
+import { amountInUnit } from "../../core/money";
+import type { HouseholdContext } from "../../middleware/householdGuard";
+
+/** Mutations keep their raw internal result; external DTOs require a fresh,
+ * currently authorized read including coupon custody description projection.
+ */
+export async function mapVisibleTransactionMoney(id: string, actor: HouseholdContext) {
+  const { transactionService } = await import("../../services/TransactionService");
+  return mapTransactionMoney(await transactionService.getTransactionById(id, actor.householdId, actor.userId));
+}
 
 export const mapTransactionMoney = <
   T extends {
@@ -18,35 +27,22 @@ export const mapTransactionMoney = <
 >(
   transaction: T
 ): T => {
-  const currency =
-    transaction.currency ?? transaction.accountCurrency ?? undefined;
+  // FIN-05: the row's own currency, else its account's; never a default ZMW.
+  const currency = transaction.currency ?? transaction.accountCurrency ?? null;
   return {
     ...transaction,
     amount:
       transaction.amount !== undefined
-        ? toMoneyDto(transaction.amount, currency)
+        ? amountInUnit(transaction.amount, currency)
         : transaction.amount,
     splits: transaction.splits
       ? transaction.splits.map((split) => ({
           ...split,
           amount:
             split.amount !== undefined
-              ? toMoneyDto(split.amount, currency)
+              ? amountInUnit(split.amount, currency)
               : split.amount,
         }))
       : transaction.splits,
   };
 };
-
-export const mapTransactionLinkMoney = <
-  T extends { amount?: string | number; goal?: { currency?: string | null } }
->(
-  link: T,
-  currency?: string | null
-): T => ({
-  ...link,
-  amount:
-    link.amount !== undefined
-      ? toMoneyDto(link.amount, link.goal?.currency ?? currency ?? undefined)
-      : link.amount,
-});

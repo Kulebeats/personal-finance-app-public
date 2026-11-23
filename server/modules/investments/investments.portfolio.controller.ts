@@ -9,7 +9,34 @@ import {
   type TimeFrame,
 } from "../../services/InvestmentPerformanceService";
 import { success } from "../../core/http";
+import { toMoneyDto, type Money } from "../../core/money";
+import type { HouseholdInvestmentValue } from "../../services/PortfolioValuationService";
 import { resolveBaseCurrency } from "./investments.holdings.controller";
+import { investmentCurrencySelector } from "./investmentCurrencySelector";
+import { UnauthorizedError } from "../../core/errors";
+import { valueVisiblePortfolio } from "./investmentPortfolioRead";
+import type { InvestmentReadSession } from "./investmentReadAuthority";
+
+/** Holdings totals as MoneyDto in the base currency; the percentage is a ratio. */
+function toInvestmentValueDto(summary: HouseholdInvestmentValue) {
+  return {
+    totalValue: toMoneyDto(summary.totalValue),
+    totalCostBasis: summary.totalCostBasis && toMoneyDto(summary.totalCostBasis),
+    totalGainLoss: summary.totalGainLoss && toMoneyDto(summary.totalGainLoss),
+    totalGainLossPercent: summary.totalGainLossPercent,
+    byType: Object.fromEntries(Object.entries(summary.byType).map(([type, value]) => [type, toMoneyDto(value)])),
+    holdingsCount: summary.holdingsCount,
+  };
+}
+
+function percentOf(part: Money, whole: Money): number {
+  return whole.isZero() ? 0 : part.divide(whole.toFullString()).multiply(100).toNumber();
+}
+
+function portfolioReadSession(req: Request): InvestmentReadSession {
+  if (!req.user || req.session?.userId !== req.user.id || !req.sessionID) throw new UnauthorizedError("Authentication required");
+  return { snapshot: structuredClone(req.user), sessionId: req.sessionID, generation: req.session.securityGeneration };
+}
 
 async function getPortfolioSummary(
   req: Request,
@@ -17,39 +44,25 @@ async function getPortfolioSummary(
   next: NextFunction,
 ) {
   try {
+    const session = portfolioReadSession(req);
     const { householdId } = req.householdContext!;
     const baseCurrency = await resolveBaseCurrency(
       householdId,
-      req.query.currency as string | undefined,
+      investmentCurrencySelector(req.query),
     );
 
-    const summary = await portfolioValuationService.getHouseholdInvestmentValue(
-      householdId,
-      baseCurrency,
-    );
-
-    // Add T-Bills and Pensions for complete picture
-    const tbillsValue = await portfolioValuationService.getTBillsValue(
-      householdId,
-      baseCurrency,
-    );
-    const pensionValue = await portfolioValuationService.getPensionValue(
-      householdId,
-      baseCurrency,
-    );
-
-    success(
-      res,
-      {
-        ...summary,
-        tbillsValue,
-        pensionValue,
-        totalIncludingAlternatives:
-          summary.totalValue + tbillsValue + pensionValue,
-      },
-      200,
-      { baseCurrency },
-    );
+    const data = await valueVisiblePortfolio(req.householdContext!, session, async context => {
+      const summary = await portfolioValuationService.getHouseholdInvestmentValue(householdId, baseCurrency, context);
+      const tbillsValue = await portfolioValuationService.getTBillsValue(householdId, baseCurrency, context);
+      const pensionValue = await portfolioValuationService.getPensionValue(householdId, baseCurrency, context);
+      return {
+        ...toInvestmentValueDto(summary),
+        tbillsValue: toMoneyDto(tbillsValue),
+        pensionValue: toMoneyDto(pensionValue),
+        totalIncludingAlternatives: toMoneyDto(summary.totalValue.add(tbillsValue).add(pensionValue)),
+      };
+    });
+    success(res, data, 200, { baseCurrency });
     return;
   } catch (error) {
     next(error);
@@ -62,7 +75,6 @@ async function getPerformanceHistory(
   next: NextFunction,
 ) {
   try {
-    const { householdId } = req.householdContext!;
     const rawTimeframe = (req.query.timeframe as string) || "1M";
 
     // Validate timeframe instead of an unchecked cast
@@ -74,7 +86,7 @@ async function getPerformanceHistory(
       : "1M";
 
     const history = await investmentPerformanceService.gethistory(
-      householdId,
+      req.householdContext!,
       timeframe,
     );
 
@@ -86,28 +98,26 @@ async function getPerformanceHistory(
 
 async function getAllocation(req: Request, res: Response, next: NextFunction) {
   try {
+    const session = portfolioReadSession(req);
     const { householdId } = req.householdContext!;
     const baseCurrency = await resolveBaseCurrency(
       householdId,
       req.query.currency as string | undefined,
     );
 
-    const summary = await portfolioValuationService.getHouseholdInvestmentValue(
-      householdId,
-      baseCurrency,
-    );
+    const summary = await valueVisiblePortfolio(req.householdContext!, session, context =>
+      portfolioValuationService.getHouseholdInvestmentValue(householdId, baseCurrency, context), false);
 
     // Convert byType to allocation array
-    const total = summary.totalValue || 1;
     const allocation = Object.entries(summary.byType).map(([type, value]) => ({
       category: type,
-      value,
-      percentage: (value / total) * 100,
+      value: toMoneyDto(value),
+      percentage: percentOf(value, summary.totalValue),
     }));
 
     success(res, allocation, 200, {
       baseCurrency,
-      totalValue: summary.totalValue,
+      totalValue: toMoneyDto(summary.totalValue),
     });
     return;
   } catch (error) {

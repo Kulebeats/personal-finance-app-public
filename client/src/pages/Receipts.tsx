@@ -156,8 +156,8 @@ export default function Receipts() {
                       aria-label={`View receipt from ${merchantName}${formattedAmount ? `, ${formattedAmount}` : ""}, uploaded ${dateStr}`}
                     >
                       <div className="aspect-3/4 bg-muted relative overflow-hidden">
-                        <img
-                          src={`/api/receipts/${receipt.id}/thumbnail`}
+                        <ProtectedImage
+                          src={receipt.thumbnailUrl ?? receipt.imageUrl}
                           alt={`Receipt from ${merchantName}${formattedAmount ? ` for ${formattedAmount}` : ""}`}
                           className="w-full h-full object-cover transition-transform group-hover:scale-105"
                           loading="lazy"
@@ -215,3 +215,4 @@ export default function Receipts() {
     </Layout>
   );
 }
+import { ProtectedImage } from "@/components/session/ProtectedImage";

@@ -11,6 +11,7 @@ vi.mock("@/hooks/useCategories", () => ({
       categories: [
         { id: "cat-1", name: "Groceries", groupName: "Food" },
         { id: "cat-2", name: "Rent", groupName: "Housing" },
+        { id: "11111111-1111-4111-8111-111111111111", name: "Real category", groupName: "Food" },
       ],
     },
   }),
@@ -29,7 +30,7 @@ vi.mock("@/hooks/useTransactions", () => ({
   useCreateTransaction: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
-function renderAt(initialPath: string, transaction: TransactionWithDetails) {
+function renderAt(initialPath: string, transaction: TransactionWithDetails, onOpenRule = vi.fn(), onEdit?: (row: TransactionWithDetails) => void) {
   const { hook, searchHook, history } = memoryLocation({
     path: initialPath,
     record: true,
@@ -40,8 +41,9 @@ function renderAt(initialPath: string, transaction: TransactionWithDetails) {
         transaction={transaction}
         onClose={vi.fn()}
         onUpdate={vi.fn()}
-        onOpenRule={vi.fn()}
+        onOpenRule={onOpenRule}
         onOpenRecurring={vi.fn()}
+        {...(onEdit ? { onEdit } : {})}
       />
     </Router>,
   );
@@ -66,6 +68,12 @@ const baseTransaction: TransactionWithDetails = {
   updatedAt: "2026-01-05T00:00:00Z",
   accountName: "Checking",
 } as unknown as TransactionWithDetails;
+
+it("offers the real full edit handoff with the selected privacy, owner and version", () => {
+  const onEdit = vi.fn(), row = { ...baseTransaction, isPrivate: true, ownerUserId: "actor" };
+  renderAt("/transactions", row, vi.fn(), onEdit);
+  fireEvent.click(screen.getByRole("button", { name: "Edit transaction" })); expect(onEdit).toHaveBeenCalledWith(row);
+});
 
 describe("TransactionDetailModal deep links (audit v2 P2)", () => {
   beforeEach(() => {
@@ -129,5 +137,25 @@ describe("TransactionDetailModal deep links (audit v2 P2)", () => {
     expect(
       screen.queryByRole("link", { name: /view recurring rule/i }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("TransactionDetailModal rule handoff", () => {
+  it("passes the selected category UUID and its display label from the clicked transaction", () => {
+    const onOpenRule = vi.fn();
+    const categoryId = "11111111-1111-4111-8111-111111111111";
+    renderAt("/", { ...baseTransaction, categoryId }, onOpenRule);
+    expect(screen.getByRole("dialog", { name: "Transaction details" })).toHaveAccessibleDescription(
+      "Review and update this transaction, or create a rule using its merchant and category.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Create Rule" }));
+    expect(onOpenRule).toHaveBeenCalledWith("Whole Foods", categoryId, "Real category");
+  });
+
+  it("passes no category reference for an uncategorized transaction", () => {
+    const onOpenRule = vi.fn();
+    renderAt("/", { ...baseTransaction, categoryId: undefined }, onOpenRule);
+    fireEvent.click(screen.getByRole("button", { name: "Create Rule" }));
+    expect(onOpenRule).toHaveBeenCalledWith("Whole Foods", null, "");
   });
 });

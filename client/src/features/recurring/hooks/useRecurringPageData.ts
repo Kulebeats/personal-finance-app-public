@@ -6,11 +6,14 @@
  * ideally come from server API per enterprise patterns.
  */
 
-import { useState, useMemo } from "react";
+import { useState, useCallback, useEffect, useRef, type SetStateAction } from "react";
 import { useFormatters } from "@/contexts/SettingsContext";
-import { sumMoneyDto, zeroMoneyDto } from "@/lib/money";
+import { useHouseholdCalendarTimeZone } from "@/lib/calendarZone";
+import { householdCalendarDate } from "@shared/household-calendar";
+import { sumInCurrency } from "../recurringTotals";
 import {
   useRecurring,
+  useRecurringCalendar,
   useUpcomingBills,
   useDeleteRecurring,
   usePauseRecurring,
@@ -22,11 +25,18 @@ import { type CalendarItem, type RecurringEditForm } from "../types";
 
 export function useRecurringPageData() {
   const [viewMode, setViewMode] = useState<"calendar" | "list">("calendar");
-  const [currentDate, setCurrentDate] = useState(new Date());
+  const [selectedMonth, setSelectedMonth] = useState<Date | null>(null);
   const [showAllUpcoming, setShowAllUpcoming] = useState(false);
   const [deleteConfirm, setDeleteConfirm] =
     useState<RecurringTransaction | null>(null);
-  const [editItem, setEditItem] = useState<RecurringTransaction | null>(null);
+  const [editItem, setEditItemState] = useState<RecurringTransaction | null>(null);
+  const editVersion = useRef(0);
+  const setEditItem = useCallback((item: SetStateAction<RecurringTransaction | null>) => {
+    // Closing or opening is a new edit session, including the same rule again.
+    editVersion.current++;
+    setEditItemState(item);
+  }, []);
+  useEffect(() => () => { editVersion.current++; }, []);
   const [editForm, setEditForm] = useState<RecurringEditForm>({
     name: "",
     amount: "",
@@ -35,7 +45,7 @@ export function useRecurringPageData() {
   const { currency: defaultCurrency } = useFormatters();
 
   // API hooks
-  const { data: recurringData, isLoading, error } = useRecurring();
+  const { data: recurringData, isLoading, error, refetch: refetchRecurring } = useRecurring();
   const { data: upcomingBills } = useUpcomingBills(30);
   const deleteRecurring = useDeleteRecurring();
   const pauseRecurring = usePauseRecurring();
@@ -43,6 +53,9 @@ export function useRecurringPageData() {
   const skipRecurring = useSkipRecurring();
 
   // Calendar values
+  const calendarZone = useHouseholdCalendarTimeZone();
+  const [todayYear, todayMonth, today] = householdCalendarDate(new Date(), calendarZone).split("-").map(Number);
+  const currentDate = selectedMonth ?? new Date(todayYear, todayMonth - 1, 1);
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -51,70 +64,36 @@ export function useRecurringPageData() {
     month: "long",
     year: "numeric",
   });
-  const today = new Date().getDate();
-  const isCurrentMonth =
-    new Date().getMonth() === month && new Date().getFullYear() === year;
+  const isCurrentMonth = todayMonth === month + 1 && todayYear === year;
+  const monthKey = `${String(year).padStart(4, "0")}-${String(month + 1).padStart(2, "0")}`;
+  const calendar = useRecurringCalendar(
+    { from: `${monthKey}-01`, to: `${monthKey}-${daysInMonth}` },
+    viewMode === "calendar" && !isLoading && !error,
+  );
+  const calendarItems: CalendarItem[] = (calendar.data ?? []).map(({ id, date, rule, amount, status }) => ({
+    id, day: Number(date.slice(8)), name: rule.name, amount, status, isPaused: rule.isPaused, raw: rule,
+  }));
 
-  // Transform recurring data to calendar items
-  const calendarItems = useMemo<CalendarItem[]>(() => {
-    if (!recurringData) return [];
-    return recurringData
-      .map((item) => {
-        const dueDate = new Date(item.nextDueDate);
-        const day = dueDate.getDate();
-        const isThisMonth =
-          dueDate.getMonth() === month && dueDate.getFullYear() === year;
-        return {
-          id: item.id,
-          day: isThisMonth ? day : -1,
-          name: item.name,
-          amount: item.amount, // Keep as MoneyDto for precision
-          type: item.type === "expense" ? "bill" : "income",
-          status: dueDate < new Date() ? "paid" : "upcoming",
-          category: item.categoryId || "Uncategorized",
-          logo: item.name.charAt(0).toUpperCase(),
-          isPaused: item.isPaused,
-          frequency: item.frequency,
-          raw: item,
-        } as CalendarItem;
-      })
-      .filter((item) => item.day > 0);
-  }, [recurringData, month, year]);
-
-  // Totals - use MoneyDto for precision
-  const totalRecurring = recurringData
-    ? sumMoneyDto(
-        recurringData.map((r) => r.amount),
-        defaultCurrency,
-      )
-    : zeroMoneyDto(defaultCurrency);
-  const billsTotal = recurringData
-    ? sumMoneyDto(
-        recurringData.filter((r) => r.type === "expense").map((r) => r.amount),
-        defaultCurrency,
-      )
-    : zeroMoneyDto(defaultCurrency);
-  const incomeTotal = recurringData
-    ? sumMoneyDto(
-        recurringData.filter((r) => r.type === "income").map((r) => r.amount),
-        defaultCurrency,
-      )
-    : zeroMoneyDto(defaultCurrency);
+  // Totals - MoneyDto precision, and only amounts proven in the display
+  // currency (FIN-05); the rest are counted so the page can say so.
+  const rules = recurringData ?? [];
+  const allRules = sumInCurrency(rules.map((r) => r.amount), defaultCurrency);
+  const totalRecurring = allRules.total;
+  const excludedFromTotals = allRules.excludedCount;
+  const billsTotal = sumInCurrency(rules.filter((r) => r.type === "expense").map((r) => r.amount), defaultCurrency).total;
+  const incomeTotal = sumInCurrency(rules.filter((r) => r.type === "income").map((r) => r.amount), defaultCurrency).total;
   const upcomingCount = upcomingBills?.length || 0;
-  const upcomingTotal = upcomingBills
-    ? sumMoneyDto(
-        upcomingBills.map((r) => r.amount),
-        defaultCurrency,
-      )
-    : zeroMoneyDto(defaultCurrency);
+  const upcoming = sumInCurrency((upcomingBills ?? []).map((r) => r.amount), defaultCurrency);
+  const upcomingTotal = upcoming.total;
+  const upcomingExcluded = upcoming.excludedCount;
 
   // Handlers
   const navigateMonth = (delta: number) =>
-    setCurrentDate(new Date(year, month + delta, 1));
+    setSelectedMonth(new Date(year, month + delta, 1));
   const handlePauseToggle = (item: RecurringTransaction) =>
     pauseRecurring.mutate({ id: item.id, pause: !item.isPaused });
   const handleSkip = (item: RecurringTransaction) =>
-    skipRecurring.mutate(item.id);
+    skipRecurring.mutate({ id: item.id, occurrenceDate: item.nextDueDate });
   const handleDelete = (item: RecurringTransaction) => setDeleteConfirm(item);
   const confirmDelete = () => {
     if (deleteConfirm) {
@@ -126,6 +105,7 @@ export function useRecurringPageData() {
     setEditForm({
       name: item.name,
       amount: item.amount.amount,
+      expectedDefinition: item.definitionToken,
       frequency: item.frequency,
       nextDueDate: item.nextDueDate,
       endDate: item.endDate || undefined,
@@ -137,16 +117,19 @@ export function useRecurringPageData() {
   };
   const handleSaveEdit = () => {
     if (!editItem) return;
+    const saveVersion = ++editVersion.current;
+    const isCurrentEdit = () => editVersion.current === saveVersion;
     const resolvedFrequency = editForm.frequency || editItem.frequency;
     updateRecurring.mutate(
       {
         id: editItem.id,
         data: {
           name: editForm.name,
-          amount: {
+          ...(editForm.confirmDenomination ? { confirmDenomination: true, expectedDefinition: editForm.expectedDefinition } : {}),
+          ...(editForm.confirmDenomination || editItem.verifiedCurrency === "ZMW" ? { amount: {
             amount: editForm.amount,
-            currency: editItem.amount.currency ?? defaultCurrency,
-          },
+            currency: "ZMW",
+          } } : {}),
           frequency: resolvedFrequency,
           nextDueDate: editForm.nextDueDate,
           endDate: editForm.endDate || null,
@@ -155,7 +138,12 @@ export function useRecurringPageData() {
           reminderEmail: editForm.reminderEmail,
         },
       },
-      { onSuccess: () => setEditItem(null) },
+      { onSuccess: () => { if (isCurrentEdit()) setEditItem(null); }, onError: () => {
+        if (!isCurrentEdit() || !editForm.confirmDenomination) return;
+        setEditForm(current => ({ ...current, amount: "", confirmDenomination: false, expectedDefinition: undefined }));
+        setEditItem(null);
+        void refetchRecurring();
+      } },
     );
   };
 
@@ -176,16 +164,21 @@ export function useRecurringPageData() {
     error,
     upcomingBills,
     calendarItems,
+    calendarLoading: calendar.isLoading,
+    calendarUnavailable: calendar.isError,
+    retryCalendar: calendar.refetch,
     daysInMonth,
     firstDayOfMonth,
     monthName,
     today,
     isCurrentMonth,
     totalRecurring,
+    excludedFromTotals,
     billsTotal,
     incomeTotal,
     upcomingCount,
     upcomingTotal,
+    upcomingExcluded,
     navigateMonth,
     handlePauseToggle,
     handleSkip,

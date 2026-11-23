@@ -1,46 +1,20 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
 import { z } from "zod";
+import { CUSTOM_CHART_PERIODS } from "@shared/reports";
 import { userRepository } from "../repositories/UserRepository";
 import { logger } from "../utils/logger";
-import { generalLimiter } from "../middleware/rateLimit";
 import { InternalError, ValidationError } from "../core/errors";
 import { businessAuditService } from "../services/BusinessAuditService";
-import type {
-  ReportWidgetPreferences,
-  DisplaySettingsWithPreferences,
-} from "@shared/schema";
+import { patchReportWidgetPreferences, resetReportWidgetPreferences } from "../repositories/UserDisplayPreferences";
+import { reportWidgetPreferences } from "../repositories/ReportWidgetPreferences";
 
 const router = Router();
 
 // Apply rate limiting to all routes in this file
-router.use(generalLimiter);
 
 // ============================================================================
 // REPORT WIDGET PREFERENCES
 // ============================================================================
-
-/**
- * Default preferences for report widgets
- */
-const DEFAULT_REPORT_WIDGET_PREFERENCES: ReportWidgetPreferences = {
-  coreWidgets: {
-    summaryCards: { enabled: true, order: 0, chartType: "cards" },
-    goalProgress: { enabled: true, order: 1, chartType: "progressBars" },
-    fixedVariableExpenses: { enabled: true, order: 2, chartType: "donut" },
-  },
-  optionalWidgets: {
-    monthlyTrends: { enabled: true, order: 0, chartType: "bar" },
-    netWorthTimeline: { enabled: true, order: 1, chartType: "area" },
-    savingsRate: { enabled: true, order: 2, chartType: "line" },
-    incomeBreakdown: { enabled: false, order: 3, chartType: "bar" },
-    topMerchants: { enabled: false, order: 4, chartType: "bar" },
-    categoryTrends: { enabled: false, order: 5, chartType: "line" },
-    debtPaydown: { enabled: false, order: 6, chartType: "area" },
-    sankeyFlow: { enabled: false, order: 7, chartType: "sankey" },
-  },
-  customCharts: [],
-  hasCompletedWidgetSetup: false,
-};
 
 /**
  * GET /api/settings/report-widgets
@@ -54,9 +28,7 @@ router.get(
       req.session.userId!
     );
 
-    // Cast to typed interface for safe access
-    const typedSettings = displaySettings as DisplaySettingsWithPreferences | undefined;
-    const preferences = typedSettings?.reportWidgetPreferences ?? DEFAULT_REPORT_WIDGET_PREFERENCES;
+    const preferences = reportWidgetPreferences(displaySettings?.reportWidgetPreferences);
 
     res.json({
       success: true,
@@ -79,25 +51,23 @@ router.get(
  * PATCH /api/settings/report-widgets
  * Update user report widget preferences
  */
+const widgetPatchesSchema = z.record(z.object({
+  id: z.string().optional(),
+  enabled: z.boolean().optional(),
+  order: z.number().int().min(0).optional(),
+  chartType: z.string().optional(),
+  expanded: z.boolean().optional(),
+})).superRefine((widgets, context) => {
+  for (const [key, widget] of Object.entries(widgets)) {
+    if (widget.id !== undefined && widget.id !== key) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: [key, "id"], message: "Widget id must match its map key" });
+    }
+  }
+});
+
 const reportWidgetPreferencesSchema = z.object({
-  coreWidgets: z
-    .record(
-      z.object({
-        enabled: z.boolean(),
-        order: z.number().int().min(0),
-        chartType: z.string(),
-      })
-    )
-    .optional(),
-  optionalWidgets: z
-    .record(
-      z.object({
-        enabled: z.boolean(),
-        order: z.number().int().min(0),
-        chartType: z.string(),
-      })
-    )
-    .optional(),
+  coreWidgets: widgetPatchesSchema.optional(),
+  optionalWidgets: widgetPatchesSchema.optional(),
   customCharts: z
     .array(
       z.object({
@@ -107,7 +77,11 @@ const reportWidgetPreferencesSchema = z.object({
         primaryMetric: z.string(),
         secondaryMetric: z.string().optional(),
         groupBy: z.string().optional(),
+        period: z.enum(CUSTOM_CHART_PERIODS).optional(),
         aggregation: z.string().optional(),
+        showAverage: z.boolean().optional(),
+        showComparison: z.boolean().optional(),
+        createdAt: z.string().optional(),
         order: z.number().int().min(0),
       })
     )
@@ -128,46 +102,7 @@ router.patch(
     }
     const body = parseResult.data;
 
-    // Get current settings
-    let displaySettings = await userRepository.getDisplaySettings(
-      req.session.userId!
-    );
-
-    if (!displaySettings) {
-      // Create default settings first
-      displaySettings = await userRepository.createDisplaySettings({
-        userId: req.session.userId!,
-        theme: "system",
-        currency: "ZMW",
-        numberFormat: "US",
-        dateFormat: "MM/DD/YYYY",
-        firstDayOfWeek: "Sunday",
-        viewMode: "comfortable",
-      });
-    }
-
-    // Cast to typed interface for safe access
-    const typedSettings = displaySettings as DisplaySettingsWithPreferences;
-    const currentPreferences = typedSettings.reportWidgetPreferences ?? DEFAULT_REPORT_WIDGET_PREFERENCES;
-
-    // Merge with existing preferences
-    const updatedPreferences: ReportWidgetPreferences = {
-      ...currentPreferences,
-      ...body,
-      coreWidgets: body.coreWidgets
-        ? { ...currentPreferences.coreWidgets, ...body.coreWidgets }
-        : currentPreferences.coreWidgets,
-      optionalWidgets: body.optionalWidgets
-        ? { ...currentPreferences.optionalWidgets, ...body.optionalWidgets }
-        : currentPreferences.optionalWidgets,
-      customCharts: body.customCharts ?? currentPreferences.customCharts,
-      hasCompletedWidgetSetup: body.hasCompletedWidgetSetup ?? currentPreferences.hasCompletedWidgetSetup,
-    };
-
-    // Update display settings with new widget preferences
-    await userRepository.updateDisplaySettings(req.session.userId!, {
-      reportWidgetPreferences: updatedPreferences,
-    });
+    const updatedPreferences = await patchReportWidgetPreferences(req.session.userId!, body);
 
     // Log the preference update (non-financial, using standard logger)
     logger.info("Report widget preferences updated", {
@@ -178,7 +113,7 @@ router.patch(
 
     // Audit log for compliance
     await businessAuditService.logUpdate({
-      householdId: "user-settings",
+      householdId: null,
       userId: req.session.userId!,
       entityType: "display_settings",
       entityId: req.session.userId!,
@@ -206,6 +141,44 @@ router.patch(
       error as Error
     );
     return next(new InternalError("Failed to update report widget preferences"));
+  }
+});
+
+const resetReportWidgetPreferencesSchema = z.object({}).strict();
+
+/** Restore the existing report layout defaults while keeping saved charts. */
+router.post("/report-widgets/reset", async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const parseResult = resetReportWidgetPreferencesSchema.safeParse(req.body === undefined ? {} : req.body);
+    if (!parseResult.success) {
+      return next(new ValidationError("Invalid input", parseResult.error.errors));
+    }
+
+    const updatedPreferences = await resetReportWidgetPreferences(req.session.userId!);
+    await businessAuditService.logUpdate({
+      householdId: null,
+      userId: req.session.userId!,
+      entityType: "display_settings",
+      entityId: req.session.userId!,
+      newValue: { coreWidgets: updatedPreferences.coreWidgets, optionalWidgets: updatedPreferences.optionalWidgets },
+      ipAddress: businessAuditService.getIpAddress(req),
+    });
+    logger.info("Report widget layout reset", {
+      userId: req.session.userId?.substring(0, 8) + "...",
+      requestId: req.requestId,
+    });
+    res.json({
+      success: true,
+      data: { preferences: updatedPreferences },
+      message: "Report widget layout reset successfully",
+    });
+  } catch (error) {
+    if (error instanceof ValidationError) return next(error);
+    logger.error("Reset report widget layout error", {
+      requestId: req.requestId,
+      userId: req.session.userId?.substring(0, 8) + "...",
+    }, error as Error);
+    return next(new InternalError("Failed to reset report widget layout"));
   }
 });
 

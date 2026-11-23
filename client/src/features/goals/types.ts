@@ -3,6 +3,8 @@ export type GoalStatus = "on_track" | "behind" | "at_risk" | "completed";
 export type PayoffMethod = "avalanche" | "snowball" | "custom";
 export type AssignmentType = "full_balance" | "partial_balance";
 export type TransactionLinkType = "contribution" | "spending";
+import type { MoneyDto } from "@shared/money";
+
 export type WizardStep = "select" | "targets" | "contribution" | "budget";
 
 export type SaveUpGoalType =
@@ -54,6 +56,8 @@ export interface Goal {
   type: GoalType;
   goalType?: string | null;
   status: GoalStatus;
+  /** "unavailable" when a progress source is another member's private item; the server then withholds progress. */
+  progressAvailability?: "available" | "unavailable";
   spendingReducesProgress?: boolean | null;
   debtAccountId?: string | null;
   originalBalance?: string | null;
@@ -102,17 +106,20 @@ export interface GoalsSummaryData {
     behind: number;
     atRisk: number;
     completed: number;
-    totalSaved: number;
-    totalTarget: number;
+    totalSaved: MoneyDto;
+    totalTarget: MoneyDto;
     overallProgress: number;
+    /** Goals left out of the totals: no rate to the household currency (A-09). */
+    excludedCount?: number;
   };
   payDown: {
     total: number;
-    totalDebt: number;
-    totalPaid: number;
-    projectedInterest: number;
+    totalDebt: MoneyDto;
+    totalPaid: MoneyDto;
+    projectedInterest: MoneyDto;
     onTrack: number;
     behind: number;
+    excludedCount?: number;
   };
 }
 

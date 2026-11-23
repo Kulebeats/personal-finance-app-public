@@ -39,6 +39,7 @@ export type TransactionFormValues = {
   notes?: string;
   tags: string[];
   ownerUserId: string | null;
+  isPrivate?: boolean;
 };
 
 export type UserPreferences = {
@@ -89,6 +90,7 @@ export function buildEditModeDefaults(
     notes: transaction.notes || undefined,
     tags: transactionTagIds,
     ownerUserId: transaction.ownerUserId || null,
+    isPrivate: transaction.type === "transfer" ? undefined : transaction.isPrivate,
   };
 }
 
@@ -133,6 +135,7 @@ export function buildCreateModeDefaults(options: {
     recurringTrialEndDate: undefined,
     tags: [],
     ownerUserId: null,
+    isPrivate: false,
   };
 }
 

@@ -568,23 +568,23 @@ NO MATCHES
 ```
 ```
 Get-ChildItem server/modules -Filter README.md -Recurse
-C:\Users\kuwan\personal-finance-app\server\modules\accounts\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\auth\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\budgets\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\categories\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\goals\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\household\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\investments\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\merchants\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\notifications\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\receipts\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\recurring\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\reports\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\rules\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\settings\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\tags\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\transactions\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\weekly-recap\README.md
+C:\Users\USER\personal-finance-app\server\modules\accounts\README.md
+C:\Users\USER\personal-finance-app\server\modules\auth\README.md
+C:\Users\USER\personal-finance-app\server\modules\budgets\README.md
+C:\Users\USER\personal-finance-app\server\modules\categories\README.md
+C:\Users\USER\personal-finance-app\server\modules\goals\README.md
+C:\Users\USER\personal-finance-app\server\modules\household\README.md
+C:\Users\USER\personal-finance-app\server\modules\investments\README.md
+C:\Users\USER\personal-finance-app\server\modules\merchants\README.md
+C:\Users\USER\personal-finance-app\server\modules\notifications\README.md
+C:\Users\USER\personal-finance-app\server\modules\receipts\README.md
+C:\Users\USER\personal-finance-app\server\modules\recurring\README.md
+C:\Users\USER\personal-finance-app\server\modules\reports\README.md
+C:\Users\USER\personal-finance-app\server\modules\rules\README.md
+C:\Users\USER\personal-finance-app\server\modules\settings\README.md
+C:\Users\USER\personal-finance-app\server\modules\tags\README.md
+C:\Users\USER\personal-finance-app\server\modules\transactions\README.md
+C:\Users\USER\personal-finance-app\server\modules\weekly-recap\README.md
 ```
 Notes:
 - refactoring-todo.md updated; module READMEs present.
@@ -599,13 +599,13 @@ Status: PARTIAL (ACCEPTABLE PATTERN)
 Evidence:
 ```
 $base = (Resolve-Path server/modules).Path; Get-ChildItem -Path $base -File -Recurse | Where-Object { $rel = $_.FullName.Substring($base.Length).TrimStart([char]'\\',[char]'/'); ($rel -split '[\\\\/]').Count -le 2 } | Sort-Object FullName | ForEach-Object { $_.FullName }
-C:\Users\kuwan\personal-finance-app\server\modules\accounts\accounts.controller.ts
-C:\Users\kuwan\personal-finance-app\server\modules\accounts\accounts.routes.ts
-C:\Users\kuwan\personal-finance-app\server\modules\accounts\accounts.service.ts
-C:\Users\kuwan\personal-finance-app\server\modules\accounts\accounts.validation.ts
-C:\Users\kuwan\personal-finance-app\server\modules\accounts\index.ts
-C:\Users\kuwan\personal-finance-app\server\modules\accounts\README.md
-C:\Users\kuwan\personal-finance-app\server\modules\weekly-recap\weekly-recap.validation.ts
+C:\Users\USER\personal-finance-app\server\modules\accounts\accounts.controller.ts
+C:\Users\USER\personal-finance-app\server\modules\accounts\accounts.routes.ts
+C:\Users\USER\personal-finance-app\server\modules\accounts\accounts.service.ts
+C:\Users\USER\personal-finance-app\server\modules\accounts\accounts.validation.ts
+C:\Users\USER\personal-finance-app\server\modules\accounts\index.ts
+C:\Users\USER\personal-finance-app\server\modules\accounts\README.md
+C:\Users\USER\personal-finance-app\server\modules\weekly-recap\weekly-recap.validation.ts
 ```
 ```
 module\tcontroller\tservice\tvalidation\troutes\tindex\tREADME
@@ -641,24 +641,24 @@ Status: FAIL
 Evidence:
 ```
 wc -l server/modules/*/*.controller.ts
-391 C:\Users\kuwan\personal-finance-app\server\modules\accounts\accounts.controller.ts
-119 C:\Users\kuwan\personal-finance-app\server\modules\auth\auth.controller.ts
-448 C:\Users\kuwan\personal-finance-app\server\modules\budgets\budgets.controller.ts
-255 C:\Users\kuwan\personal-finance-app\server\modules\categories\categories.controller.ts
-565 C:\Users\kuwan\personal-finance-app\server\modules\goals\goals.controller.ts
-93 C:\Users\kuwan\personal-finance-app\server\modules\health\health.controller.ts
-181 C:\Users\kuwan\personal-finance-app\server\modules\household\household.controller.ts
-295 C:\Users\kuwan\personal-finance-app\server\modules\investments\investments.controller.ts
-260 C:\Users\kuwan\personal-finance-app\server\modules\merchants\merchants.controller.ts
-104 C:\Users\kuwan\personal-finance-app\server\modules\notifications\notifications.controller.ts
-298 C:\Users\kuwan\personal-finance-app\server\modules\receipts\receipts.controller.ts
-462 C:\Users\kuwan\personal-finance-app\server\modules\recurring\recurring.controller.ts
-241 C:\Users\kuwan\personal-finance-app\server\modules\reports\reports.controller.ts
-247 C:\Users\kuwan\personal-finance-app\server\modules\rules\rules.controller.ts
-295 C:\Users\kuwan\personal-finance-app\server\modules\settings\settings.controller.ts
-161 C:\Users\kuwan\personal-finance-app\server\modules\tags\tags.controller.ts
-528 C:\Users\kuwan\personal-finance-app\server\modules\transactions\transactions.controller.ts
-101 C:\Users\kuwan\personal-finance-app\server\modules\weekly-recap\weekly-recap.controller.ts
+391 C:\Users\USER\personal-finance-app\server\modules\accounts\accounts.controller.ts
+119 C:\Users\USER\personal-finance-app\server\modules\auth\auth.controller.ts
+448 C:\Users\USER\personal-finance-app\server\modules\budgets\budgets.controller.ts
+255 C:\Users\USER\personal-finance-app\server\modules\categories\categories.controller.ts
+565 C:\Users\USER\personal-finance-app\server\modules\goals\goals.controller.ts
+93 C:\Users\USER\personal-finance-app\server\modules\health\health.controller.ts
+181 C:\Users\USER\personal-finance-app\server\modules\household\household.controller.ts
+295 C:\Users\USER\personal-finance-app\server\modules\investments\investments.controller.ts
+260 C:\Users\USER\personal-finance-app\server\modules\merchants\merchants.controller.ts
+104 C:\Users\USER\personal-finance-app\server\modules\notifications\notifications.controller.ts
+298 C:\Users\USER\personal-finance-app\server\modules\receipts\receipts.controller.ts
+462 C:\Users\USER\personal-finance-app\server\modules\recurring\recurring.controller.ts
+241 C:\Users\USER\personal-finance-app\server\modules\reports\reports.controller.ts
+247 C:\Users\USER\personal-finance-app\server\modules\rules\rules.controller.ts
+295 C:\Users\USER\personal-finance-app\server\modules\settings\settings.controller.ts
+161 C:\Users\USER\personal-finance-app\server\modules\tags\tags.controller.ts
+528 C:\Users\USER\personal-finance-app\server\modules\transactions\transactions.controller.ts
+101 C:\Users\USER\personal-finance-app\server\modules\weekly-recap\weekly-recap.controller.ts
 ```
 ```
 rg -n "db\\.|prisma\\.|sql" server/modules

@@ -84,7 +84,7 @@ describe("useUpdateAIConsent", () => {
     clearCsrfToken();
   });
 
-  it("grants consent via POST /api/ai/consent with { consentGiven: true } and a CSRF header", async () => {
+  it("grants consent via POST /api/ai/consent naming the disclosure version shown, with a CSRF header", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () =>
@@ -101,7 +101,7 @@ describe("useUpdateAIConsent", () => {
 
     let mutationResult: unknown;
     await act(async () => {
-      mutationResult = await result.current.mutateAsync(true);
+      mutationResult = await result.current.mutateAsync({ consentGiven: true, consentVersion: "v2.0" });
     });
 
     expect(mockFetch).toHaveBeenCalledWith(
@@ -109,7 +109,7 @@ describe("useUpdateAIConsent", () => {
       expect.objectContaining({
         method: "POST",
         credentials: "include",
-        body: JSON.stringify({ consentGiven: true }),
+        body: JSON.stringify({ consentGiven: true, consentVersion: "v2.0" }),
         headers: expect.objectContaining({
           "x-csrf-token": "test-csrf",
           "Content-Type": "application/json",
@@ -149,7 +149,7 @@ describe("useUpdateAIConsent", () => {
 
     let mutationResult: { consentGiven: boolean } | undefined;
     await act(async () => {
-      mutationResult = (await result.current.mutateAsync(false)) as {
+      mutationResult = (await result.current.mutateAsync({ consentGiven: false })) as {
         consentGiven: boolean;
       };
     });

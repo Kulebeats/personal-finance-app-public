@@ -35,6 +35,7 @@ import { AnalyticsReportRepository } from "../AnalyticsReportRepository";
 import { SpendingReportRepository } from "../SpendingReportRepository";
 import { CashflowReportRepository } from "../CashflowReportRepository";
 import { NetWorthReportRepository } from "../NetWorthReportRepository";
+import { CalculationError } from "../../../core/calculations/errors";
 
 const money = (value: number, currency: string = "USD") => ({
   amount: value.toFixed(2),
@@ -85,6 +86,7 @@ describe("AnalyticsReportRepository", () => {
       );
 
       vi.spyOn(mockCashflow, "getCashflow").mockResolvedValue({
+        range: { from: "2024-01-01", to: "2024-01-31", interval: "month", baseCurrency: "USD", elapsedPeriods: 1 },
         totals: {
           income: money(10000),
           expenses: money(6000),
@@ -103,11 +105,12 @@ describe("AnalyticsReportRepository", () => {
         ],
       } as any);
 
-      // Liquid accounts
+      // Liquid, then liability accounts, each already converted to base (NEW-02)
+      const row = (id: string, type: string, baseBalance: string) =>
+        ({ id, name: id, type, currency: "USD", asOf: "2024-01-31", baseBalance });
       (db.select as any)
-        .mockReturnValueOnce(createSelectResult([{ balance: "20000" }]))
-        // Liability accounts
-        .mockReturnValueOnce(createSelectResult([{ balance: "5000" }]));
+        .mockReturnValueOnce(createSelectResult([row("acc-cash", "checking", "20000")]))
+        .mockReturnValueOnce(createSelectResult([row("acc-card", "credit", "5000")]));
 
       const result = await repository.getFinancialRatios("household-1", {
         from: "2024-01-01",
@@ -129,8 +132,8 @@ describe("AnalyticsReportRepository", () => {
 
       (db.select as any).mockReturnValueOnce(
         createSelectResult([
-          { id: "acc-1", name: "Credit Card", type: "credit", balance: "2000" },
-          { id: "acc-2", name: "Car Loan", type: "loan", balance: "15000" },
+          { id: "acc-1", name: "Credit Card", type: "credit", currency: "USD", asOf: "2024-01-31", baseBalance: "2000" },
+          { id: "acc-2", name: "Car Loan", type: "loan", currency: "USD", asOf: "2024-01-31", baseBalance: "15000" },
         ])
       );
 
@@ -154,6 +157,7 @@ describe("AnalyticsReportRepository", () => {
 
       expect(result.totalDebt).toEqual(money(17000));
       expect(result.debtByType).toHaveLength(2);
+      expect(result.topDebtAccounts.map((a) => a.name)).toEqual(["Car Loan", "Credit Card"]);
       expect(result.paymentTrend).toHaveLength(1);
     });
   });
@@ -174,6 +178,7 @@ describe("AnalyticsReportRepository", () => {
             currentAmount: "5000",
             targetDate: "2024-12-31",
             status: "on_track",
+            progressVisible: true,
           },
           {
             id: "goal-2",
@@ -183,6 +188,7 @@ describe("AnalyticsReportRepository", () => {
             currentAmount: "3000",
             targetDate: "2024-06-01",
             status: "completed",
+            progressVisible: true,
           },
         ])
       );
@@ -352,6 +358,44 @@ describe("AnalyticsReportRepository", () => {
 
       expect(result.data).toHaveLength(3);
       expect(result.totals.primary).toBe(3000);
+    });
+
+    it("averages a grouped total in Money, not as a float", async () => {
+      vi.spyOn(repository, "getHouseholdCurrency" as any).mockResolvedValue("USD");
+      const item = (id: string, value: number) => ({ id, entityId: id, label: id, value: money(value), percent: 33, color: "#fff" });
+      vi.spyOn(mockSpending, "getSpendingBreakdown").mockResolvedValue({
+        range: { from: "2024-01-01", to: "2024-01-31", baseCurrency: "USD" },
+        groupBy: "category",
+        total: money(3.45),
+        items: [item("a", 1.15), item("b", 1.15), item("c", 1.15)],
+      } as any);
+
+      const result = await repository.executeCustomChart("household-1", {
+        config: { name: "Split", chartType: "pie", primaryMetric: "expenses", groupBy: "category" },
+        from: "2024-01-01", to: "2024-01-31",
+      });
+
+      // 3.45 / 3 as numbers is 1.1500000000000001.
+      expect(result.totals.primary).toBe(3.45);
+      expect(result.totals.average).toBe(1.15);
+    });
+
+    it("refuses an amount in another currency as a missing rate, never adding it at 1", async () => {
+      vi.spyOn(repository, "getHouseholdCurrency" as any).mockResolvedValue("ZMW");
+      vi.spyOn(mockCashflow, "getCashflow").mockResolvedValue({
+        series: [
+          { label: "Jan", income: money(100, "ZMW"), expenses: money(40, "ZMW"), debt: money(0, "ZMW"), savings: money(60, "ZMW"), savingsRate: 60 },
+          { label: "Feb", income: money(100, "ZMW"), expenses: money(3, "SZL"), debt: money(0, "ZMW"), savings: money(97, "ZMW"), savingsRate: 97 },
+        ],
+      } as any);
+
+      const run = repository.executeCustomChart("household-1", {
+        config: { name: "Spend", chartType: "bar", primaryMetric: "expenses" },
+        from: "2024-01-01", to: "2024-02-29",
+      });
+
+      await expect(run).rejects.toBeInstanceOf(CalculationError);
+      await expect(run).rejects.toMatchObject({ code: "MISSING_FX_RATE", context: { from: "SZL", to: "ZMW" } });
     });
 
     it("enforces 36-month time window limit", async () => {

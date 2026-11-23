@@ -26,16 +26,22 @@ interface WeeklyRecapWizardProps {
 }
 
 function WizardContent() {
-  const { currentStep, isLoading, close, prevStep, stepIndex } = useWeeklyRecap();
+  const { currentStep, isLoading, isChecking, error, retry, close, prevStep, stepIndex } = useWeeklyRecap();
 
-  if (isLoading) {
+  if (isLoading || isChecking) {
     return (
       <div className="h-[400px] flex items-center justify-center" role="status" aria-label="Loading weekly recap">
         <Loader2 className="w-8 h-8 animate-spin text-primary" aria-hidden="true" />
-        <span className="sr-only">Loading your weekly financial summary</span>
+        <span>Checking current access to your weekly financial summary…</span>
       </div>
     );
   }
+
+  if (error) return <div role="alert" className="p-6 space-y-4">
+    <p>Unable to refresh your weekly recap. Please try again.</p>
+    <Button onClick={retry}>Retry</Button>
+    <Button variant="outline" onClick={close}>Close</Button>
+  </div>;
 
   const renderStep = () => {
     switch (currentStep) {

@@ -3,12 +3,14 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import { metaImagesPlugin } from "./vite-plugin-meta-images";
+import { ocrAssetsPlugin } from "./vite-plugin-ocr-assets";
 
 export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
     metaImagesPlugin(),
+    ocrAssetsPlugin(import.meta.dirname),
     ...(process.env.NODE_ENV !== "production" &&
     process.env.REPL_ID !== undefined
       ? [

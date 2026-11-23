@@ -3,6 +3,7 @@ import { useAccountsData } from "../hooks/useAccountsData";
 import { useAccounts, useNetWorthSummary, useNetWorthHistory } from "@/hooks";
 import { TestWrapper } from "@/test/test-utils";
 import { vi, Mock } from "vitest";
+vi.mock("../hooks/useAccountOwnerPreference", () => ({ useAccountOwnerPreference: () => ({ ownerUserId: "all", ownerPreferencesReady: true, ownerPreferencesLoading: false }) }));
 
 // Mock the API hooks
 vi.mock("@/hooks", async () => {
@@ -49,7 +50,7 @@ describe("useAccountsData", () => {
       isLoading: false,
     });
     (useNetWorthHistory as Mock).mockReturnValue({
-      data: { series: [] },
+      data: { accounts: mockAccounts, series: [], currentStatus: "available", latest: { assets: 1000, liabilities: 500, netWorth: 500, currency: "ZMW" } },
       isLoading: false,
     });
   });
@@ -73,26 +74,36 @@ describe("useAccountsData", () => {
     expect(result.current.summaryData.netWorthValue).toBe(500);
   });
 
-  it("filters accounts by owner", () => {
-    const { result } = renderHook(() => useAccountsData(), {
+  it("requests the coherent list frame after preferences are ready", () => {
+    renderHook(() => useAccountsData(), {
       wrapper: TestWrapper,
     });
 
-    // Default is "all" or null? Hook default is null.
-    // Our mock accounts have ownerUserId="user1".
-    // If hook state is null, it might filter out if logic is strict about "shared".
-    // Let's check logic: (ownerUserId === null && account.ownerUserId === null)
-    // So if account has owner, it won't show by default if state is null!
+    expect(useNetWorthHistory).toHaveBeenCalledWith("1m", "user", true, true, undefined, 0, expect.any(String));
+    expect(useAccounts).not.toHaveBeenCalled();
+  });
 
-    // Wait, let's update the test to set filter.
-
-    // Acting on state
-    /* 
-      The logic in useAccountsData:
-      const isMatch =
-        ownerUserId === "all" ||
-        (ownerUserId === null && account.ownerUserId === null) ||
-        (ownerUserId !== null && account.ownerUserId === ownerUserId);
-    */
+  it("retains captured currency and calendar date instead of relabelling old values", () => {
+    (useNetWorthHistory as Mock).mockReturnValue({ data: { accounts: mockAccounts, series: [
+      { date: "2026-10-31", netWorth: 50, assets: 50, liabilities: 0, currency: "ZMW", provenance: "captured_snapshot" },
+    ] }, isLoading: false });
+    const { result } = renderHook(() => useAccountsData(), { wrapper: TestWrapper });
+    expect(result.current.chartData).toEqual([expect.objectContaining({ date: "2026-10-31", currency: "ZMW", value: 50 })]);
+  });
+  it("does not fabricate historical points from current summary or unattested independent rows", () => {
+    (useNetWorthHistory as Mock).mockReturnValue({ data: { accounts: mockAccounts, series: [
+      { date: "2026-10-31", netWorth: 123456, assets: 123456, liabilities: 0 },
+    ] }, isLoading: false });
+    const { result } = renderHook(() => useAccountsData(), { wrapper: TestWrapper });
+    expect(result.current.chartData).toEqual([]);
+  });
+  it("keeps a proven dated point even if current valuation is unavailable", () => {
+    (useNetWorthSummary as Mock).mockReturnValue({ data: undefined, isLoading: false, error: new Error("Visible valuation unavailable") });
+    (useNetWorthHistory as Mock).mockReturnValue({ data: { accounts: mockAccounts, latest: null, currentStatus: "unavailable", series: [
+      { date: "2026-10-31", netWorth: 50, assets: 50, liabilities: 0, currency: "ZMW", provenance: "captured_snapshot" },
+    ] }, isLoading: false });
+    const { result } = renderHook(() => useAccountsData(), { wrapper: TestWrapper });
+    expect(result.current.chartData).toHaveLength(1);
+    expect(result.current.summaryData.available).toBe(false);
   });
 });

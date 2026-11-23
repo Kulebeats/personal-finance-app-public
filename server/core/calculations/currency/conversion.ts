@@ -48,12 +48,14 @@ export async function convertToDisplayCurrency(
  * @param fxService - FX rate service instance
  * @param items - Array of items with amount and currency
  * @param displayCurrency - Target display currency
+ * @param householdId - Household whose own manual rates apply first (R12)
  * @returns Array of converted amounts
  */
 export async function convertBatchToDisplayCurrency(
   fxService: FXRateService,
   items: Array<{ amount: number; currency: string }>,
-  displayCurrency: string
+  displayCurrency: string,
+  householdId: string
 ): Promise<Money[]> {
   // Get unique currencies
   const currencies = Array.from(
@@ -63,7 +65,8 @@ export async function convertBatchToDisplayCurrency(
   // Fetch all rates at once
   const rateMap = await fxService.getLatestRatesMap(
     currencies,
-    displayCurrency
+    displayCurrency,
+    householdId
   );
 
   // Add self-rate
@@ -113,12 +116,14 @@ export interface MultiCurrencyTotal {
  * @param fxService - FX rate service instance
  * @param items - Array of items with amount and currency
  * @param displayCurrency - Target display currency
+ * @param householdId - Household whose own manual rates apply first (R12)
  * @returns Total and breakdown by currency
  */
 export async function aggregateMultiCurrency(
   fxService: FXRateService,
   items: Array<{ amount: number; currency: string }>,
-  displayCurrency: string
+  displayCurrency: string,
+  householdId: string
 ): Promise<MultiCurrencyTotal> {
   // Get unique currencies
   const currencies = Array.from(
@@ -128,7 +133,8 @@ export async function aggregateMultiCurrency(
   // Fetch all rates at once
   const rateMap = await fxService.getLatestRatesMap(
     currencies,
-    displayCurrency
+    displayCurrency,
+    householdId
   );
 
   // Add self-rate

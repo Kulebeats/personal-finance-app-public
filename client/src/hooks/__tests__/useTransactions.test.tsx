@@ -10,9 +10,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactNode } from "react";
+import type { Transaction, transactionsApi } from "@/lib/api";
 
 // Mock toast
 vi.mock("@/hooks/use-toast", () => ({
@@ -71,6 +72,7 @@ const createWrapper = () => {
 // Import after mocks
 import {
   useTransactions,
+  useInfiniteTransactions,
   useTransaction,
   useCreateTransaction,
   useUpdateTransaction,
@@ -369,6 +371,87 @@ describe("useDeleteTransaction Hook", () => {
     await result.current.mutateAsync("txn-1");
 
     expect(mockTransactionsApi.delete).toHaveBeenCalledWith("txn-1");
+  });
+
+  it("refreshes the mounted filtered transaction list and totals after a single deletion", async () => {
+    const startDate = "2026-01-01";
+    const endDate = "2026-01-31";
+    const filters = { accountId: "cash" };
+    const transaction: Transaction = {
+      id: "txn-1",
+      householdId: "household",
+      accountId: filters.accountId,
+      date: "2026-01-15",
+      name: "Groceries",
+      amount: { amount: "45.50", currency: "ZMW" },
+      type: "expense",
+      isPending: false,
+      isRecurring: false,
+      isExcludedFromReports: false,
+      isExcludedFromBudget: false,
+      isPrivate: false,
+      createdAt: "2026-01-15T12:00:00Z",
+      updatedAt: "2026-01-15T12:00:00Z",
+    };
+    let deleted = false;
+    const list: typeof transactionsApi.list = async () => {
+      const count = deleted ? 0 : 1;
+      return {
+        transactions: deleted ? [] : [transaction],
+        pagination: {
+          limit: 50,
+          offset: 0,
+          count,
+          totalCount: count,
+          total: count,
+          page: 1,
+          pageSize: count,
+          hasNext: false,
+          hasPrev: false,
+        },
+      };
+    };
+    const summary: typeof transactionsApi.getSummary = async () => ({
+      totalIncome: { amount: "0.00", currency: "ZMW" },
+      totalExpenses: { amount: deleted ? "0.00" : transaction.amount.amount, currency: "ZMW" },
+      netFlow: { amount: deleted ? "0.00" : "-45.50", currency: "ZMW" },
+      transactionCount: deleted ? 0 : 1,
+    });
+    const remove: typeof transactionsApi.delete = async () => {
+      deleted = true;
+    };
+    mockTransactionsApi.list.mockImplementation(list);
+    mockTransactionsApi.getSummary.mockImplementation(summary);
+    mockTransactionsApi.delete.mockImplementationOnce(remove);
+
+    const { result } = renderHook(() => ({
+      list: useInfiniteTransactions({ startDate, endDate, ...filters }),
+      summary: useTransactionSummary(startDate, endDate, filters),
+      remove: useDeleteTransaction(),
+    }), { wrapper: createWrapper() });
+
+    function visibleData() {
+      return {
+        ids: result.current.list.data?.pages.flatMap(page => page.transactions.map(row => row.id)),
+        expenses: result.current.summary.data?.totalExpenses,
+        count: result.current.summary.data?.transactionCount,
+      };
+    }
+
+    await waitFor(() => expect(visibleData()).toEqual({
+      ids: ["txn-1"],
+      expenses: { amount: "45.50", currency: "ZMW" },
+      count: 1,
+    }));
+
+    await act(async () => { await result.current.remove.mutateAsync(transaction.id); });
+
+    expect(mockTransactionsApi.delete).toHaveBeenCalledExactlyOnceWith(transaction.id);
+    await waitFor(() => expect(visibleData()).toEqual({
+      ids: [],
+      expenses: { amount: "0.00", currency: "ZMW" },
+      count: 0,
+    }));
   });
 });
 

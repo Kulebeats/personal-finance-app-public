@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useReportsCashflow, useReportsSankey } from "@/hooks/use-reports";
 import { type CashFlowFiltersState } from "../types";
-import { toMoneyNumber } from "@/lib/money";
+import { averageMoneyValue, toMoneyNumber } from "@/lib/money";
 
 export function parseLocalDate(isoDate: string): Date {
   const [year, month, day] = isoDate.split("-").map(Number);
@@ -153,7 +153,14 @@ export function useCashFlowData(
     savingsRate: totals.savingsRate,
   };
 
-  const actualPeriods = cashflowData?.series?.length || 1;
+  // NEW-34: average over the periods that have started on the household
+  // calendar; the server counts them, older responses fall back to every row.
+  const actualPeriods = Math.max(cashflowData?.range?.elapsedPeriods ?? cashflowData?.series?.length ?? 0, 1);
+  // ...and adds only those periods' savings, never amounts already recorded for later ones:
+  // without the server's elapsed totals there is no honest average to show (null).
+  // Divided in decimal, rounded half up to the cent (1.15 over 10 periods is 0.12, not a float's 0.11).
+  const elapsedSavings = cashflowData?.elapsedTotals?.savings;
+  const averageSavings = elapsedSavings ? averageMoneyValue(elapsedSavings, actualPeriods) : null;
 
   // Period label for UI (e.g., "Monthly", "Weekly", "Daily")
   const getPeriodLabel = (interval: string) => {
@@ -179,6 +186,7 @@ export function useCashFlowData(
     sankeyChartData,
     totals: numericTotals,
     actualPeriods,
+    averageSavings,
     periodLabel,
     interval: filters.interval,
     // Forecast metadata

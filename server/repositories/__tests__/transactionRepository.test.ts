@@ -311,7 +311,7 @@ describe("TransactionRepository", () => {
           includeDeleted: false,
           includePending: true,
           visibleToUserId: testUserId,
-        })
+        }), undefined
       );
       expect(result).toEqual(transactions);
     });

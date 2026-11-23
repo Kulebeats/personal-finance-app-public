@@ -1,3 +1,5 @@
+import { calendarDaysAgo, calendarMonthRange, calendarToday, useCalendarTimeZone } from "@/lib/calendarZone";
+import type { CalendarDateRange } from "@shared/household-calendar";
 import { useMemo, useState } from "react";
 import {
   useAddMerchantAlias,
@@ -22,14 +24,18 @@ export function useMerchantDetailState(merchantId: string | null) {
   const [transactionMinAmount, setTransactionMinAmount] = useState("");
   const [transactionMaxAmount, setTransactionMaxAmount] = useState("");
 
-  const today = new Date();
-  const defaultFrom = new Date(today.getFullYear(), today.getMonth() - 5, 1)
-    .toISOString()
-    .split("T")[0];
-  const defaultTo = today.toISOString().split("T")[0];
-
-  const [startDate, setStartDate] = useState(defaultFrom);
-  const [endDate, setEndDate] = useState(defaultTo);
+  // NEW-15: every range counts from one calendar-zone today. The defaults are
+  // derived on each render, so they follow the saved zone when settings load
+  // after the first render. Once the user edits either end, the whole range
+  // they saw is kept in state and a zone change no longer moves it.
+  useCalendarTimeZone();
+  const defaultFrom = calendarMonthRange(-5).from;
+  const defaultTo = calendarToday();
+  const [chosenRange, setChosenRange] = useState<CalendarDateRange | null>(null);
+  const startDate = chosenRange?.from ?? defaultFrom;
+  const endDate = chosenRange?.to ?? defaultTo;
+  const setStartDate = (from: string) => setChosenRange({ from, to: endDate });
+  const setEndDate = (to: string) => setChosenRange({ from: startDate, to });
 
   const { data: categoryData } = useCategories();
   const { data: details } = useMerchantDetails(merchantId || undefined);
@@ -49,23 +55,17 @@ export function useMerchantDetailState(merchantId: string | null) {
     { enabled: !!merchantId }
   );
   const last30 = useMerchantAnalytics(merchantId || undefined, {
-    startDate: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
-      .toISOString()
-      .split("T")[0],
+    startDate: calendarDaysAgo(30),
     endDate: defaultTo,
     groupBy: "month",
   });
   const last90 = useMerchantAnalytics(merchantId || undefined, {
-    startDate: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
-      .toISOString()
-      .split("T")[0],
+    startDate: calendarDaysAgo(90),
     endDate: defaultTo,
     groupBy: "month",
   });
   const last365 = useMerchantAnalytics(merchantId || undefined, {
-    startDate: new Date(Date.now() - 365 * 24 * 60 * 60 * 1000)
-      .toISOString()
-      .split("T")[0],
+    startDate: calendarDaysAgo(365),
     endDate: defaultTo,
     groupBy: "month",
   });
@@ -103,12 +103,9 @@ export function useMerchantDetailState(merchantId: string | null) {
     return transactions?.transactions || [];
   }, [transactions]);
 
+  /** Archive the merchant; the detail view's confirm dialog asks first. */
   const handleDeleteMerchant = (onClose: () => void) => {
     if (!merchant) return;
-    const confirmed = window.confirm(
-      `Delete merchant "${merchant.name}"? This will archive it.`
-    );
-    if (!confirmed) return;
     deleteMerchant.mutate(
       { id: merchant.id, options: { action: "soft" } },
       { onSuccess: () => onClose() }
@@ -116,6 +113,7 @@ export function useMerchantDetailState(merchantId: string | null) {
   };
 
   const handleExport = async () => {
+    const operation = captureOperationLifetime();
     if (!merchantId) return;
     const payload: Record<string, string> = {
       reportType: "transactions",
@@ -129,18 +127,14 @@ export function useMerchantDetailState(merchantId: string | null) {
     }
     try {
       const exportId = await requestReportExport(payload);
-      window.location.href = getReportsExportDownloadUrl(exportId);
+      await downloadProtectedResource(getReportsExportDownloadUrl(exportId), undefined, operation);
     } catch (error) {
       console.error(error);
     }
   };
 
   const applyQuickRange = (days: number) => {
-    const fromDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
-      .toISOString()
-      .split("T")[0];
-    setStartDate(fromDate);
-    setEndDate(defaultTo);
+    setChosenRange({ from: calendarDaysAgo(days), to: calendarToday() });
   };
 
   const breakdownItems = useMemo(() => {
@@ -193,3 +187,5 @@ export function useMerchantDetailState(merchantId: string | null) {
     },
   };
 }
+import { downloadProtectedResource } from "@/lib/protected-media";
+import { captureOperationLifetime } from "@/lib/operation-lifetime";

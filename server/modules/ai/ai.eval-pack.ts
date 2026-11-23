@@ -9,8 +9,8 @@
 import {
   AI_SYSTEM_PROMPT_TEMPLATE,
   AI_SYSTEM_PROMPT_VERSION,
-  GEMINI_TOOL_NAMES,
-} from "./ai.gemini";
+  AI_TOOL_NAMES as GEMINI_TOOL_NAMES,
+} from "./ai.tool-definitions";
 import {
   AI_TOOL_CALL_CAP,
   DEFAULT_AI_CONTEXT_MAX_MESSAGES,
@@ -88,8 +88,8 @@ export function runAIEvalPack(): AIEvalPackReport {
     ),
     runCheck(
       "token_budget_default",
-      DEFAULT_AI_REQUEST_TOKEN_BUDGET === 2000,
-      `Default token budget is 2000 (${DEFAULT_AI_REQUEST_TOKEN_BUDGET})`,
+      DEFAULT_AI_REQUEST_TOKEN_BUDGET === 8000,
+      `Default token budget is 8000 (${DEFAULT_AI_REQUEST_TOKEN_BUDGET})`,
     ),
     runCheck(
       "prompt_injection_blocking_positive",

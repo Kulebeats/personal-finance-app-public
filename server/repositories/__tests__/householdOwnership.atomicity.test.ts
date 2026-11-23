@@ -1,12 +1,13 @@
 /**
- * SCP-318: household ownership transfer & invite acceptance must be atomic and
- * race-safe — REAL DB.
+ * SCP-318: household invite acceptance must be atomic and race-safe — REAL DB.
  *
- * transferOwnership previously ran two sequential role updates with no
- * transaction or lock, so a partial failure (or two concurrent transfers) could
- * leave the household with two owners or none. acceptInvite (addMember +
- * markInvitationAccepted) was similarly non-atomic. Both now run inside one
- * withTransaction with FOR UPDATE on the relevant rows.
+ * The ownership-transfer race moved with the transfer itself to
+ * modules/household/ownership.service.ts (NEW-12) and is tested over HTTP in
+ * completion-r03.single-owner.realdb.integration.test.ts.
+ *
+ * Invite acceptance (insert member + mark the invitation used) was non-atomic;
+ * it now runs as modules/household/invitations.accept.ts acceptInvitation, in
+ * one withTransaction with FOR UPDATE on the household and invitation rows.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { randomUUID } from "crypto";
@@ -19,7 +20,8 @@ import {
   households,
 } from "@shared/schema";
 import { householdRepository } from "../HouseholdRepository";
-import { ForbiddenError, ConflictError } from "../../utils/errorHandler";
+import { acceptInvitation } from "../../modules/household/invitations.accept";
+import { ConflictError } from "../../utils/errorHandler";
 import { createTestUser, createTestHousehold } from "../../__tests__/fixtures";
 
 describe("Household ownership/invite atomicity (SCP-318)", () => {
@@ -75,44 +77,6 @@ describe("Household ownership/invite atomicity (SCP-318)", () => {
     }
   });
 
-  const ownerCount = async (): Promise<number> =>
-    (
-      await db
-        .select()
-        .from(householdMembers)
-        .where(eq(householdMembers.householdId, householdId))
-    ).filter((m) => m.role === "owner").length;
-
-  it("ends with exactly one owner when two transfers race", async () => {
-    const owner = await seedUser("owner");
-    const candidateA = await seedUser("candA");
-    const candidateB = await seedUser("candB");
-
-    await db.insert(householdMembers).values([
-      { householdId, userId: owner, role: "owner" },
-      { householdId, userId: candidateA, role: "admin" },
-      { householdId, userId: candidateB, role: "admin" },
-    ]);
-
-    const results = await Promise.allSettled([
-      householdRepository.transferOwnership(householdId, owner, candidateA),
-      householdRepository.transferOwnership(householdId, owner, candidateB),
-    ]);
-
-    const fulfilled = results.filter((r) => r.status === "fulfilled");
-    const rejected = results.filter((r) => r.status === "rejected");
-
-    // Exactly one transfer applies; the other is rejected (owner already demoted).
-    expect(fulfilled).toHaveLength(1);
-    expect(rejected).toHaveLength(1);
-    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
-      ForbiddenError
-    );
-
-    // The invariant: never two owners, never zero owners.
-    expect(await ownerCount()).toBe(1);
-  });
-
   it("accepts an invite once when two accepts race the same code", async () => {
     const owner = await seedUser("inv-owner");
     const joiner = await seedUser("joiner");
@@ -123,19 +87,21 @@ describe("Household ownership/invite atomicity (SCP-318)", () => {
     });
 
     const invitationId = randomUUID();
+    const inviteCode = `code-${randomUUID().slice(0, 12)}`;
+    const [joinerRow] = await db.select({ email: users.email }).from(users).where(eq(users.id, joiner));
     await db.insert(householdInvitations).values({
       id: invitationId,
       householdId,
-      email: "joiner@example.com",
+      email: joinerRow.email,
       role: "member",
-      inviteCode: `code-${randomUUID().slice(0, 12)}`,
+      inviteCode,
       invitedBy: owner,
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     });
 
     const results = await Promise.allSettled([
-      householdRepository.acceptInvite(invitationId, householdId, joiner, "member"),
-      householdRepository.acceptInvite(invitationId, householdId, joiner, "member"),
+      acceptInvitation({ userId: joiner }, inviteCode),
+      acceptInvitation({ userId: joiner }, inviteCode),
     ]);
 
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);

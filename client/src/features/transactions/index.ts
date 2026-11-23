@@ -33,6 +33,7 @@ export { FilterPresetSelector } from "./components/FilterPresetSelector";
 export { useTransactionsQuery } from "./hooks/useTransactionsQuery";
 export { useTransactionMutations } from "./hooks/useTransactionMutations";
 export { useTransactionFilters } from "./hooks/useTransactionFilters";
+export { useTransactionFiltersWithPresets } from "./hooks/useTransactionFiltersWithPresets";
 export { useTransactionSelection } from "./hooks/useTransactionSelection";
 export {
   useKeyboardShortcuts,

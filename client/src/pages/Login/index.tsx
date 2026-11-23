@@ -5,6 +5,7 @@
  * Split into components to stay under 300 LOC limit.
  */
 
+import { toastActionError } from "@/lib/actionErrorToast";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useLocation } from "wouter";
 import {
@@ -24,7 +25,17 @@ import {
   handleResendMfaApi,
   handleResendVerificationApi,
 } from "./useAuthHandlers";
+import { describeFieldErrors, useFieldErrors } from "./authFieldErrors";
 import { readReturnPath } from "@/lib/returnPath";
+
+const LOGIN_FIELDS = ["email", "password"];
+const REGISTER_FIELDS = ["fullName", "username", "email", "password"];
+
+/** Wrap a field setter so editing the field drops its stale server message. */
+const clearingOnEdit = (set: (value: string) => void, clear: () => void) => (value: string) => {
+  clear();
+  set(value);
+};
 
 export default function Login() {
   const [, setLocation] = useLocation();
@@ -48,6 +59,10 @@ export default function Login() {
   const [registerEmail, setRegisterEmail] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
   const [registerFullName, setRegisterFullName] = useState("");
+
+  // Per-field messages from a 400 (error.fields), shown next to each input
+  const loginFieldErrors = useFieldErrors();
+  const registerFieldErrors = useFieldErrors();
 
   // MFA state
   const [isMfaVerify, setIsMfaVerify] = useState(false);
@@ -109,6 +124,7 @@ export default function Login() {
     e.preventDefault();
     setIsLoading(true);
     setShowResendVerification(false);
+    loginFieldErrors.reset();
     try {
       const result = await handleLoginApi({ email: loginEmail, password: loginPassword, rememberMe });
       if (result.success) {
@@ -129,10 +145,12 @@ export default function Login() {
         }
       } else {
         setShowResendVerification(!!result.isEmailNotVerified);
-        toast.error(result.message || "Login failed");
+        const fields = result.fieldErrors ?? [];
+        loginFieldErrors.set(fields);
+        toast.error(fields.length ? describeFieldErrors(fields, LOGIN_FIELDS) : result.message || "Login failed");
       }
     } catch (error) {
-      toast.error("Failed to connect to server: " + (error as Error).message);
+      toastActionError("Login failed. Please try again.", error);
     } finally {
       setIsLoading(false);
     }
@@ -172,13 +190,18 @@ export default function Login() {
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
+    registerFieldErrors.reset();
     try {
       const result = await handleRegisterApi({
         username: registerUsername, email: registerEmail,
         password: registerPassword, fullName: registerFullName,
       });
       if (result.success) { toast.success("Account created successfully!"); setLocation(returnPath); }
-      else toast.error(result.message || "Registration failed");
+      else {
+        const fields = result.fieldErrors ?? [];
+        registerFieldErrors.set(fields);
+        toast.error(fields.length ? describeFieldErrors(fields, REGISTER_FIELDS) : result.message || "Registration failed");
+      }
     } catch { toast.error("Failed to connect to server"); }
     finally { setIsLoading(false); }
   };
@@ -204,16 +227,19 @@ export default function Login() {
               resendCooldown={resendCooldown} onSubmit={handleMfaVerify} onResend={handleResendMfa}
               onBack={() => { setIsMfaVerify(false); setMfaCode(""); }} />
           ) : isLogin ? (
-            <LoginForm loginEmail={loginEmail} setLoginEmail={setLoginEmail} loginPassword={loginPassword}
-              setLoginPassword={setLoginPassword} rememberMe={rememberMe} setRememberMe={setRememberMe}
+            <LoginForm loginEmail={loginEmail} setLoginEmail={clearingOnEdit(setLoginEmail, () => loginFieldErrors.clear("email"))} loginPassword={loginPassword}
+              fieldErrors={loginFieldErrors.messages}
+              setLoginPassword={clearingOnEdit(setLoginPassword, () => loginFieldErrors.clear("password"))} rememberMe={rememberMe} setRememberMe={setRememberMe}
               showPassword={showLoginPassword} capsLockOn={capsLockOn} isLoading={isLoading}
               showResendVerification={showResendVerification} isResendingVerification={isResendingVerification}
               onSubmit={handleLogin} onTogglePassword={() => handleTogglePassword(showLoginPassword, setShowLoginPassword)}
               onKeyEvent={handleKeyEvent} onResendVerification={handleResendVerification} onSwitchToRegister={() => setIsLogin(false)} />
           ) : (
-            <RegisterForm fullName={registerFullName} setFullName={setRegisterFullName} username={registerUsername}
-              setUsername={setRegisterUsername} email={registerEmail} setEmail={setRegisterEmail}
-              password={registerPassword} setPassword={setRegisterPassword} showPassword={showRegisterPassword}
+            <RegisterForm fullName={registerFullName} setFullName={clearingOnEdit(setRegisterFullName, () => registerFieldErrors.clear("fullName"))}
+              username={registerUsername} setUsername={clearingOnEdit(setRegisterUsername, () => registerFieldErrors.clear("username"))}
+              email={registerEmail} setEmail={clearingOnEdit(setRegisterEmail, () => registerFieldErrors.clear("email"))}
+              password={registerPassword} setPassword={clearingOnEdit(setRegisterPassword, () => registerFieldErrors.clear("password"))}
+              fieldErrors={registerFieldErrors.messages} showPassword={showRegisterPassword}
               capsLockOn={capsLockOn} isLoading={isLoading} onSubmit={handleRegister}
               onTogglePassword={() => handleTogglePassword(showRegisterPassword, setShowRegisterPassword)}
               onKeyEvent={handleKeyEvent} onSwitchToLogin={() => setIsLogin(true)} />

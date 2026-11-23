@@ -4,8 +4,9 @@
  * Displays a single budget category row with progress indicator.
  */
 
+import { useRef } from "react";
 import { cn, parseMoney } from "@/lib/utils";
-import { useFormatters } from "@/contexts/SettingsContext";
+import { useBudgetMoneyDisplay } from "../budgetMoneyDisplay";
 import type { BudgetCategory, SelectedItem } from "../types";
 
 interface BudgetRowProps {
@@ -35,8 +36,13 @@ export function BudgetRow({
   isBudgetEditable = true,
   onCommitBudget,
 }: BudgetRowProps) {
-  const utilization = item.budget > 0 ? (item.actual / item.budget) * 100 : 0;
-  const { formatCurrency } = useFormatters();
+  const utilization = item.actual !== null && item.budget !== null && item.budget > 0 ? (item.actual / item.budget) * 100 : 0;
+  const { formatCurrency, prefix } = useBudgetMoneyDisplay(item.currency);
+  const limitLabel = item.coverage === "group" ? "Included in group" : item.coverage === "unavailable" ? "Unavailable" : "Unbudgeted";
+  const actualLabel = item.actual === null ? "Unavailable" : formatCurrency(item.actual);
+  // Clearing the input does not clear the budget on the server, so leaving
+  // an empty input restores the value it had when editing began.
+  const budgetBeforeEdit = useRef<number | null>(item.budget);
 
   // Progress bar width calculation - cap at 100%
   const progressWidth = Math.min(100, Math.max(0, utilization));
@@ -45,7 +51,7 @@ export function BudgetRow({
     <div
       role="button"
       tabIndex={0}
-      aria-label={`${item.name} budget category, ${formatCurrency(item.budget)} budgeted, ${formatCurrency(item.actual)} spent, ${formatCurrency(item.remaining)} remaining`}
+      aria-label={`${item.name} budget category, ${item.budget === null ? limitLabel.toLowerCase() : `${formatCurrency(item.budget)} budgeted`}, ${item.actual === null ? "spending unavailable" : `${actualLabel} spent`}, ${item.remaining === null ? limitLabel.toLowerCase() : `${formatCurrency(item.remaining)} remaining`}`}
       className="grid grid-cols-12 gap-4 py-3 px-4 border-b border-border/30 hover:bg-muted/20 items-center group text-sm relative cursor-pointer"
       onClick={() =>
         onSelect &&
@@ -101,19 +107,27 @@ export function BudgetRow({
         className="col-span-3 text-right pr-4"
         onClick={(e) => e.stopPropagation()}
       >
-        {isBudgetEditable ? (
+        {isBudgetEditable && item.coverage === undefined ? (
           <div className="relative inline-block group/input w-28">
             <span className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground/50 text-xs pointer-events-none">
-              {formatCurrency(0).replace(/[0-9.,-]/g, "")}
+              {prefix}
             </span>
             <input
               type="text"
-              value={item.budget}
+              value={item.budget ?? ""}
+              placeholder="Unbudgeted"
+              onFocus={() => {
+                budgetBeforeEdit.current = item.budget;
+              }}
               onChange={(e) => {
-                const val = parseMoney(e.target.value) || 0;
+                const val = e.target.value.trim() === "" ? null : parseMoney(e.target.value);
                 onUpdate(item.id, "budget", val);
               }}
               onBlur={(event) => {
+                if (event.currentTarget.value.trim() === "") {
+                  onUpdate(item.id, "budget", budgetBeforeEdit.current);
+                  return;
+                }
                 if (!onCommitBudget) return;
                 const val = parseMoney(event.currentTarget.value);
                 if (Number.isFinite(val)) {
@@ -121,7 +135,7 @@ export function BudgetRow({
                 }
               }}
               onKeyDown={(event) => {
-                if (event.key !== "Enter" || !onCommitBudget) return;
+                if (event.key !== "Enter" || !onCommitBudget || (event.currentTarget as HTMLInputElement).value.trim() === "") return;
                 const val = parseMoney(
                   (event.currentTarget as HTMLInputElement).value
                 );
@@ -130,7 +144,7 @@ export function BudgetRow({
                 }
               }}
               aria-label={`Budget amount for ${item.name}`}
-              className="w-full text-right py-1 px-2 rounded-md border border-border/60 bg-background dark:bg-card focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm font-medium transition-all shadow-sm hover:border-border"
+              className="w-full text-right py-1 px-2 max-md:min-h-11 rounded-md border border-border/60 bg-background dark:bg-card focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm font-medium transition-all shadow-sm hover:border-border"
             />
           </div>
         ) : (
@@ -139,8 +153,8 @@ export function BudgetRow({
       </div>
 
       {/* Actual Column */}
-      <div className="col-span-2 text-right pr-8 font-medium text-foreground">
-        {formatCurrency(item.actual)}
+      <div data-testid="budget-actual" className="col-span-2 text-right pr-8 font-medium text-foreground">
+        {item.coverage === "group" && item.actual === null ? "See group total" : actualLabel}
       </div>
 
       {/* Remaining Column */}
@@ -153,19 +167,19 @@ export function BudgetRow({
               onMoveMoney(item);
             }
           }}
-          disabled={!onMoveMoney}
-          aria-label={`Move money for ${item.name}, ${formatCurrency(item.remaining)} ${item.remaining > 0 ? 'remaining' : item.remaining < 0 ? 'over budget' : 'at budget'}`}
+          disabled={!onMoveMoney || item.remaining === null}
+          aria-label={item.remaining === null ? `${item.name} is ${limitLabel.toLowerCase()}` : `Move money for ${item.name}, ${formatCurrency(item.remaining)} ${item.remaining > 0 ? 'remaining' : item.remaining < 0 ? 'over budget' : 'at budget'}`}
           className={cn(
             "inline-flex items-center justify-center py-1 px-3 rounded-full text-xs font-bold min-w-[60px]",
-            item.remaining > 0
+            item.remaining !== null && item.remaining > 0
               ? "bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300"
-              : item.remaining < 0
+              : item.remaining !== null && item.remaining < 0
               ? "bg-rose-100 dark:bg-rose-900/50 text-rose-700 dark:text-rose-300"
               : "bg-muted text-muted-foreground",
             onMoveMoney ? "hover:opacity-90" : "cursor-default"
           )}
         >
-          {formatCurrency(item.remaining)}
+          {item.remaining === null ? limitLabel : formatCurrency(item.remaining)}
         </button>
       </div>
     </div>

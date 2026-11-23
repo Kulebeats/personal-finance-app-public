@@ -6,6 +6,8 @@ import { settingsController } from "../settings.controller";
 import { userRepository } from "../../../repositories/UserRepository";
 import * as auth from "../../../auth";
 import * as passwordHistory from "../../auth/auth.password-history";
+import { ValidationError } from "../../../core/errors";
+import { enqueueSecurityNotice } from "../../../services/security-notice";
 
 // Mock dependencies
 vi.mock("@shared/schema", () => ({
@@ -17,8 +19,19 @@ vi.mock("@shared/schema", () => ({
 vi.mock("../../../repositories/UserRepository");
 vi.mock("../../../repositories/HouseholdRepository");
 vi.mock("../../auth/auth.password-history", () => ({
-  wasPasswordUsedRecently: vi.fn(),
+  assertPasswordNotReused: vi.fn(),
   recordPasswordInHistory: vi.fn(),
+}));
+vi.mock("../../../services/session-identity", () => ({
+  lockCurrentSessionCredential: vi.fn(async (_tx, user) => user),
+}));
+vi.mock("../../../services/BusinessAuditService", () => ({
+  businessAuditService: { getIpAddress: vi.fn(), logUpdate: vi.fn().mockResolvedValue(undefined) },
+}));
+// This controller-only transaction double has no insert/query executor. Atomic
+// audit/notice persistence and rollback are covered by the R01 real-PG suites.
+vi.mock("../../../services/security-notice", () => ({
+  enqueueSecurityNotice: vi.fn().mockResolvedValue("unit-security-event"),
 }));
 vi.mock("../../../auth", () => ({
   verifyPassword: vi.fn(),
@@ -83,63 +96,71 @@ describe("Settings Controller - Security", () => {
   describe("changePassword", () => {
     const mockUser = {
       id: "user-123",
+      email: "settings-security-unit@example.invalid",
       passwordHash: "$2b$10$hashedcurrentpassword",
+      pendingEmail: null,
     };
 
     it("should prevent password reuse", async () => {
       // Setup mocks
       vi.mocked(userRepository.findById).mockResolvedValue(mockUser as any);
       vi.mocked(auth.verifyPassword).mockResolvedValue(true);
-      // wasPasswordUsedRecently returns true (reuse detected)
-      vi.mocked(passwordHistory.wasPasswordUsedRecently).mockResolvedValue(
-        true,
+      vi.mocked(passwordHistory.assertPasswordNotReused).mockRejectedValue(
+        new ValidationError("You cannot reuse recent passwords"),
       );
 
       const res = await request(app).put("/api/settings/password").send({
         currentPassword: "currentpassword",
-        newPassword: "oldpassword",
-        confirmPassword: "oldpassword",
+        newPassword: "OldPassword123!",
+        confirmPassword: "OldPassword123!",
       });
 
       expect(res.status).toBe(400); // ValidationError
       expect(res.body.error.message).toMatch(/cannot reuse/);
-      expect(passwordHistory.wasPasswordUsedRecently).toHaveBeenCalledWith(
-        "user-123",
-        "oldpassword",
+      expect(passwordHistory.assertPasswordNotReused).toHaveBeenCalledWith(
+        expect.anything(), mockUser, "OldPassword123!",
       );
       // Should NOT update password
       expect(userRepository.update).not.toHaveBeenCalled();
+      expect(mockTxUpdateWhere).not.toHaveBeenCalled();
+      expect(enqueueSecurityNotice).not.toHaveBeenCalled();
     });
 
     it("should record history on successful change", async () => {
       // Setup mocks
       vi.mocked(userRepository.findById).mockResolvedValue(mockUser as any);
       vi.mocked(auth.verifyPassword).mockResolvedValue(true);
-      vi.mocked(passwordHistory.wasPasswordUsedRecently).mockResolvedValue(
-        false,
+      vi.mocked(passwordHistory.assertPasswordNotReused).mockResolvedValue(
+        undefined,
       );
       vi.mocked(userRepository.update).mockResolvedValue({} as any);
 
       const res = await request(app).put("/api/settings/password").send({
         currentPassword: "currentpassword",
-        newPassword: "newpassword123",
-        confirmPassword: "newpassword123",
+        newPassword: "NewPassword123!",
+        confirmPassword: "NewPassword123!",
       });
 
       expect(res.status).toBe(200);
 
       // Should check history
-      expect(passwordHistory.wasPasswordUsedRecently).toHaveBeenCalled();
+      expect(passwordHistory.assertPasswordNotReused).toHaveBeenCalled();
 
       // Should record OLD hash in history
       expect(passwordHistory.recordPasswordInHistory).toHaveBeenCalledWith(
         "user-123",
         mockUser.passwordHash,
+        expect.anything(),
       );
 
       // Should update the password hash (now done inside withTransaction,
       // not via userRepository.update - see mock above).
       expect(mockTxUpdateWhere).toHaveBeenCalled();
+      const tx = vi.mocked(passwordHistory.recordPasswordInHistory).mock.calls[0][2];
+      expect(enqueueSecurityNotice).toHaveBeenCalledExactlyOnceWith(
+        tx, mockUser, expect.objectContaining({ session: expect.objectContaining({ userId: mockUser.id }) }),
+        { eventType: "PASSWORD_CHANGE", kind: "password_changed", recipients: [mockUser.email], action: "password_change", sessionsRevoked: true },
+      );
 
       // Should revoke every OTHER session, keeping the current one alive.
       const { revokeUserSessions } = await import(

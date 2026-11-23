@@ -11,6 +11,8 @@ import fc from "fast-check";
 import { Request, Response, NextFunction } from "express";
 import { householdGuardWithId } from "../householdGuard";
 import { householdRepository } from "../../repositories/HouseholdRepository";
+import { userRepository } from "../../repositories/UserRepository";
+import type { User } from "@shared/schema";
 
 // Configure fast-check to run minimum 100 iterations
 fc.configureGlobal({ numRuns: 100 });
@@ -26,6 +28,15 @@ vi.mock("../../repositories/HouseholdRepository", () => ({
     findMember: vi.fn(),
   },
 }));
+vi.mock("../../repositories/UserRepository", () => ({ userRepository: { findById: vi.fn() } }));
+
+// These properties isolate membership/target checks for a current verified
+// actor. Pending/stale/erased identity denial is covered by the R02 guard tests.
+function verifiedActor(userId: string) {
+  vi.mocked(userRepository.findById).mockResolvedValue({
+    id: userId, emailVerified: true, mfaEnabled: true, securityGeneration: 0, erasedAt: null, passwordHash: "synthetic-cross-household-hash",
+  } as User);
+}
 
 describe("Property 13: Cross-Household Access Prevention", () => {
   let mockRequest: Partial<Request>;
@@ -77,6 +88,7 @@ describe("Property 13: Cross-Household Access Prevention", () => {
             params: { householdId: targetHouseholdId },
             body: {},
           };
+          verifiedActor(userId);
           
           // User is NOT a member of the target household
           vi.mocked(householdRepository.findMember).mockResolvedValueOnce(
@@ -131,6 +143,7 @@ describe("Property 13: Cross-Household Access Prevention", () => {
             params: { householdId },
             body: {},
           };
+          verifiedActor(userId);
           
           vi.mocked(householdRepository.findMember).mockResolvedValueOnce({
             id: "00000000-0000-0000-0000-000000000000",
@@ -180,6 +193,7 @@ describe("Property 13: Cross-Household Access Prevention", () => {
             params: { householdId: targetHouseholdId },
             body: {},
           };
+          verifiedActor(userId);
           
           vi.mocked(householdRepository.findMember).mockResolvedValueOnce(
             NO_MEMBER,
@@ -224,6 +238,7 @@ describe("Property 13: Cross-Household Access Prevention", () => {
             params: {},
             body: { householdId: targetHouseholdId },
           };
+          verifiedActor(userId);
           
           vi.mocked(householdRepository.findMember).mockResolvedValueOnce(
             NO_MEMBER,
@@ -266,6 +281,7 @@ describe("Property 13: Cross-Household Access Prevention", () => {
             params: {},
             body: {},
           };
+          verifiedActor(userId);
 
           await householdGuardWithId(
             mockRequest as Request,

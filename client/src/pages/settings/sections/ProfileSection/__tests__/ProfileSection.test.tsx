@@ -4,6 +4,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createTestQueryClient } from "@/test-utils/queryClient";
+import { toast } from "sonner";
 
 // Mock the use-settings hooks before importing components
 const mockUseProfile = vi.fn();
@@ -158,6 +159,21 @@ describe("ProfileForm", () => {
     }, waitForOptions);
   });
 
+  it("opens the Contact tab when NRC is empty and every required field is filled", async () => {
+    const user = userEvent.setup();
+    mockUseProfile.mockReturnValue({ data: { ...defaultProfileData, nrc: "" }, isLoading: false, error: null });
+    render(<ProfileForm />, { wrapper: createWrapper() });
+
+    await waitFor(() => expect(screen.getByLabelText(/display name/i)).toHaveValue("Test User"));
+    // AH-07: NRC is collected (NRC_FIELD_MODE "editable").
+    expect(screen.getByLabelText(/national registration card/i)).toBeEnabled();
+    await user.click(screen.getByRole("tab", { name: /contact/i }));
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: /contact/i })).toHaveAttribute("data-state", "active"));
+    expect(screen.getByLabelText(/mobile phone/i)).toBeInTheDocument();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
   it("contact tab offers Home Phone but not the removed Work Phone field", async () => {
     const user = userEvent.setup();
     render(<ProfileForm />, { wrapper: createWrapper() });
@@ -242,5 +258,152 @@ describe("ProfileForm", () => {
     await waitFor(() => {
       expect(saveButton).not.toBeDisabled();
     }, waitForOptions);
+  });
+
+  it("reports and focuses a missing required field on the first Save before blur", async () => {
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({});
+    mockUseProfile.mockReturnValue({ data: { ...defaultProfileData, gender: null }, isLoading: false, error: null });
+    mockUseUpdateProfile.mockReturnValue({ mutateAsync, isPending: false });
+    render(<ProfileForm />, { wrapper: createWrapper() });
+
+    await waitFor(() => expect(screen.getByLabelText(/display name/i)).toHaveValue("Test User"));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Profile update failed", {
+      description: expect.stringContaining("Gender"),
+    }));
+    expect(screen.getByRole("tab", { name: /personal/i })).toHaveAttribute("data-state", "active");
+    expect(screen.getByText("Gender is required")).toHaveAttribute("role", "alert");
+    expect(screen.getByLabelText(/gender/i)).toHaveFocus();
+    expect(mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("selects and focuses the tab containing a newly discovered invalid field", async () => {
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({});
+    mockUseProfile.mockReturnValue({ data: { ...defaultProfileData, employmentStatus: "invalid" }, isLoading: false, error: null });
+    mockUseUpdateProfile.mockReturnValue({ mutateAsync, isPending: false });
+    render(<ProfileForm />, { wrapper: createWrapper() });
+
+    await waitFor(() => expect(screen.getByLabelText(/display name/i)).toHaveValue("Test User"));
+    await user.click(screen.getByRole("tab", { name: /contact/i }));
+    expect(screen.getByRole("tab", { name: /contact/i })).toHaveAttribute("data-state", "active");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: /financial/i })).toHaveAttribute("data-state", "active"));
+    expect(screen.getByLabelText(/employment status/i)).toHaveFocus();
+    expect(screen.getByRole("alert")).toHaveTextContent(/invalid/i);
+    expect(mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("saves a valid profile exactly once", async () => {
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({});
+    mockUseUpdateProfile.mockReturnValue({ mutateAsync, isPending: false });
+    render(<ProfileForm />, { wrapper: createWrapper() });
+
+    await waitFor(() => expect(screen.getByLabelText(/display name/i)).toHaveValue("Test User"));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1));
+    expect(toast.success).toHaveBeenCalledWith("Profile updated successfully");
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("keeps unsaved edits when a picture upload refreshes the profile", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<ProfileForm />, { wrapper: createWrapper() });
+
+    const nameInput = await screen.findByLabelText(/display name/i);
+    await waitFor(() => expect(nameInput).toHaveValue("Test User"));
+    await user.clear(nameInput);
+    await user.type(nameInput, "Edited Before Upload");
+
+    // A picture upload writes the new profile into the ["profile"] query,
+    // which hands the form a fresh profile object.
+    mockUseProfile.mockReturnValue({
+      data: { ...defaultProfileData, profilePictureUrl: "/uploads/profiles/new.png" },
+      isLoading: false,
+      error: null,
+    });
+    rerender(<ProfileForm />);
+
+    await waitFor(() => expect(screen.getByLabelText(/display name/i)).toHaveValue("Edited Before Upload"));
+    // Give the form's reset effect a chance to run, then check again.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(screen.getByLabelText(/display name/i)).toHaveValue("Edited Before Upload");
+  });
+
+  it("saves edits made before a picture upload, without picture keys and with the NRC", async () => {
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({ ...defaultProfileData, fullName: "Edited Before Upload" });
+    mockUseUpdateProfile.mockReturnValue({ mutateAsync, isPending: false });
+    const { rerender } = render(<ProfileForm />, { wrapper: createWrapper() });
+
+    const nameInput = await screen.findByLabelText(/display name/i);
+    await waitFor(() => expect(nameInput).toHaveValue("Test User"));
+    await user.clear(nameInput);
+    await user.type(nameInput, "Edited Before Upload");
+    mockUseProfile.mockReturnValue({
+      data: { ...defaultProfileData, profilePictureUrl: "/uploads/profiles/new.png" },
+      isLoading: false,
+      error: null,
+    });
+    rerender(<ProfileForm />);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1));
+    const body = mutateAsync.mock.calls[0][0];
+    expect(body.fullName).toBe("Edited Before Upload");
+    expect(body).not.toHaveProperty("profilePicture");
+    expect(body).not.toHaveProperty("profilePictureUrl");
+    expect(body.nrc).toBe(defaultProfileData.nrc);
+  });
+
+  it("locks the fields while a save is in flight, so an edit cannot be typed and then lost", async () => {
+    const user = userEvent.setup();
+    let reply: (profile: unknown) => void = () => {};
+    const mutateAsync = vi.fn(() => new Promise(resolve => { reply = resolve; }));
+    mockUseUpdateProfile.mockReturnValue({ mutateAsync, isPending: false });
+    render(<ProfileForm />, { wrapper: createWrapper() });
+
+    const nameInput = await screen.findByLabelText(/display name/i);
+    await waitFor(() => expect(nameInput).toHaveValue("Test User"));
+    await user.clear(nameInput);
+    await user.type(nameInput, "Alice");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1));
+
+    // The reply has not arrived: the field is locked, so the edit to "Alicia" cannot be typed.
+    expect(screen.getByLabelText(/display name/i)).toBeDisabled();
+    await user.type(screen.getByLabelText(/display name/i), "{Backspace}ia");
+    expect(screen.getByLabelText(/display name/i)).toHaveValue("Alice");
+
+    reply({ ...defaultProfileData, fullName: "Alice" });
+    await waitFor(() => expect(screen.getByLabelText(/display name/i)).not.toBeDisabled());
+    expect(screen.getByLabelText(/display name/i)).toHaveValue("Alice");
+
+    // After the reply the field is editable again and keeps the new edit.
+    await user.clear(screen.getByLabelText(/display name/i));
+    await user.type(screen.getByLabelText(/display name/i), "Alicia");
+    expect(screen.getByLabelText(/display name/i)).toHaveValue("Alicia");
+  });
+
+  it("reports an uncertain mutation outcome without claiming validation failure", async () => {
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockRejectedValue(new Error("network failure"));
+    mockUseUpdateProfile.mockReturnValue({ mutateAsync, isPending: false });
+    render(<ProfileForm />, { wrapper: createWrapper() });
+
+    await waitFor(() => expect(screen.getByLabelText(/display name/i)).toHaveValue("Test User"));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("Failed to update profile", {
+      description: "We could not confirm whether your changes were saved. Refresh your profile before trying again.",
+    }));
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(mutateAsync).toHaveBeenCalledTimes(1);
+    expect(toast.success).not.toHaveBeenCalled();
   });
 });

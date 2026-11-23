@@ -49,7 +49,7 @@ interface MerchantsSectionProps {
   isCategoryLoading: boolean;
   isTrendLoading: boolean;
   filters: MerchantFilters;
-  currency?: string;
+  currency: string | null; // null until known: amounts then show without a currency
 }
 
 export function MerchantsSection({
@@ -65,7 +65,7 @@ export function MerchantsSection({
   isCategoryLoading,
   isTrendLoading,
   filters,
-  currency = "USD",
+  currency,
 }: MerchantsSectionProps) {
   const barData = items.slice(0, 10).map((item) => ({
     merchant: item.label,
@@ -180,7 +180,7 @@ export function MerchantsSection({
                   <ChartTooltip
                     content={
                       <ChartTooltipContent
-                        formatter={(value) => formatCurrency(Number(value))}
+                        formatter={(value) => formatCurrency(Number(value), currency)}
                       />
                     }
                   />
@@ -223,7 +223,7 @@ export function MerchantsSection({
                           <ChartTooltipContent
                             nameKey="id"
                             formatter={(value) =>
-                              formatCurrency(Number(value))
+                              formatCurrency(Number(value), currency)
                             }
                           />
                         }
@@ -287,7 +287,7 @@ export function MerchantsSection({
                     <ChartTooltip
                       content={
                         <ChartTooltipContent
-                          formatter={(value) => formatCurrency(Number(value))}
+                          formatter={(value) => formatCurrency(Number(value), currency)}
                         />
                       }
                     />

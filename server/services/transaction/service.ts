@@ -6,8 +6,9 @@
  * @module services/transaction/service
  */
 
-import { transactionRepository } from "../../repositories/TransactionRepository";
-import { type Transaction, type InsertTransaction } from "@shared/schema";
+import { transactionRepository, type TransactionUpdateData } from "../../repositories/TransactionRepository";
+import { merchants, transactions, type Transaction, type InsertTransaction } from "@shared/schema";
+import { and, eq } from "drizzle-orm";
 import {
   NotFoundError,
   AuthorizationError,
@@ -15,7 +16,7 @@ import {
   ValidationError,
 } from "../../utils/errorHandler";
 import { logger } from "../../utils/logger";
-import { invalidateOnChange } from "../CacheInvalidation";
+import { invalidateOnChangeAfterCommit } from "../CacheInvalidation";
 import {
   ensureMerchantAlias,
   resolveMerchantMatch,
@@ -23,6 +24,9 @@ import {
 import { outboxEventService, EventTypes } from "../../core/events";
 import { transferService } from "../TransferService";
 import { businessAuditService } from "../BusinessAuditService";
+import type { TransactionType } from "../../utils/withTransaction";
+import { lockTransactionCreateGrant } from "../../repositories/TransactionCreateBoundary";
+import { visibleTransactionPredicate } from "../../core/authz/transaction-visibility";
 
 // Import extracted modules
 import {
@@ -44,7 +48,7 @@ import {
   markReviewed as doMarkReviewed,
   markUnreviewed as doMarkUnreviewed,
 } from "./review";
-import { createTransaction as doCreateTransaction } from "./create";
+import { createTransaction as doCreateTransaction, type TransactionPostingOptions } from "./create";
 import { deleteTransaction as doDeleteTransaction } from "./delete";
 import {
   validateTagIds as doValidateTagIds,
@@ -120,7 +124,7 @@ export class TransactionService {
    * Create a transaction with idempotency support
    */
   async createTransaction(
-    data: Omit<InsertTransaction, "householdId" | "ownerUserId"> & {
+    data: Omit<InsertTransaction, "householdId"> & {
       splits?: {
         amount: string;
         categoryId?: string | null;
@@ -131,14 +135,16 @@ export class TransactionService {
     householdId: string,
     userId: string,
     idempotencyKey?: string,
-    auditContext?: { ipAddress?: string }
+    auditContext?: { ipAddress?: string },
+    postingOptions?: TransactionPostingOptions
   ): Promise<{ transaction: Transaction; isDuplicate: boolean }> {
     return doCreateTransaction(
       data,
       householdId,
       userId,
       idempotencyKey,
-      auditContext
+      auditContext,
+      postingOptions
     );
   }
 
@@ -159,6 +165,7 @@ export class TransactionService {
       currency?: string;
       fxRate?: string | null;
       fxSource?: string;
+      audit?: { ipAddress?: string };
     }
   ): Promise<{
     outflow: Transaction;
@@ -181,6 +188,7 @@ export class TransactionService {
   async updateTransfer(
     id: string,
     data: {
+      expectedUpdatedAt?: string;
       fromAccountId: string;
       toAccountId: string;
       amount: string;
@@ -191,34 +199,38 @@ export class TransactionService {
       fxRate?: number; // FIX DATA-TRANSFER-002: Accept FX rate
     },
     householdId: string,
-    userId: string
+    userId: string,
+    audit?: { ipAddress?: string }
   ): Promise<{ outflow: Transaction; inflow: Transaction }> {
-    return await transferService.updateTransfer(id, data, householdId, userId);
+    return await transferService.updateTransfer(id, data, householdId, userId, audit);
   }
 
   /**
    * Update a transaction with optimistic concurrency
    *
-   * Rule 9 (P8b): the UPDATE audit row is written here, atomically with the
-   * business logic, so every caller of the service is audited — not just the
+   * Rule 9 (P8b): this service enlists one UPDATE audit and event in the
+   * repository transaction, so every caller is audited atomically — not just the
    * transactions controller. updateOwner/markReviewed/markUnreviewed and the
    * bulk-update paths all funnel through this method, so they inherit the
    * same single audit row instead of each controller handler auditing again.
    */
   async updateTransaction(
     id: string,
-    data: Partial<Transaction>,
+    data: TransactionUpdateData,
     householdId: string,
     userId: string,
     expectedUpdatedAt?: Date,
-    auditContext?: { ipAddress?: string; metadata?: Record<string, unknown> }
+    auditContext?: { ipAddress?: string; metadata?: Record<string, unknown> },
+    ownerBatchTx?: TransactionType,
   ): Promise<Transaction> {
+    if (ownerBatchTx && Object.keys(data).some(field => field !== "ownerUserId")) throw new ValidationError("Owner batches accept attribution changes only");
     // First verify visibility/access
-    const existing = await transactionRepository.findByIdWithVisibility(
-      id,
-      householdId,
-      userId
-    );
+    let existing: Transaction | undefined;
+    if (ownerBatchTx) {
+      const actor = await lockTransactionCreateGrant(ownerBatchTx, householdId, { createActor: { householdId, userId } });
+      if (!actor) throw new NotFoundError("Transaction not found");
+      [existing] = await ownerBatchTx.select().from(transactions).where(and(eq(transactions.id, id), visibleTransactionPredicate(actor))).limit(1);
+    } else existing = await transactionRepository.findByIdWithVisibility(id, householdId, userId);
 
     if (!existing) {
       throw new NotFoundError("Transaction not found");
@@ -256,6 +268,7 @@ export class TransactionService {
     }
 
     const updatePayload = { ...data };
+    let merchantAlias: { merchantId: string; name: string } | undefined;
 
     if (
       updatePayload.name !== undefined ||
@@ -274,10 +287,7 @@ export class TransactionService {
           updatePayload.merchantId = merchantMatch.merchant.id;
         }
         if (merchantMatch.aliasCandidate) {
-          await ensureMerchantAlias(
-            merchantMatch.merchant.id,
-            merchantMatch.aliasCandidate
-          );
+          merchantAlias = { merchantId: merchantMatch.merchant.id, name: merchantMatch.aliasCandidate };
         }
       } else if (
         updatePayload.name !== undefined &&
@@ -288,12 +298,37 @@ export class TransactionService {
     }
 
     const { transaction, conflict } = await transactionRepository.update(
-      id,
-      householdId,
-      updatePayload,
-      expectedUpdatedAt
+      id, householdId, updatePayload, expectedUpdatedAt, ownerBatchTx, {
+        actor: { householdId, userId },
+        onWrite: async (tx, snapshot) => {
+          if (merchantAlias) {
+            const merchantId = snapshot.after.merchantId;
+            if (!merchantId || merchantId !== merchantAlias.merchantId) throw new NotFoundError("Merchant not found");
+            const [merchant] = await tx.select({ id: merchants.id }).from(merchants).where(and(
+              eq(merchants.id, merchantId), eq(merchants.householdId, householdId),
+            )).for("share");
+            if (!merchant || merchant.id !== merchantAlias.merchantId) throw new NotFoundError("Merchant not found");
+            await ensureMerchantAlias(merchant.id, merchantAlias.name, tx);
+          }
+          const changes = getAuditChanges(snapshot.before, snapshot.after);
+          if (snapshot.splitsChanged) {
+            changes.splits = { before: snapshot.beforeSplits, after: snapshot.afterSplits };
+          }
+          if (Object.keys(changes).length > 0) {
+            await businessAuditService.log({
+              tx, householdId: snapshot.privateAudit ? null : householdId, userId, action: "UPDATE", entityType: "transaction",
+              entityId: snapshot.after.id, details: { ...auditContext?.metadata, changes },
+              ipAddress: auditContext?.ipAddress,
+            });
+          }
+          await outboxEventService.publish({
+            eventType: EventTypes.TRANSACTION_UPDATED, aggregateType: "transaction",
+            aggregateId: snapshot.after.id, householdId,
+            payload: { id: snapshot.after.id, changes: Object.keys(data) },
+          }, tx);
+        },
+      },
     );
-
     if (conflict) {
       throw new ConflictError(
         "Transaction was modified. Please refresh and try again."
@@ -306,40 +341,8 @@ export class TransactionService {
 
     logger.info("Transaction updated", { householdId });
 
-    // Invalidate analytics cache
-    await invalidateOnChange("transaction", householdId);
-
-    // Emit transaction updated event (fire and forget)
-    outboxEventService
-      .publish({
-        eventType: EventTypes.TRANSACTION_UPDATED,
-        aggregateType: "transaction",
-        aggregateId: id,
-        householdId,
-        payload: { id, changes: Object.keys(data) },
-      })
-      .catch((err) =>
-        logger.error("Failed to publish transaction event", { err })
-      );
-
-    // Business Audit Log (P8b: single source of truth for transaction UPDATE
-    // audit rows — see the method doc comment above). Awaited (unlike the
-    // fire-and-forget event publish above) so the audit row is guaranteed
-    // written before the caller/HTTP response completes — BusinessAuditService
-    // .log()'s non-tx branch already catches its own errors internally, so
-    // awaiting it cannot turn an audit failure into an update failure.
-    const changes = getAuditChanges(existing, transaction);
-    if (Object.keys(changes).length > 0) {
-      await businessAuditService.log({
-        householdId,
-        userId,
-        action: "UPDATE",
-        entityType: "transaction",
-        entityId: transaction.id,
-        details: { changes, ...auditContext?.metadata },
-        ipAddress: auditContext?.ipAddress,
-      });
-    }
+    // A joined owner batch invalidates once after its outer commit.
+    if (!ownerBatchTx) await invalidateOnChangeAfterCommit("transaction", householdId);
 
     return transaction;
   }
@@ -451,9 +454,10 @@ export class TransactionService {
     transactionId: string,
     tagIds: string[],
     householdId: string,
-    userId: string
+    userId: string,
+    ipAddress?: string
   ): Promise<void> {
-    return doAddTagsToTransaction(transactionId, tagIds, householdId, userId);
+    return doAddTagsToTransaction(transactionId, tagIds, householdId, userId, ipAddress);
   }
 }
 

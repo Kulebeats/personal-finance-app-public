@@ -44,6 +44,8 @@ function describeAcceptError(error: ApiError): ErrorCopy {
       return { title: "Invitation not found", message };
     case "CONFLICT":
       return { title: "This invitation can't be used", message };
+    case "INVITE_RECIPIENT_MISMATCH":
+      return { title: "This invitation is for a different email", message };
     case "VALIDATION_ERROR":
       return { title: "Invalid invitation link", message };
     case "UNAUTHORIZED":

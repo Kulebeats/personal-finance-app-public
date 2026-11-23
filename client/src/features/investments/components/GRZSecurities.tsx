@@ -10,6 +10,7 @@ import {
 import { Plus, TrendingUp } from "lucide-react";
 import { useGrzBonds, useGrzTBills, GrzBond } from "@/hooks/useGrzSecurities";
 import { useFormat } from "@/hooks/use-format";
+import { sumMoneyValues } from "@/lib/money";
 import { AddGrzBondModal } from "./AddGrzBondModal";
 import { AddGrzTBillModal } from "./AddGrzTBillModal";
 import { BondScheduleDialog } from "./BondScheduleDialog";
@@ -18,6 +19,7 @@ import { InvestmentGoalsList } from "./InvestmentGoalsList";
 import { BondLadder } from "./BondLadder";
 import { GRZBondsTable } from "./GRZBondsTable";
 import { GRZTBillsTable } from "./GRZTBillsTable";
+import { GrzPolicyNotice } from "./GrzPolicyNotice";
 import { useState } from "react";
 
 export function GRZSecurities() {
@@ -27,20 +29,24 @@ export function GRZSecurities() {
 
   const [openBondModal, setOpenBondModal] = useState(false);
   const [openTBillModal, setOpenTBillModal] = useState(false);
-  const [selectedBond, setSelectedBond] = useState<GrzBond | null>(null);
+  const [selectedBondId, setSelectedBondId] = useState<string | null>(null);
   const [showSchedule, setShowSchedule] = useState(false);
 
   const isLoading = bondsLoading || tbillsLoading;
 
-  // Calculations
-  const totalBondValue =
-    bonds?.reduce((sum, b) => sum + Number(b.faceValue), 0) || 0;
-  const totalTBillValue =
-    tbills?.reduce((sum, t) => sum + Number(t.faceValue), 0) || 0;
-  const totalGrzValue = totalBondValue + totalTBillValue;
+  const activeBonds = (bonds ?? []).filter(bond => bond.status === "active");
+  const activeTBills = (tbills ?? []).filter(bill => bill.status === "active");
+  // A-36: a bill awaiting receipt is still held, at face less the booked withholding.
+  // Without its booked proceeds a due bill's value is unavailable, never zero.
+  const dueTBills = (tbills ?? []).filter(bill => bill.status === "awaiting_receipt");
+  const awaitingTBills = dueTBills.flatMap(bill => bill.maturityNetProceeds ? [bill.maturityNetProceeds] : []);
+  const isTBillValueUnavailable = awaitingTBills.length < dueTBills.length;
+  const totalBondValue = sumMoneyValues(activeBonds.map(bond => bond.faceValue));
+  const totalTBillValue = sumMoneyValues([...activeTBills.map(bill => bill.faceValue), ...awaitingTBills]);
+  const totalGrzValue = totalBondValue.plus(totalTBillValue);
 
   const handleViewSchedule = (bond: GrzBond) => {
-    setSelectedBond(bond);
+    setSelectedBondId(bond.id);
     setShowSchedule(true);
   };
 
@@ -54,35 +60,37 @@ export function GRZSecurities() {
 
   return (
     <div className="space-y-6">
+      <GrzPolicyNotice />
+
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card className="bg-primary/5 border-primary/20">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">
-              Total GRZ Portfolio
+              GRZ value held (ZMW)
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold text-primary">
-              {formatCurrency(totalGrzValue)}
+              {isTBillValueUnavailable ? "Unavailable" : formatCurrency(totalGrzValue.toNumber(), "ZMW")}
             </div>
-            <div className="text-xs text-muted-foreground mt-1">Face Value</div>
+            <div className="text-xs text-muted-foreground mt-1">Face value; bills awaiting receipt at face less withholding</div>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">
-              Bond Holdings
+              Active bond face value (ZMW)
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {formatCurrency(totalBondValue)}
+              {formatCurrency(totalBondValue.toNumber(), "ZMW")}
             </div>
             <div className="flex items-center text-xs text-emerald-600 mt-1">
               <TrendingUp className="h-3 w-3 mr-1" />
-              {bonds?.length || 0} Active Bonds
+              {activeBonds.length} Active Bonds
             </div>
           </CardContent>
         </Card>
@@ -90,16 +98,16 @@ export function GRZSecurities() {
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">
-              T-Bill Holdings
+              T-bill value held (ZMW)
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {formatCurrency(totalTBillValue)}
+              {isTBillValueUnavailable ? "Unavailable" : formatCurrency(totalTBillValue.toNumber(), "ZMW")}
             </div>
             <div className="flex items-center text-xs text-emerald-600 mt-1">
               <TrendingUp className="h-3 w-3 mr-1" />
-              {tbills?.length || 0} Active T-Bills
+              {activeTBills.length} Active T-Bills{dueTBills.length > 0 && `, ${dueTBills.length} awaiting receipt`}
             </div>
           </CardContent>
         </Card>
@@ -170,7 +178,7 @@ export function GRZSecurities() {
       </Tabs>
 
       <BondScheduleDialog
-        bond={selectedBond}
+        bond={bonds?.find(bond => bond.id === selectedBondId) ?? null}
         open={showSchedule}
         onOpenChange={setShowSchedule}
       />

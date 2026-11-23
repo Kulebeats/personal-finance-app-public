@@ -17,7 +17,8 @@
  * @module core/calculations/currency/fxRates
  */
 
-import { eq, and, desc, lte, inArray, sql } from "drizzle-orm";
+import { eq, and, desc, lte } from "drizzle-orm";
+import { readLatestFxRates } from "./latest-rates-query";
 import { CalculationError } from "../errors";
 import { toMoney, type Money } from "../types";
 import { roundToDecimals, toSafeNumber } from "../helpers";
@@ -88,9 +89,11 @@ export interface FXRateRepository {
     to: string,
     date: string
   ): Promise<FXRate | null>;
+  /** R12: the household's own manual rate first, then the shared row. */
   getLatestRates(
     fromCurrencies: string[],
-    to: string
+    to: string,
+    householdId: string
   ): Promise<Map<string, number>>;
 }
 
@@ -102,7 +105,7 @@ export interface FXRateRepository {
  * @returns FXRateRepository implementation
  */
 export function createFXRateRepository(
-  database: typeof db,
+  database: Pick<typeof db, "query" | "select" | "selectDistinctOn">,
   fxRatesTable: typeof fxRates
 ): FXRateRepository {
   return {
@@ -177,42 +180,10 @@ export function createFXRateRepository(
 
     async getLatestRates(
       fromCurrencies: string[],
-      to: string
+      to: string,
+      householdId: string
     ): Promise<Map<string, number>> {
-      const normalizedCurrencies = fromCurrencies.map((c) => c.toUpperCase());
-      const normalizedTo = to.toUpperCase();
-
-      if (normalizedCurrencies.length === 0) {
-        return new Map();
-      }
-
-      // Get latest rate for each currency using selectDistinctOn
-      const rows = await database
-        .selectDistinctOn([fxRatesTable.fromCurrency], {
-          fromCurrency: fxRatesTable.fromCurrency,
-          rate: fxRatesTable.rate,
-        })
-        .from(fxRatesTable)
-        .where(
-          and(
-            inArray(fxRatesTable.fromCurrency, normalizedCurrencies),
-            eq(fxRatesTable.toCurrency, normalizedTo)
-          )
-        )
-        .orderBy(fxRatesTable.fromCurrency, desc(fxRatesTable.date));
-
-      const rateMap = new Map<string, number>();
-
-      // Add self-rate for target currency
-      if (normalizedCurrencies.includes(normalizedTo)) {
-        rateMap.set(normalizedTo, 1);
-      }
-
-      for (const row of rows) {
-        rateMap.set(row.fromCurrency, toSafeNumber(row.rate, 1));
-      }
-
-      return rateMap;
+      return readLatestFxRates(database, fxRatesTable, fromCurrencies, to, householdId);
     },
   };
 }
@@ -280,11 +251,13 @@ export interface FXRateService {
    * More efficient than calling getLatestRate multiple times.
    * @param fromCurrencies - Array of source currency codes
    * @param to - Target currency code
+   * @param householdId - Household whose own manual rates apply first (R12)
    * @returns Map of currency code to rate
    */
   getLatestRatesMap(
     fromCurrencies: string[],
-    to: string
+    to: string,
+    householdId: string
   ): Promise<Map<string, number>>;
 
   /**
@@ -463,9 +436,10 @@ export function createFXRateService(
 
     async getLatestRatesMap(
       fromCurrencies: string[],
-      to: string
+      to: string,
+      householdId: string
     ): Promise<Map<string, number>> {
-      return repository.getLatestRates(fromCurrencies, to);
+      return repository.getLatestRates(fromCurrencies, to, householdId);
     },
 
     clearCache(): void {
@@ -524,7 +498,8 @@ export function getGlobalFXService(): FXRateService {
  */
 export async function getLatestFxRates(
   fromCurrencies: string[],
-  toCurrency: string
+  toCurrency: string,
+  householdId: string
 ): Promise<Map<string, number>> {
-  return getGlobalFXService().getLatestRatesMap(fromCurrencies, toCurrency);
+  return getGlobalFXService().getLatestRatesMap(fromCurrencies, toCurrency, householdId);
 }

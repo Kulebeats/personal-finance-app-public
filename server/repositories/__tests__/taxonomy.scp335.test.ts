@@ -32,8 +32,9 @@ import {
   transactions,
   categories,
   categoryGroups,
+  auditLogs,
 } from "@shared/schema";
-import { merchantService } from "../../modules/merchants/MerchantService";
+import { merchantLifecycleService } from "../../modules/merchants/merchants.lifecycle.service";
 import { tagRepository } from "../TagRepository";
 import { tagService } from "../../modules/tags/tags.service";
 import { categoryRepository } from "../CategoryRepository";
@@ -138,6 +139,7 @@ describe("Taxonomy integrity (SCP-335)", () => {
         await db.delete(categories).where(eq(categories.householdId, hh));
         await db.delete(categoryGroups).where(eq(categoryGroups.householdId, hh));
         await db.delete(accounts).where(eq(accounts.householdId, hh));
+        await db.delete(auditLogs).where(eq(auditLogs.householdId, hh));
         await db.delete(householdMembers).where(eq(householdMembers.householdId, hh));
         await db.delete(households).where(eq(households.id, hh));
       }
@@ -181,7 +183,28 @@ describe("Taxonomy integrity (SCP-335)", () => {
       })
       .returning();
 
-    await merchantService.merge(householdA, source.id, target.id);
+    // Real rows behind the counts: merge recounts from them (ORG-008).
+    for (const [merchantId, rows] of [[source.id, 3], [target.id, 5]] as const) {
+      for (let i = 0; i < rows; i++) {
+        await db.insert(transactions).values({
+          id: randomUUID(),
+          householdId: householdA,
+          accountId: accountA,
+          merchantId,
+          amount: "-1.00",
+          currency: "ZMW",
+          date: "2026-01-10",
+          name: `SCP335 merge row ${i}`,
+          type: "expense",
+          ownerUserId: userA,
+        });
+      }
+    }
+
+    await merchantLifecycleService.merge(source.id, target.id, {
+      householdId: householdA,
+      userId: userA,
+    }, { householdId: householdA, userId: userA, role: "owner" });
 
     const [sourceAfter] = await db
       .select()
@@ -261,7 +284,8 @@ describe("Taxonomy integrity (SCP-335)", () => {
     const { tagId, transactionId } = await seedTagAndTransaction();
 
     // First add: usageCount 0 -> 1.
-    await tagService.addTransactionTags(transactionId, [tagId], householdA, userA);
+    const actor = { householdId: householdA, userId: userA, role: "owner" as const };
+    await tagService.addTransactionTags(transactionId, [tagId], actor);
     const [afterFirst] = await db
       .select()
       .from(tags)
@@ -270,8 +294,8 @@ describe("Taxonomy integrity (SCP-335)", () => {
 
     // Re-tag the same transaction with the same tag twice more. The link is
     // already present, so usageCount must stay at 1.
-    await tagService.addTransactionTags(transactionId, [tagId], householdA, userA);
-    await tagService.addTransactionTags(transactionId, [tagId], householdA, userA);
+    await tagService.addTransactionTags(transactionId, [tagId], actor);
+    await tagService.addTransactionTags(transactionId, [tagId], actor);
 
     const [afterRetag] = await db
       .select()

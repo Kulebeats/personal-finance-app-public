@@ -90,6 +90,34 @@ describe("useThandiChat — send flow", () => {
     );
   });
 
+  it("keeps the current thread when a response carries no usable conversation id (R17 #255 r4)", async () => {
+    const withoutId = Object.fromEntries(
+      Object.entries(chatResponseFixture).filter(([field]) => field !== "conversationId"),
+    );
+    const replies = [
+      chatResponseFixture,
+      { ...withoutId, answerMode: "unavailable" },
+      { ...chatResponseFixture, conversationId: "" },
+      chatResponseFixture,
+    ];
+    const router = createFetchRouter();
+    const chatRoute = router.on("POST", AI_ROUTES.chat, () =>
+      jsonResponse(replies[chatRoute.calls.length - 1] ?? chatResponseFixture),
+    );
+    installDefaultAiRoutes(router);
+    router.install();
+    const { result } = await renderChatHook();
+
+    for (const [index, question] of ["first", "second", "third", "fourth"].entries()) {
+      act(() => result.current.send(`${question} question`));
+      await waitFor(() => expect(result.current.messages).toHaveLength((index + 1) * 2));
+    }
+
+    expect(bodyOf(chatRoute.calls[2]).conversationId).toBe(chatResponseFixture.conversationId);
+    expect(bodyOf(chatRoute.calls[3]).conversationId).toBe(chatResponseFixture.conversationId);
+    expect(result.current.activeConversationId).toBe(chatResponseFixture.conversationId);
+  });
+
   it("ignores send() while a request is already in flight", async () => {
     const router = createFetchRouter();
     let release: (() => void) | undefined;
@@ -329,6 +357,44 @@ describe("useThandiChat — error mapping", () => {
     // Retry resubmits the SAME message without duplicating the user bubble.
     expect(chatRoute.calls).toHaveLength(2);
     expect(bodyOf(chatRoute.calls[1]).message).toBe("flaky question");
+    // R17: the retry carries the SAME client request key, so a first attempt
+    // that actually completed server-side replays instead of charging twice.
+    const firstKey = bodyOf(chatRoute.calls[0]).clientRequestKey;
+    expect(typeof firstKey).toBe("string");
+    expect(bodyOf(chatRoute.calls[1]).clientRequestKey).toBe(firstKey);
+  });
+
+  it("sends a fresh client request key for each new message (R17)", async () => {
+    const router = createFetchRouter();
+    const chatRoute = router.on("POST", AI_ROUTES.chat, () => jsonResponse(chatResponseFixture));
+    installDefaultAiRoutes(router);
+    router.install();
+    const { result } = await renderChatHook();
+
+    act(() => result.current.send("first question"));
+    await waitFor(() => expect(result.current.messages).toHaveLength(2));
+    act(() => result.current.send("second question"));
+    await waitFor(() => expect(result.current.messages).toHaveLength(4));
+
+    const keys = chatRoute.calls.map((call) => bodyOf(call).clientRequestKey);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(String(keys[0])).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
+  });
+
+  it("keeps the answer mode on the assistant message (R17)", async () => {
+    const router = createFetchRouter();
+    router.on("POST", AI_ROUTES.chat, () =>
+      jsonResponse({ ...chatResponseFixture, answerMode: "gemini", providers: { analysis: "anthropic", answer: "gemini" } }),
+    );
+    installDefaultAiRoutes(router);
+    router.install();
+    const { result } = await renderChatHook();
+
+    act(() => result.current.send("which provider?"));
+    await waitFor(() => expect(result.current.messages).toHaveLength(2));
+
+    expect(result.current.messages[1]).toMatchObject({ role: "assistant", answerMode: "gemini" });
   });
 
   it("removes the bubble and restores the draft on a 401 without a chat-specific error (state 5.7)", async () => {

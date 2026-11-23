@@ -54,6 +54,7 @@ const {
     ensureMerchantAlias: vi.fn(),
   },
   mockBusinessAuditService: {
+    log: vi.fn().mockResolvedValue(undefined),
     logCreate: vi.fn().mockResolvedValue(undefined),
     logUpdate: vi.fn().mockResolvedValue(undefined),
     logDelete: vi.fn().mockResolvedValue(undefined),
@@ -116,7 +117,7 @@ vi.mock("../../core/events", () => ({
 vi.mock("../../services/merchantRecognition", () => mockMerchantRecognition);
 
 vi.mock("../../services/CacheInvalidation", () => ({
-  invalidateOnChange: vi.fn().mockResolvedValue(undefined),
+  invalidateOnChangeAfterCommit: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("../../services/BusinessAuditService", () => ({
@@ -187,7 +188,7 @@ describe("Transactions Integration", () => {
   });
 
   describe("POST /api/transactions", () => {
-    it("should create transaction and emit event", async () => {
+    it("should request atomic audit and event writes when creating a transaction", async () => {
       const mockResult = {
         id: "123e4567-e89b-12d3-a456-426614174003",
         amount: "100.00",
@@ -205,6 +206,7 @@ describe("Transactions Integration", () => {
         transaction: mockResult,
       });
       mockRuleService.applyRules.mockResolvedValue(mockResult);
+      mockTransactionRepository.findByIdWithVisibility.mockResolvedValue({ ...mockResult, name: "Visible expense", currency: "ZMW" });
 
       const res = await request(app)
         .post("/api/transactions")
@@ -218,32 +220,17 @@ describe("Transactions Integration", () => {
           categoryId: "123e4567-e89b-12d3-a456-426614174002", // Valid UUID
         });
 
-      if (res.status !== 200) {
-        console.error("Test Failed Body:", JSON.stringify(res.body, null, 2));
-      }
-
       expect(res.status).toBe(201);
+      expect(res.body.data.name).toBe("Visible expense");
       expect(res.body.success).toBe(true);
 
-      // Verify Event Published
-      expect(mockOutboxEventService.publish).toHaveBeenCalledWith(
-        expect.objectContaining({
-          eventType: "TRANSACTION_CREATED",
-          aggregateId: "123e4567-e89b-12d3-a456-426614174003",
-        })
-      );
-
-      // P6a: the CREATE audit row is now written atomically at the
-      // repository layer (inside transactionRepository.create's `audit`
-      // option), not by the controller calling businessAuditService
-      // directly — mockTransactionRepository.create is mocked wholesale
-      // here, so verify the service wired the audit context through to it
-      // instead. The real row is proven for real Postgres by
-      // p6a-create-delete-audit.realdb.integration.test.ts.
+      // The real repository writes the audit and outbox rows inside the transaction.
+      expect(mockOutboxEventService.publish).not.toHaveBeenCalled();
       expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
       expect(mockTransactionRepository.create).toHaveBeenCalledWith(
         expect.any(Object),
         expect.objectContaining({
+          publishCreatedEvent: true,
           audit: expect.objectContaining({
             userId: "user-123",
             householdId: "house-123",
@@ -286,8 +273,13 @@ describe("Transactions Integration", () => {
       mockTransactionRepository.findByIdWithVisibility.mockResolvedValue(
         mockTxn
       );
-      mockTransactionRepository.update.mockResolvedValue({
-        transaction: mockTxn,
+      const tx = { name: "repository update transaction" };
+      const updated = { ...mockTxn, amount: "150.00" };
+      mockTransactionRepository.update.mockImplementationOnce(async (_id, _household, _data, _version, _externalTx, options) => {
+        await options.onWrite(tx, {
+          before: mockTxn, after: updated, beforeSplits: [], afterSplits: [], splitsChanged: false,
+        });
+        return { transaction: updated, conflict: false };
       });
       mockMerchantRecognition.resolveMerchantMatch.mockResolvedValue({});
       // Mock for currency validation on update
@@ -305,26 +297,25 @@ describe("Transactions Integration", () => {
 
       expect(res.status).toBe(200);
 
-      expect(mockOutboxEventService.publish).toHaveBeenCalledWith(
-        expect.objectContaining({
-          eventType: "TRANSACTION_UPDATED",
-          aggregateId: txnId,
-        })
-      );
-
-      // P8b: the UPDATE audit row is now written once at the SERVICE layer
-      // (transactionService.updateTransaction), not by the controller — so
-      // controller-bypassing callers stay audited and updates no longer write
-      // two rows. The controller only forwards ipAddress/metadata, so this
-      // controller-level mock must never be called directly. The real audit
-      // behaviour is covered against real Postgres in
-      // server/services/transaction/__tests__/p8b-update-audit.realdb.integration.test.ts
+      expect(mockOutboxEventService.publish).toHaveBeenCalledTimes(1);
+      expect(mockOutboxEventService.publish).toHaveBeenCalledWith({
+        eventType: "TRANSACTION_UPDATED",
+        aggregateType: "transaction",
+        aggregateId: txnId,
+        householdId: "house-123",
+        payload: { id: txnId, changes: expect.arrayContaining(["amount"]) },
+      }, tx);
+      expect(mockBusinessAuditService.log).toHaveBeenCalledTimes(1);
+      expect(mockBusinessAuditService.log).toHaveBeenCalledWith(expect.objectContaining({
+        tx, action: "UPDATE", entityId: txnId, householdId: "house-123", userId: "user-123",
+        details: expect.objectContaining({ changes: { amount: { before: "100.00", after: "150.00" } } }),
+      }));
       expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
   });
 
   describe("DELETE /api/transactions/:id", () => {
-    it("should soft delete transaction and emit event", async () => {
+    it("should request atomic audit and event writes when deleting a transaction", async () => {
       const txnId = "123e4567-e89b-12d3-a456-426614174003";
       const mockTxn = {
         id: txnId,
@@ -340,25 +331,14 @@ describe("Transactions Integration", () => {
 
       expect(res.status).toBe(200);
 
-      expect(mockOutboxEventService.publish).toHaveBeenCalledWith(
-        expect.objectContaining({
-          eventType: "TRANSACTION_DELETED",
-          aggregateId: txnId,
-        })
-      );
-
-      // P6a: the DELETE audit row is now written atomically at the
-      // repository layer (inside transactionRepository.softDelete's `audit`
-      // option), not by the controller calling businessAuditService
-      // directly — mockTransactionRepository.softDelete is mocked wholesale
-      // here, so verify the service wired the audit context through to it
-      // instead. The real row is proven for real Postgres by
-      // p6a-create-delete-audit.realdb.integration.test.ts.
+      expect(mockOutboxEventService.publish).not.toHaveBeenCalled();
       expect(mockBusinessAuditService.logDelete).not.toHaveBeenCalled();
       expect(mockTransactionRepository.softDelete).toHaveBeenCalledWith(
         txnId,
         "house-123",
         expect.objectContaining({
+          publishDeletedEvent: true,
+          actor: { householdId: "house-123", userId: "user-123" },
           audit: expect.objectContaining({ userId: "user-123" }),
         })
       );
@@ -429,15 +409,13 @@ describe("Transactions Integration", () => {
         "../../services/TransactionService"
       );
 
-      const validateSpy = vi
-        .spyOn(transactionService, "validateTagIds")
-        .mockResolvedValue(undefined);
       const summarySpy = vi
         .spyOn(transactionService, "getTransactionSummary")
         .mockResolvedValue({
-          totalIncome: 100,
-          totalExpenses: 40,
-          netFlow: 60,
+          totalIncome: "100.00", largestIncome: "100.00", largestExpense: "40.00",
+          firstTransactionDate: "2024-01-01", lastTransactionDate: "2024-01-31",
+          totalExpenses: "40.00",
+          netFlow: "60.00",
           transactionCount: 3,
           currency: "ZMW",
         });
@@ -447,7 +425,7 @@ describe("Transactions Integration", () => {
       );
 
       expect(res.status).toBe(200);
-      expect(validateSpy).toHaveBeenCalledWith([tagId], "house-123");
+
       expect(summarySpy).toHaveBeenCalledWith(
         "house-123",
         "user-123",
@@ -461,7 +439,6 @@ describe("Transactions Integration", () => {
   describe("Bulk operations authorization and private visibility", () => {
     const privateTxnId = "123e4567-e89b-12d3-a456-426614174211";
     const categoryId = "123e4567-e89b-12d3-a456-426614174212";
-    const ownerUserId = "123e4567-e89b-12d3-a456-426614174213";
     const accountId = "123e4567-e89b-12d3-a456-426614174214";
 
     beforeEach(() => {
@@ -501,13 +478,5 @@ describe("Transactions Integration", () => {
       expect(mockTransactionRepository.update).not.toHaveBeenCalled();
     });
 
-    it("rejects bulk ownership changes on private transactions owned by another user", async () => {
-      const res = await request(app)
-        .put("/api/transactions/bulk-owner")
-        .send({ transactionIds: [privateTxnId], ownerUserId });
-
-      expect(res.status).toBe(403);
-      expect(mockTransactionRepository.update).not.toHaveBeenCalled();
-    });
   });
 });

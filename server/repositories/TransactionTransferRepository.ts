@@ -11,15 +11,27 @@ import { eq, and, isNull, inArray, sql } from "drizzle-orm";
 import { db } from "../db";
 import {
   transactions,
+  transactionCreateOwnerIntents,
   accounts,
   type Transaction,
 } from "@shared/schema";
+import { EventTypes, outboxEventService } from "../core/events";
 import { withTransaction } from "../utils/withTransaction";
+import { invalidateOnChangeAfterCommit } from "../services/CacheInvalidation";
 import { goalAccountAssignmentService } from "../services/GoalAccountAssignmentService";
 import { Money } from "../core/money";
 import { NotFoundError, ValidationError } from "../utils/errorHandler";
 import { logger } from "../utils/logger";
 import { businessAuditService } from "../services/BusinessAuditService";
+
+import { lockTransactionCreateGrant } from "./TransactionCreateBoundary";
+import { visibleTransactionPredicate } from "../core/authz/transaction-visibility";
+import { authorizedTransferReplay, readTransferReplay, requireTransferPair, requireTransferVisibility } from "./TransferReplay";
+import { TransferCreateRequest, type TransferPosting, directTransferTerms, readPreparedTransfer, transferAmount, transferHash, validateTransferRate } from "../services/TransferCreateRequest";
+import { isPostgresError } from "../utils/postgresError";
+import { buildPostingReceipt, readPostingEffect } from "./TransactionPostingEffect";
+
+export { requireTransferPair, requireTransferVisibility } from "./TransferReplay";
 
 export interface TransferDeleteOptions {
   /**
@@ -51,34 +63,31 @@ export class TransactionTransferRepository {
     fromAccountId: string,
     toAccountId: string,
     amount: number | string,
-    commonData: {
-      householdId: string;
-      ownerUserId: string;
-      date: string;
-      name?: string;
-      notes?: string;
-      idempotencyKey?: string;
-      currency?: string;
-      // FIX DATA-TRANSFER-001: Add destination amount/currency for FX transfers
-      destinationAmount?: string;
-      destinationCurrency?: string;
-      // FX fields for cross-currency transfers (stored on BOTH rows)
-      fxRate?: string;
-      fxBaseCurrency?: string;
-      fxQuoteCurrency?: string;
-      fxTimestamp?: Date;
-      fxSource?: string;
-      convertedAmount?: string;
-    },
+    input: TransferPosting | TransferCreateRequest,
   ): Promise<{
     outflow: Transaction;
     inflow: Transaction;
     isDuplicate: boolean;
   }> {
+    fromAccountId = fromAccountId.toLowerCase();
+    toAccountId = toAccountId.toLowerCase();
+    const request = input instanceof TransferCreateRequest ? readPreparedTransfer(input) : undefined;
+    const commonData = request?.posting ?? structuredClone(input as TransferPosting);
+    commonData.householdId = commonData.householdId.toLowerCase();
+    commonData.ownerUserId = commonData.ownerUserId.toLowerCase();
+    amount = transferAmount(amount).toString();
+    validateTransferRate(commonData.fxRate);
+    if (request && (request.from !== fromAccountId || request.to !== toAccountId || request.amount !== String(amount))) {
+      throw new ValidationError("Transfer posting does not match the request");
+    }
+    const terms = commonData.idempotencyKey && (request?.terms ?? directTransferTerms(fromAccountId, toAccountId, amount, commonData));
     // Generate shared transfer ID
     const transferTransactionId = crypto.randomUUID();
 
     const result = await withTransaction(async (tx) => {
+      const actor = { householdId: commonData.householdId, userId: commonData.ownerUserId };
+      const grant = await lockTransactionCreateGrant(tx, actor.householdId, { createActor: actor });
+      if (!grant) throw new NotFoundError("Transfer not found");
       // SCP-320: Lock BOTH accounts FOR UPDATE before any read-then-write. Locking
       // in a consistent id order (regardless of transfer direction) prevents
       // deadlocks between A->B and B->A transfers running concurrently. These locks
@@ -87,62 +96,37 @@ export class TransactionTransferRepository {
       const lockedAccounts = await tx
         .select()
         .from(accounts)
-        .where(inArray(accounts.id, [fromAccountId, toAccountId]))
+        .where(and(inArray(accounts.id, [fromAccountId, toAccountId]), eq(accounts.householdId, commonData.householdId), isNull(accounts.deletedAt)))
         .orderBy(accounts.id)
         .for("update");
 
       const lockedFrom = lockedAccounts.find((a) => a.id === fromAccountId);
       const lockedTo = lockedAccounts.find((a) => a.id === toAccountId);
-      if (!lockedFrom || !lockedTo) {
+      if (!lockedFrom || !lockedTo || fromAccountId === toAccountId) {
         // An account was removed between the service's visibility check and this
         // lock (rare TOCTOU). Fail loudly rather than write against a missing FK.
         throw new NotFoundError("Transfer account not found");
       }
 
-      // SCP-320: Idempotency check INSIDE the transaction. Because the account
-      // locks above serialize concurrent same-key requests, the second request
-      // sees the first's committed row here and short-circuits — instead of both
-      // racing past an out-of-txn check and colliding on the unique index.
-      if (commonData.idempotencyKey) {
-        const [existing] = await tx
-          .select()
-          .from(transactions)
-          .where(
-            and(
-              eq(transactions.idempotencyKey, commonData.idempotencyKey),
-              eq(transactions.householdId, commonData.householdId),
-            ),
-          )
-          .limit(1);
-
-        if (existing?.transferTransactionId) {
-          const pair = await tx
-            .select()
-            .from(transactions)
-            .where(
-              and(
-                eq(
-                  transactions.transferTransactionId,
-                  existing.transferTransactionId,
-                ),
-                eq(transactions.householdId, commonData.householdId),
-                isNull(transactions.deletedAt),
-              ),
-            )
-            .limit(2);
-          const dupOutflow = pair.find((t) => !t.isTransferIn);
-          const dupInflow = pair.find((t) => t.isTransferIn);
-          if (dupOutflow && dupInflow) {
-            return { outflow: dupOutflow, inflow: dupInflow, isDuplicate: true };
-          }
-          // Key matched but the live pair is gone (e.g. soft-deleted) — fall
-          // through and create a fresh transfer, matching prior behavior.
-        }
+      requireTransferVisibility(lockedAccounts, actor.userId);
+      const inflowAmount = commonData.destinationAmount ?? String(amount);
+      if (lockedFrom.currency === lockedTo.currency && !new Money(inflowAmount).equals(new Money(amount))) {
+        throw new ValidationError("Transfer amounts must match within one currency");
       }
 
-      // SCP-320: Overdraft guard on the locked source balance. Only asset accounts
-      // are guarded — credit cards / loans (isAsset === false) are expected to go
-      // negative. Money comparison keeps decimal precision (no float drift).
+      if (commonData.idempotencyKey && terms) {
+        const replay = await readTransferReplay(tx, grant, commonData.idempotencyKey, terms,
+          { fromAccountId, toAccountId, amount, inflowAmount, currency: commonData.currency, destinationCurrency: commonData.destinationCurrency });
+        if (replay) return replay;
+      }
+
+      if ((commonData.currency && commonData.currency !== lockedFrom.currency) ||
+          (commonData.destinationCurrency && commonData.destinationCurrency !== lockedTo.currency) ||
+          (lockedFrom.currency !== lockedTo.currency && (!commonData.destinationAmount || !commonData.destinationCurrency))) {
+        throw new ValidationError("Transfer account denominations changed", [{ field: "currency", message: "Refresh the transfer quote" }]);
+      }
+      const outgoing = buildPostingReceipt(lockedFrom, { type: "transfer", amount: String(amount), currency: lockedFrom.currency, isTransferIn: false });
+      const incoming = buildPostingReceipt(lockedTo, { type: "transfer", amount: inflowAmount, currency: lockedTo.currency, isTransferIn: true });
       if (lockedFrom.isAsset) {
         const sourceBalance = new Money(lockedFrom.balance, lockedFrom.currency);
         const debit = new Money(String(amount), lockedFrom.currency);
@@ -156,17 +140,27 @@ export class TransactionTransferRepository {
         }
       }
 
+      const outflowId = crypto.randomUUID(), inflowId = crypto.randomUUID();
+      if (commonData.idempotencyKey && terms) {
+        await tx.insert(transactionCreateOwnerIntents).values({
+          transactionId: outflowId, idempotencyKey: commonData.idempotencyKey, householdId: actor.householdId,
+          actorUserId: actor.userId, ownerSelected: false, operation: "transfer",
+          transferGroupId: transferTransactionId, transferInflowId: inflowId,
+          requestDigest: "t1:" + transferHash([terms, outflowId, inflowId, transferTransactionId]),
+        });
+      }
       // Create outflow transaction
       const outflowResult = await tx
         .insert(transactions)
         .values({
+          id: outflowId,
           householdId: commonData.householdId,
           accountId: fromAccountId,
           ownerUserId: commonData.ownerUserId,
           date: commonData.date,
           name: commonData.name || "Transfer",
           amount: String(amount),
-          currency: commonData.currency,
+          ...outgoing,
           type: "transfer" as const,
           isTransferIn: false,
           transferAccountId: toAccountId,
@@ -186,20 +180,19 @@ export class TransactionTransferRepository {
 
       // FIX DATA-TRANSFER-001: Use destination amount for inflow transaction
       // For cross-currency transfers, inflow uses converted amount in destination currency
-      const inflowAmount = commonData.destinationAmount || String(amount);
-      const inflowCurrency = commonData.destinationCurrency || commonData.currency;
 
       // Create inflow transaction
       const inflowResult = await tx
         .insert(transactions)
         .values({
+          id: inflowId,
           householdId: commonData.householdId,
           accountId: toAccountId,
           ownerUserId: commonData.ownerUserId,
           date: commonData.date,
           name: commonData.name || "Transfer",
           amount: inflowAmount,
-          currency: inflowCurrency,
+          ...incoming,
           type: "transfer" as const,
           isTransferIn: true,
           transferAccountId: fromAccountId,
@@ -217,33 +210,52 @@ export class TransactionTransferRepository {
         })
         .returning();
 
-      // Update from account balance (subtract)
+      // Apply each leg’s recorded effect in its own account denomination.
       await tx
         .update(accounts)
         .set({
-          balance: sql`${accounts.balance} - ${amount}`,
+          balance: sql`${accounts.balance} + ${outgoing.postedBalanceDelta}::numeric`,
           updatedAt: new Date(),
         })
         .where(eq(accounts.id, fromAccountId));
 
-      // FIX DATA-TRANSFER-001: Update destination balance with converted amount
-      // For cross-currency transfers, add the converted amount to destination account
       await tx
         .update(accounts)
         .set({
-          balance: sql`${accounts.balance} + ${inflowAmount}`,
+          balance: sql`${accounts.balance} + ${incoming.postedBalanceDelta}::numeric`,
           updatedAt: new Date(),
         })
         .where(eq(accounts.id, toAccountId));
 
+      if (commonData.audit) {
+        await businessAuditService.logCreate({ tx, userId: actor.userId, householdId: actor.householdId,
+          entityId: outflowResult[0].id, entityType: "transaction", ipAddress: commonData.audit.ipAddress,
+          metadata: { isTransfer: true }, newValue: { fromAccountId, toAccountId, amount: outflowResult[0].amount,
+            inflowTransactionId: inflowResult[0].id } });
+      }
+      for (const leg of [outflowResult[0], inflowResult[0]]) {
+        await outboxEventService.publish({
+          eventType: EventTypes.TRANSACTION_CREATED, aggregateType: "transaction",
+          aggregateId: leg.id, householdId: leg.householdId,
+          payload: { id: leg.id, type: leg.type, amount: leg.amount, accountId: leg.accountId },
+        }, tx);
+      }
       return {
         outflow: outflowResult[0],
         inflow: inflowResult[0],
         isDuplicate: false,
       };
+    }).catch(async (error: unknown) => {
+      if (commonData.idempotencyKey && terms && isPostgresError(error, "23505", "idempotency")) {
+        const replay = await authorizedTransferReplay(commonData.householdId, commonData.ownerUserId, commonData.idempotencyKey, terms,
+          { fromAccountId, toAccountId, amount, inflowAmount: commonData.destinationAmount ?? String(amount),
+            currency: commonData.currency, destinationCurrency: commonData.destinationCurrency });
+        if (replay) return replay;
+        throw new NotFoundError("Transfer not found");
+      }
+      throw error;
     });
 
-    // Skip goal re-sync for an idempotent replay — nothing changed.
     if (!result.isDuplicate) {
       try {
         await goalAccountAssignmentService.syncGoalsForAccount(
@@ -261,6 +273,7 @@ export class TransactionTransferRepository {
           error,
         });
       }
+      await invalidateOnChangeAfterCommit("transaction", result.outflow.householdId);
     }
 
     return result;
@@ -285,6 +298,8 @@ export class TransactionTransferRepository {
     const accountsToSyncAfterCommit = new Set<string>();
 
     const deletedCount = await withTransaction(async (tx) => {
+      const userId = options?.audit?.userId;
+      if (userId) await lockTransactionCreateGrant(tx, householdId, { createActor: { householdId, userId } });
       const lockedPair = await tx
         .select()
         .from(transactions)
@@ -295,10 +310,11 @@ export class TransactionTransferRepository {
             isNull(transactions.deletedAt),
           ),
         )
-        .limit(2)
+        .orderBy(transactions.id)
         .for("update");
 
       if (lockedPair.length === 0) return 0;
+      requireTransferPair(lockedPair);
 
       const affectedAccountIds = Array.from(
         new Set(lockedPair.map((leg) => leg.accountId)),
@@ -307,7 +323,7 @@ export class TransactionTransferRepository {
       const lockedAccounts = await tx
         .select()
         .from(accounts)
-        .where(inArray(accounts.id, affectedAccountIds))
+        .where(and(inArray(accounts.id, affectedAccountIds), eq(accounts.householdId, householdId), isNull(accounts.deletedAt)))
         .orderBy(accounts.id)
         .for("update");
 
@@ -315,6 +331,7 @@ export class TransactionTransferRepository {
         throw new NotFoundError("Transfer account not found");
       }
 
+      if (userId) requireTransferVisibility([...lockedPair, ...lockedAccounts], userId);
       const now = new Date();
       await tx
         .update(transactions)
@@ -342,20 +359,12 @@ export class TransactionTransferRepository {
         });
       }
 
-      // Reverse each leg's balance impact from the LOCKED rows. Outflow legs
-      // subtracted from their account, so reversal adds; inflow legs added, so
-      // reversal subtracts. Aggregate per account (self-transfer safety).
-      const balanceDeltas = new Map<string, Money>();
       for (const leg of lockedPair) {
-        const amount = new Money(leg.amount, leg.currency ?? undefined);
-        const reversal = leg.isTransferIn ? amount.negated() : amount;
-        const current =
-          balanceDeltas.get(leg.accountId) ?? Money.zero(reversal.currency);
-        balanceDeltas.set(leg.accountId, current.add(reversal));
-      }
-
-      for (const [accountId, delta] of balanceDeltas.entries()) {
-        if (delta.isZero()) continue;
+        const account = lockedAccounts.find(a => a.id === leg.accountId)!;
+        const delta = readPostingEffect(account, leg).delta.negated();
+        if (account.isAsset && delta.lt(0) && new Money(account.balance, account.currency).add(delta).lt(0)) {
+          throw new ValidationError("Insufficient funds to reverse transfer", [{ field: "amount", message: "The receiving asset cannot cover the reversal" }]);
+        }
 
         await tx
           .update(accounts)
@@ -363,8 +372,12 @@ export class TransactionTransferRepository {
             balance: sql`${accounts.balance} + ${delta.toString()}::numeric`,
             updatedAt: new Date(),
           })
-          .where(eq(accounts.id, accountId));
-        accountsToSyncAfterCommit.add(accountId);
+          .where(eq(accounts.id, account.id));
+        await outboxEventService.publish({
+          eventType: EventTypes.TRANSACTION_DELETED, aggregateType: "transaction",
+          aggregateId: leg.id, householdId, payload: { id: leg.id },
+        }, tx);
+        accountsToSyncAfterCommit.add(account.id);
       }
 
       return lockedPair.length;
@@ -397,6 +410,7 @@ export class TransactionTransferRepository {
   async findTransferPair(
     transferTransactionId: string,
     householdId: string,
+    userId?: string,
   ): Promise<Transaction[]> {
     return await db
       .select()
@@ -406,9 +420,9 @@ export class TransactionTransferRepository {
           eq(transactions.transferTransactionId, transferTransactionId),
           eq(transactions.householdId, householdId),
           isNull(transactions.deletedAt),
+          userId ? visibleTransactionPredicate({ householdId, userId, role: "member" }) : undefined,
         ),
-      )
-      .limit(2); // Optimization: transfer pair is max 2
+      );
   }
 }
 

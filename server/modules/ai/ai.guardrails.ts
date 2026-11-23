@@ -6,9 +6,15 @@
  * @module ai/ai.guardrails
  */
 
-import { GEMINI_TOOL_NAMES, type GeminiToolCall } from "./ai.gemini";
+import type { ProviderToolCall as GeminiToolCall } from "./ai.provider.types";
+import { AI_TOOL_NAMES as GEMINI_TOOL_NAMES } from "./ai.tool-definitions";
 
-export const DEFAULT_AI_REQUEST_TOKEN_BUDGET = 2000;
+/**
+ * Per-question token budget across every provider call (owner ruling, 21 Nov).
+ * The first step alone (system prompt + tool declarations + question) used
+ * about 2,600 tokens on Claude, so 2000 left nothing for the answer.
+ */
+export const DEFAULT_AI_REQUEST_TOKEN_BUDGET = 8000;
 export const AI_TOOL_CALL_CAP = 2;
 
 /**

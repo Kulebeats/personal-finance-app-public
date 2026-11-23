@@ -10,6 +10,8 @@
  */
 
 import { Money } from "../../money";
+import { readBudgetMoney } from "../../money/budget-denomination";
+import { CalculationError } from "../errors";
 import type { MoneyDto } from "@shared/money";
 import type {
   Frequency,
@@ -46,6 +48,8 @@ export interface BudgetInput {
   amount: string;
   currency: string;
   periodType: "monthly" | "yearly";
+  /** An explicit month overrides a recurring default only for that month. */
+  targetPeriod?: string;
 }
 
 export interface CategoryAverageInput {
@@ -154,16 +158,6 @@ export function generateForecast(
     dataSourcesUsed.add("recurring");
   }
 
-  // Calculate budgeted expenses (only use if no recurring expense covers it)
-  const budgetedExpensesMonthly = budgets.reduce((sum, budget) => {
-    const monthlyAmount = normalizeBudgetToMonthly(budget, baseCurrency);
-    return sum.add(monthlyAmount);
-  }, Money.zero(baseCurrency));
-
-  if (!budgetedExpensesMonthly.isZero()) {
-    dataSourcesUsed.add("budgets");
-  }
-
   // Calculate average-based projections (fallback)
   const avgIncome = categoryAverages
     .filter((c) => c.type === "income")
@@ -187,16 +181,7 @@ export function generateForecast(
   // 1. Recurring rules (most reliable)
   // 2. Budgets (for expenses not covered by recurring)
   // 3. Averages (fallback)
-  const projectedIncome = !recurringIncomeMonthly.isZero()
-    ? recurringIncomeMonthly
-    : avgIncome;
-
-  // For expenses: use recurring + any additional from budgets/averages
-  const projectedExpenses = !recurringExpensesMonthly.isZero()
-    ? recurringExpensesMonthly
-    : !budgetedExpensesMonthly.isZero()
-      ? budgetedExpensesMonthly
-      : avgExpenses;
+  // Applied per month below, after each rule's end date (R14).
 
   // Add warnings if data sources are limited
   if (incomeRules.length === 0 && avgIncome.isZero()) {
@@ -214,6 +199,20 @@ export function generateForecast(
     periodDate.setUTCMonth(start.getUTCMonth() + i);
 
     const periodStr = periodDate.toISOString().split("T")[0];
+    const monthBudgets = new Map<string, BudgetInput>();
+    for (const budget of budgets) if (!budget.targetPeriod) monthBudgets.set(budget.categoryId, budget);
+    for (const budget of budgets) if (budget.targetPeriod === periodStr.slice(0, 7)) monthBudgets.set(budget.categoryId, budget);
+    const budgetedExpensesMonthly = Array.from(monthBudgets.values()).reduce((sum, budget) =>
+      sum.add(normalizeBudgetToMonthly(budget, baseCurrency)), Money.zero(baseCurrency));
+    if (!budgetedExpensesMonthly.isZero()) dataSourcesUsed.add("budgets");
+    // R14: a rule's inclusive end date drops it from every month that starts after it.
+    // The source choice (recurring vs fallback) stays horizon-wide, so a month after
+    // the last rule ends projects zero rather than re-adding history through averages.
+    const periodIncome = recurringMonthlyFor(incomeRules, periodStr, baseCurrency);
+    const periodRecurringExpenses = recurringMonthlyFor(expenseRules, periodStr, baseCurrency);
+    const projectedIncome = !recurringIncomeMonthly.isZero() ? periodIncome : avgIncome;
+    const projectedExpenses = !recurringExpensesMonthly.isZero() ? periodRecurringExpenses
+      : monthBudgets.size > 0 ? budgetedExpensesMonthly : avgExpenses;
     const periodLabel = periodDate.toLocaleDateString("en-US", {
       month: "short",
       year: "numeric",
@@ -236,8 +235,8 @@ export function generateForecast(
       savingsRate,
       isForecast: true,
       sources: {
-        recurringIncome: recurringIncomeMonthly,
-        recurringExpenses: recurringExpensesMonthly,
+        recurringIncome: periodIncome,
+        recurringExpenses: periodRecurringExpenses,
         budgetedExpenses: budgetedExpensesMonthly,
         averageIncome: avgIncome,
         averageExpenses: avgExpenses,
@@ -256,16 +255,40 @@ export function generateForecast(
 // Normalization Helpers
 // ============================================================================
 
+/** Last day (YYYY-MM-DD) of the month starting `periodStart`. */
+function monthEnd(periodStart: string): string {
+  const end = new Date(periodStart + "T00:00:00Z");
+  end.setUTCMonth(end.getUTCMonth() + 1, 0);
+  return end.toISOString().split("T")[0];
+}
+
 /**
- * Normalize a recurring rule amount to a monthly equivalent.
+ * Monthly recurring total for the month starting `periodStart`, counting only
+ * rules already due by the end of that month (A-37) whose inclusive end date
+ * is on or after its start (R14).
+ */
+function recurringMonthlyFor(rules: RecurringRuleInput[], periodStart: string, targetCurrency: string): Money {
+  const periodEnd = monthEnd(periodStart);
+  return rules
+    .filter((rule) => rule.nextDueDate <= periodEnd && (!rule.endDate || rule.endDate >= periodStart))
+    .reduce((sum, rule) => sum.add(normalizeToMonthly(rule, targetCurrency)), Money.zero(targetCurrency));
+}
+
+/**
+ * Normalize a recurring rule amount to a monthly equivalent in its own unit.
+ * A-10: the caller converts a rule into `targetCurrency` first; a rule still in
+ * another unit is refused rather than relabelled.
  */
 export function normalizeToMonthly(
   rule: RecurringRuleInput,
   targetCurrency: string
 ): Money {
-  // Note: For simplicity, we assume currency is already converted
-  // In production, this would use FX rates
-  const amount = new Money(rule.amount, targetCurrency);
+  if (rule.currency !== targetCurrency) {
+    throw new CalculationError("INVALID_CURRENCY", {
+      functionName: "normalizeToMonthly", from: rule.currency, to: targetCurrency,
+    });
+  }
+  const amount = new Money(rule.amount, rule.currency);
 
   switch (rule.frequency) {
     case "daily":
@@ -310,7 +333,7 @@ export function normalizeBudgetToMonthly(
   budget: BudgetInput,
   targetCurrency: string
 ): Money {
-  const amount = new Money(budget.amount, targetCurrency);
+  const amount = readBudgetMoney(budget.amount, budget.currency, targetCurrency);
 
   switch (budget.periodType) {
     case "monthly":

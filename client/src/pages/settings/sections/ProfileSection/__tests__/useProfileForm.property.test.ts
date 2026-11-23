@@ -55,13 +55,16 @@ const validBirthdayArb = fc.integer({
   max: Date.now(),
 }).map(timestamp => new Date(timestamp));
 
+// The API returns the Postgres date column as "YYYY-MM-DD".
+const apiBirthdayArb = validBirthdayArb.map(d => d.toISOString().slice(0, 10));
+
 // Arbitrary for valid profile API data
 const validApiDataArb = fc.record({
   fullName: fc.string({ minLength: 1, maxLength: 100 }).filter(s => s.trim().length > 0),
   firstName: fc.option(fc.string({ maxLength: 50 }), { nil: undefined }),
   lastName: fc.option(fc.string({ maxLength: 50 }), { nil: undefined }),
   displayName: fc.option(fc.string({ maxLength: 50 }), { nil: undefined }),
-  birthday: fc.option(validBirthdayArb.map(d => d.toISOString()), { nil: undefined }),
+  birthday: fc.option(apiBirthdayArb, { nil: undefined }),
   birthdayHideYear: fc.boolean(),
   timezone: fc.constantFrom('Africa/Lusaka', 'UTC', 'America/New_York'),
   gender: genderArb,
@@ -84,7 +87,6 @@ const validApiDataArb = fc.record({
   employmentStatus: employmentStatusArb,
   investmentGoal: investmentGoalArb,
   riskTolerance: riskToleranceArb,
-  salaryRange: fc.option(fc.string(), { nil: undefined }),
   profilePicture: fc.option(fc.webUrl(), { nil: undefined }),
 });
 
@@ -150,7 +152,7 @@ describe('Property 2: Form Data Round-Trip Integrity', () => {
       fc.property(
         fc.record({
           fullName: fc.string({ minLength: 1, maxLength: 100 }).filter(s => s.trim().length > 0),
-          birthday: validBirthdayArb.map(d => d.toISOString()),
+          birthday: apiBirthdayArb,
           timezone: fc.constant('Africa/Lusaka'),
           incomeFrequency: fc.constant('monthly' as const),
           birthdayHideYear: fc.boolean(),
@@ -159,14 +161,8 @@ describe('Property 2: Form Data Round-Trip Integrity', () => {
           const formData = transformApiToFormData(apiData);
           const backToApi = transformFormToApiData(formData);
           
-          // Birthday should be preserved (as ISO string)
-          if (apiData.birthday) {
-            expect(backToApi.birthday).toBeDefined();
-            // Compare dates (ignoring milliseconds differences)
-            const originalDate = new Date(apiData.birthday);
-            const roundTripDate = new Date(backToApi.birthday as string);
-            expect(originalDate.toDateString()).toBe(roundTripDate.toDateString());
-          }
+          // The calendar day comes back exactly, in any zone
+          expect(backToApi.birthday).toBe(apiData.birthday);
           
           return true;
         }
@@ -196,7 +192,7 @@ describe('Property 2: Form Data Round-Trip Integrity', () => {
           expect(backToApi.phoneNumberMobile).toBeNull();
           expect(backToApi.phoneNumberWork).toBeNull();
           expect(backToApi.phoneNumberHome).toBeNull();
-          expect(backToApi.profilePicture).toBeNull();
+          expect("profilePicture" in backToApi).toBe(false);
           
           return true;
         }

@@ -45,3 +45,21 @@ tmpclaude*
 .github/skills/
 .kiro/skills/
 .claude/settings.local.json
+private-exports/
+
+# Uploaded user files (OPS-001): the legacy uploads/ disk and the local
+# ObjectStore root. User files never belong in git; they live in the store.
+uploads/
+private-objects/
+
+# Test coverage output (OPS-011)
+coverage/
+# Test run reports (OPS-011): JUnit XML and captured runner output.
+*junit*.xml
+test-results.txt
+# Generated test and tool artifacts (public-cutover scan, #279)
+server/coverage/
+server/test-results.txt
+e2e-junit.xml
+**/__pycache__/
+*.pyc

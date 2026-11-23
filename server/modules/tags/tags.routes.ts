@@ -5,12 +5,12 @@
 import { Router } from "express";
 import { householdGuard } from "../../middleware/householdGuard";
 import { requireRole } from "../../middleware/validateEntity";
-import { generalLimiter } from "../../middleware/rateLimit";
 import { tagsController } from "./tags.controller";
+import { requireCapability } from "../../core/authz/requireCapability";
 
 const router = Router();
 router.use(householdGuard);
-router.use(generalLimiter);
+router.use(requireCapability("financial.read"));
 
 // Tag analytics (must be before /:id routes)
 router.get("/analytics", tagsController.getAnalytics);

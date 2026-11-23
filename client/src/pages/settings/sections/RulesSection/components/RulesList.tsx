@@ -8,11 +8,12 @@ type RulesListProps = {
   rules: Rule[] | undefined;
   isCreating: boolean;
   goalNamesById: Map<string, string>;
+  categoryNamesById: Map<string, string>;
   onToggle: (ruleId: string, enabled: boolean) => void;
   onEdit: (rule: Rule) => void;
   onDelete: (ruleId: string) => void;
   onTest: (ruleId: string) => void;
-  onMove: (index: number, direction: "up" | "down") => void;
+  onMove: (ruleId: string, direction: "up" | "down") => void;
   onStartQuick: () => void;
   isDeleting: boolean;
   isTesting: boolean;
@@ -22,6 +23,7 @@ export function RulesList({
   rules,
   isCreating,
   goalNamesById,
+  categoryNamesById,
   onToggle,
   onEdit,
   onDelete,
@@ -59,12 +61,13 @@ export function RulesList({
           key={rule.id}
           rule={rule}
           goalNamesById={goalNamesById}
+          categoryNamesById={categoryNamesById}
           onToggle={(enabled) => onToggle(rule.id, enabled)}
           onEdit={() => onEdit(rule)}
           onDelete={() => onDelete(rule.id)}
           onTest={() => onTest(rule.id)}
-          onMoveUp={() => onMove(index, "up")}
-          onMoveDown={() => onMove(index, "down")}
+          onMoveUp={() => onMove(rule.id, "up")}
+          onMoveDown={() => onMove(rule.id, "down")}
           isFirst={index === 0}
           isLast={index === rules.length - 1}
           isDeleting={isDeleting}

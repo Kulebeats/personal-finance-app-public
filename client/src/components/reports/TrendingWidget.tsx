@@ -40,6 +40,8 @@ interface TrendingWidgetProps {
   onHide?: () => void;
   className?: string;
   onBarClick?: (datum: TrendingDataPoint) => void;
+  average?: { value: number; label: string } | null;
+  formatValue?: (value: number) => string;
 }
 
 // ============================================================================
@@ -58,14 +60,18 @@ export function TrendingWidget({
   onHide,
   className,
   onBarClick,
+  average,
+  formatValue,
 }: TrendingWidgetProps) {
   const { formatCurrency } = useFormatters();
+  const format = formatValue ?? formatCurrency;
 
-  const average = useMemo(() => {
-    if (!data.length) return 0;
+  const reference = useMemo(() => {
+    if (average !== undefined) return average;
+    if (!data.length) return null;
     const sum = data.reduce((acc, curr) => acc + curr.value, 0);
-    return sum / data.length;
-  }, [data]);
+    return { value: sum / data.length, label: "Avg" };
+  }, [average, data]);
 
   const isEmpty = !isLoading && data.length === 0;
 
@@ -124,23 +130,23 @@ export function TrendingWidget({
               <ChartTooltip
                 content={
                   <ChartTooltipContent
-                    formatter={(v) => formatCurrency(Number(v))}
+                    formatter={(v) => format(Number(v))}
                   />
                 }
               />
-              <ReferenceLine
-                y={average}
+              {reference && <ReferenceLine
+                y={reference.value}
                 stroke={avgColor}
                 strokeWidth={2}
                 strokeDasharray="4 4"
                 label={{
-                  value: `Avg: ${formatCurrency(average)}`,
+                  value: `${reference.label}: ${format(reference.value)}`,
                   position: "insideTopRight",
                   fill: avgColor,
                   fontSize: 10,
                   fontWeight: "bold",
                 }}
-              />
+              />}
               <Bar
                 dataKey="value"
                 radius={4}

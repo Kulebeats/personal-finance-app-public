@@ -20,12 +20,21 @@ import {
   parseMoneyString,
   moneyValueToDecimal,
   subtractMoneyValues,
+  type MoneyDto,
+  type MoneyValue,
 } from "@/lib/money";
 
 // Synthetic id of the server's "No merchant" breakdown bucket
 // (SpendingReportRepository). It is not a merchant uuid, so it must never be
 // sent as a trend filter.
 export const NO_MERCHANT_ID = "no-merchant";
+
+// A zero in the report currency, or a bare zero while that currency is
+// unknown: never a guessed one (a kwacha household must not see US$0.00).
+const zeroIn = (currency: string | null): MoneyValue =>
+  currency ? zeroMoneyDto(currency) : "0.00";
+const sumIn = (values: MoneyDto[], currency: string | null): MoneyValue =>
+  values.length > 0 ? sumMoneyDto(values) : zeroIn(currency);
 
 interface UseMerchantFiltersOptions {
   yearRange: { from: string; to: string };
@@ -167,21 +176,17 @@ export function useMerchantFilters({
   }, [filteredItems, selectedMerchantId]);
 
   const total = useMemo(() => {
-    const baseCurrency =
-      merchantBreakdown?.range?.baseCurrency || "USD";
-    if (!merchantBreakdown) return zeroMoneyDto(baseCurrency);
+    const baseCurrency = merchantBreakdown?.range?.baseCurrency || null;
+    if (!merchantBreakdown) return zeroIn(baseCurrency);
     const hasFilters =
       search.trim().length > 0 ||
       maxValue !== undefined ||
       hasMinFilter ||
       categoryFilter !== "all";
     if (!hasFilters) {
-      return merchantBreakdown.total || zeroMoneyDto(baseCurrency);
+      return merchantBreakdown.total || zeroIn(baseCurrency);
     }
-    return sumMoneyDto(
-      filteredItems.map((item) => item.value),
-      baseCurrency
-    );
+    return sumIn(filteredItems.map((item) => item.value), baseCurrency);
   }, [
     merchantBreakdown,
     filteredItems,
@@ -199,12 +204,8 @@ export function useMerchantFilters({
     const baseCurrency =
       categoryBreakdown?.range?.baseCurrency ||
       merchantBreakdown?.range?.baseCurrency ||
-      "USD";
-    if (categoryItems.length === 0) return zeroMoneyDto(baseCurrency);
-    return sumMoneyDto(
-      categoryItems.map((item) => item.value),
-      baseCurrency
-    );
+      null;
+    return sumIn(categoryItems.map((item) => item.value), baseCurrency);
   }, [categoryItems, categoryBreakdown, merchantBreakdown]);
   const formattedTrendData = useMemo(() => {
     if (!trendData?.series?.length) return [];

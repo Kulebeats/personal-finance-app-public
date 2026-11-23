@@ -7,11 +7,12 @@ import {
 } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { AIConsentStatus } from "@/hooks/use-settings";
+import type { AIConsentDecision, AIConsentStatus } from "@/hooks/use-settings";
+import { AI_DISCLOSURE_VERSION, AIDisclosure } from "@/features/ai/components/AIDisclosure";
 
 interface AIFeaturesCardProps {
   preferences?: AIConsentStatus;
-  onUpdate: (consentGiven: boolean) => void;
+  onUpdate: (decision: AIConsentDecision) => void;
 }
 
 export function AIFeaturesCard({ preferences, onUpdate }: AIFeaturesCardProps) {
@@ -49,14 +50,15 @@ export function AIFeaturesCard({ preferences, onUpdate }: AIFeaturesCardProps) {
                 Household-wide setting
               </h3>
               <div className="mt-2 text-sm text-muted-foreground">
-                <p>
-                  Enabling AI features shares household financial data with an
-                  external AI provider to power the assistant and insights.
-                  Only household admins can change this setting.
-                  {preferences?.needsReconsent
-                    ? " Consent terms have changed since you last agreed — please review and re-confirm."
-                    : ""}
-                </p>
+                <div className="space-y-2">
+                  <AIDisclosure />
+                  <p>
+                    Only household owners and admins can change this setting.
+                    {preferences?.needsReconsent
+                      ? " Consent terms have changed since you last agreed — please review and re-confirm."
+                      : ""}
+                  </p>
+                </div>
               </div>
             </div>
           </div>
@@ -73,7 +75,13 @@ export function AIFeaturesCard({ preferences, onUpdate }: AIFeaturesCardProps) {
           <Switch
             id="ai-consent-given"
             checked={preferences?.consentGiven ?? false}
-            onCheckedChange={(checked) => onUpdate(checked)}
+            onCheckedChange={(checked) =>
+              onUpdate(
+                checked
+                  ? { consentGiven: true, consentVersion: AI_DISCLOSURE_VERSION }
+                  : { consentGiven: false },
+              )
+            }
           />
         </div>
       </CardContent>

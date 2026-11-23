@@ -20,6 +20,7 @@ import {
   transactionTags,
   users,
   households,
+  householdMembers,
 } from "@shared/schema";
 import { receiptTransactionService } from "../transaction.service";
 import { ConflictError } from "../../../utils/errorHandler";
@@ -65,6 +66,7 @@ describe("linkReceiptToTransaction race safety (SCP-337)", () => {
       failedLoginAttempts: user.failedLoginAttempts,
       lockedUntil: user.lockedUntil,
     });
+    await db.insert(householdMembers).values({ householdId, userId, role: "owner" });
     accountId = randomUUID();
     await db.insert(accounts).values({
       id: accountId,

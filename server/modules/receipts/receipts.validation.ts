@@ -87,7 +87,7 @@ export const ocrResultsSchema = z.object({
 export const createTransactionSchema = z.object({
   accountId: z.string().uuid("Invalid account ID format"),
   name: z.string().min(1).max(200),
-  amount: z.string().regex(/^-?\d+(\.\d{1,2})?$/, "Invalid amount format"),
+  amount: z.string().regex(/^\d+(\.\d{1,2})?$/, "Invalid amount format"),
   date: validDateSchema,
   categoryId: z.string().uuid("Invalid category ID format").optional(),
   notes: z.string().max(1000).optional(),

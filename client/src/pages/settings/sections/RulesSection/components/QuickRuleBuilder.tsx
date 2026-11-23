@@ -38,7 +38,8 @@ type NewRuleDraft = {
   }>;
   actions: Array<{
     type: string;
-    value: string;
+    // add_tags carries a list of tag ids; every other action a single string.
+    value: string | string[];
   }>;
   enabled: boolean;
   applyToPast: boolean;
@@ -58,6 +59,9 @@ const buildInitialRule = (): NewRuleDraft => ({
   enabled: true,
   applyToPast: false,
 });
+
+const isActionValueEmpty = (value: string | string[]): boolean =>
+  Array.isArray(value) ? value.length === 0 : !value;
 
 /**
  * Convert the loose quick-builder draft into a typed CreateRuleData payload.
@@ -112,7 +116,7 @@ export function QuickRuleBuilder({
       !newRule.name ||
       !newRule.conditions[0].value ||
       (rangeRequired && !newRule.conditions[0].value2) ||
-      (valueRequired && !newRule.actions[0].value)
+      (valueRequired && isActionValueEmpty(newRule.actions[0].value))
     ) {
       return;
     }

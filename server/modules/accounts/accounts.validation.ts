@@ -6,6 +6,7 @@
  * @module modules/accounts/accounts.validation
  */
 
+import { strictBooleanSchema } from "../../core/validation/query-boolean";
 import { z } from "zod";
 import Decimal from "decimal.js";
 
@@ -157,7 +158,7 @@ export const balanceAdjustmentSchema = z.object({
     },
     { message: "Amount must be positive" },
   ),
-  isIncrease: z.coerce.boolean(),
+  isIncrease: strictBooleanSchema,
   notes: z.string().max(500).optional(),
 });
 
@@ -166,8 +167,8 @@ export const balanceAdjustmentSchema = z.object({
 // ============================================================================
 
 export const accountQuerySchema = z.object({
-  includeArchived: z.coerce.boolean().default(false),
-  includeHidden: z.coerce.boolean().default(false),
+  includeArchived: strictBooleanSchema.default(false),
+  includeHidden: strictBooleanSchema.default(false),
   ownerUserId: ownerUserIdSchema,
 });
 
@@ -180,6 +181,8 @@ export const balanceHistoryQuerySchema = z.object({
 export const netWorthHistoryQuerySchema = z.object({
   dateRange: z.enum(["1w", "1m", "3m", "6m", "ytd", "1y", "all"]).default("1m"),
   scope: z.enum(["user", "household"]).default("user"),
+  includeAccounts: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
+  ownerUserId: ownerUserIdSchema,
 });
 
 export type NetWorthHistoryQuery = z.infer<typeof netWorthHistoryQuerySchema>;
@@ -198,6 +201,9 @@ export const balanceHistoryImportSchema = z.object({
   ),
 });
 
+/** A-01: bounds the per-row review decisions (one per flagged row at most). */
+const IMPORT_REVIEW_DECISIONS_MAX = 5000;
+
 export const transactionImportSchema = z.object({
   transactions: z.array(
     z.object({
@@ -210,7 +216,15 @@ export const transactionImportSchema = z.object({
       tags: z.string().optional(),
     }),
   ),
-  adjustBalance: z.coerce.boolean().default(false),
+  adjustBalance: strictBooleanSchema.default(false),
+  // A-01: the member's choice for each row a previous attempt flagged, bound to the match it was shown.
+  possibleDuplicateDecisions: z.array(z.object({
+    row: z.number().int().min(1),
+    matchesTransactionId: z.string().uuid(),
+    decision: z.enum(["post", "skip"]),
+  }).strict()).max(IMPORT_REVIEW_DECISIONS_MAX).default([])
+    .refine(decisions => new Set(decisions.map(item => item.row)).size === decisions.length,
+      { message: "Each row may have only one decision" }),
 });
 
 export const accountSettingsSchema = z.object({

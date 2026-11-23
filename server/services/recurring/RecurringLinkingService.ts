@@ -1,14 +1,14 @@
-﻿import {
+import {
   recurringTransactions,
+  transactions,
   type RecurringTransaction,
   type RecurringTransactionLink,
   type Transaction,
 } from "@shared/schema";
-import { Money } from "../../core/money";
-import { accountRepository } from "../../repositories/AccountRepository";
 import { recurringRepository } from "../../repositories/RecurringRepository";
+import { householdRepository } from "../../repositories/HouseholdRepository";
 import { transactionRepository } from "../../repositories/TransactionRepository";
-import { NotFoundError, ValidationError } from "../../utils/errorHandler";
+import { NotFoundError } from "../../utils/errorHandler";
 import { logger } from "../../utils/logger";
 import {
   patternDetectionService,
@@ -16,13 +16,18 @@ import {
 } from "../PatternDetectionService";
 import type { ConfirmPatternInput } from "../../modules/recurring/recurring.validation";
 import { RecurringProcessingService } from "./RecurringProcessingService";
-import type {
-  Frequency,
-  IntervalUnit,
-} from "../../core/calculations/recurring/types";
 import { withTransaction } from "../../utils/withTransaction";
 import { and, eq } from "drizzle-orm";
 import { db } from "../../db";
+import type { HouseholdContext } from "../../middleware/householdGuard";
+import { visibleTransactionPredicate } from "../../core/authz/transaction-visibility";
+import { getVisibleRecurringHistory, getVisibleRecurringLinks, getVisibleRecurringSummary } from "./RecurringAudienceQuery";
+import { withWritableRecurringRule } from "./withWritableRecurringRule";
+import { writeRecurringLink, writeSignedRecurringLink } from "./RecurringLinkWriter";
+import { confirmVisiblePattern } from "./RecurringPatternConfirmation";
+import { unlinkVisibleRecurringSource } from "./RecurringUnlinkWriter";
+import { auditRecurringRule, type RecurringAuditRequest } from "./RecurringRuleAudit";
+import { attachRecurringDefinition, getVerifiedRecurringRuleCurrency, type RecurringLinkUnits, type VisibleRecurringRule } from "./RecurringDenomination";
 
 export class RecurringLinkingService extends RecurringProcessingService {
   /**
@@ -31,8 +36,9 @@ export class RecurringLinkingService extends RecurringProcessingService {
   async detectAndSuggest(
     householdId: string,
     options?: Parameters<typeof patternDetectionService.detectPatterns>[1],
+    actor?: HouseholdContext,
   ): Promise<DetectedPattern[]> {
-    return await patternDetectionService.detectPatterns(householdId, options);
+    return await patternDetectionService.detectPatterns(householdId, options, actor);
   }
 
   /**
@@ -43,81 +49,15 @@ export class RecurringLinkingService extends RecurringProcessingService {
     pattern: ConfirmPatternInput,
     userId: string,
     accountId: string,
-  ): Promise<RecurringTransaction> {
-    const account = await accountRepository.findByIdWithVisibility(
-      accountId,
-      householdId,
-      userId,
-    );
-    if (!account) {
-      throw new NotFoundError("Account not found or not accessible");
-    }
-
-    const amountVariance = pattern.amountVariance ?? 0;
-    const amountTolerance = Math.min(
-      50,
-      Math.max(0, Math.round(amountVariance)),
-    );
-    const estimatedMoney = new Money(
-      pattern.estimatedAmount.amount,
-      pattern.estimatedAmount.currency,
-    );
-
-    const rule = await recurringRepository.create({
-      householdId,
-      accountId,
-      name: pattern.name,
-      amount: estimatedMoney.toString(),
-      amountType: amountTolerance > 0 ? "variable" : "fixed",
-      amountTolerance,
-      type: pattern.type,
-      frequency: pattern.frequency as Frequency,
-      startDate: pattern.suggestedStartDate,
-      nextDueDate: pattern.suggestedNextDueDate,
-      dayOfMonth: pattern.dayOfMonth ?? null,
-      dayOfWeek: pattern.dayOfWeek ?? null,
-      merchantId: pattern.merchantId ?? null,
-      detectionMethod: "suggested",
-      detectionConfidence: pattern.confidence,
-    });
-
-    await recurringRepository.logHistory({
-      recurringTransactionId: rule.id,
-      action: "created",
-      newState: rule,
-      performedBy: userId,
-    });
-
-    // PERF: Parallel linking with Promise.allSettled (fixes N+1 pattern)
-    const linkResults = await Promise.allSettled(
-      pattern.sampleTransactionIds.map((transactionId) =>
-        this.linkTransaction(
-          rule.id,
-          transactionId,
-          householdId,
-          userId,
-          "confirmed",
-          pattern.confidence,
-        )
-      )
-    );
-
-    // Log failures (non-blocking, just for observability)
-    linkResults.forEach((result, index) => {
-      if (result.status === "rejected") {
-        logger.warn("Failed to link sample transaction", {
-          transactionId: pattern.sampleTransactionIds[index],
-          recurringId: rule.id,
-          error: result.reason,
-        });
-      }
-    });
-
-    return rule;
+    actor?: HouseholdContext,
+    ipAddress?: string,
+  ): Promise<VisibleRecurringRule> {
+    if (!actor || actor.householdId !== householdId || actor.userId !== userId) throw new NotFoundError("Recurring pattern");
+    return attachRecurringDefinition(await confirmVisiblePattern(pattern, accountId, actor, ipAddress), householdId);
   }
 
   /**
-   * Link a transaction to a recurring rule
+   * Trusted internal linking; ordinary HTTP callers use linkVisibleTransaction.
    * @param userId - Required to check transaction visibility (private transactions only linkable by owner)
    */
   async linkTransaction(
@@ -150,7 +90,7 @@ export class RecurringLinkingService extends RecurringProcessingService {
 
       // 2. Checks
       // Use visibility check to prevent linking private transactions by non-owners
-      // Note: Visibility check usually doesn't need to lock unless transaction privacy is changing rapidly
+      // Preserve the established internal reader; signed linking uses the actor guard below.
       const transaction = await transactionRepository.findByIdWithVisibility(
         transactionId,
         householdId,
@@ -160,150 +100,50 @@ export class RecurringLinkingService extends RecurringProcessingService {
         throw new NotFoundError("Transaction not found");
       }
 
-      const existingLink = await recurringRepository.findLinkByTransaction(
-        transactionId,
-        householdId,
-        tx,
-      );
-      if (existingLink) {
-        if (existingLink.recurringTransactionId === recurringId) {
-          return existingLink;
-        }
-        throw new ValidationError(
-          "Transaction already linked to a recurring rule",
-          [
-            {
-              field: "transactionId",
-              message: "Already linked",
-            },
-          ],
-        );
-      }
-
-      // 3. Updates
-      const link = await recurringRepository.createLink(
-        {
-          recurringTransactionId: rule.id,
-          transactionId: transaction.id,
-          matchMethod,
-          matchConfidence,
-          expectedDate: rule.nextDueDate,
-          actualDate: transaction.date,
-          expectedAmount: rule.amount,
-          actualAmount: transaction.amount,
-          status: "linked",
-        },
-        tx,
-      );
-
-      if (
-        !transaction.isRecurring ||
-        transaction.recurringTransactionId !== rule.id
-      ) {
-        await transactionRepository.update(
-          transaction.id,
-          householdId,
-          {
-            isRecurring: true,
-            recurringTransactionId: rule.id,
-          },
-          undefined, // expectedUpdatedAt
-          tx,
-        );
-      }
-
-      const lastOccurredDate =
-        rule.lastOccurredDate && rule.lastOccurredDate > transaction.date
-          ? rule.lastOccurredDate
-          : transaction.date;
-
-      const shouldAdvance =
-        !rule.nextDueDate || transaction.date >= rule.nextDueDate;
-      const nextDueDate = shouldAdvance
-        ? recurringRepository.calculateNextDate(
-            transaction.date,
-            rule.frequency as Frequency,
-            {
-              dayOfMonth: rule.dayOfMonth || undefined,
-              dayOfWeek: rule.dayOfWeek || undefined,
-              intervalValue: rule.intervalValue ?? undefined,
-              intervalUnit:
-                (rule.intervalUnit as IntervalUnit | null) ?? undefined,
-            },
-          )
-        : rule.nextDueDate;
-
-      await recurringRepository.update(
-        rule.id,
-        householdId,
-        {
-          totalOccurrences: (rule.totalOccurrences || 0) + 1,
-          lastOccurredDate,
-          ...(shouldAdvance ? { nextDueDate } : {}),
-        },
-        tx,
-      );
-
-      await recurringRepository.logHistory(
-        {
-          recurringTransactionId: rule.id,
-          action: "linked",
-          newState: { matchMethod, matchConfidence },
-          linkedTransactionId: transaction.id,
-          performedBy,
-        },
-        tx,
-      );
-
-      return link;
+      return writeRecurringLink(tx, rule, transaction, { matchMethod, matchConfidence, performedBy });
     });
+  }
+
+  /** Ordinary signed linking requires the complete rule and source audience. */
+  linkVisibleTransaction(
+    recurringId: string, transactionId: string, actor: HouseholdContext,
+    /** Request context for the LINK audit row, written in the link's transaction (FIN-13). */
+    audit?: RecurringAuditRequest,
+  ): Promise<RecurringTransactionLink & RecurringLinkUnits> {
+    return withWritableRecurringRule(recurringId, actor, async (tx, rule) => {
+      // The shared guard locks all source transactions before their accounts.
+      const [transaction] = await tx.select().from(transactions).where(and(
+        eq(transactions.id, transactionId), visibleTransactionPredicate(actor),
+      )).limit(1);
+      if (!transaction) throw new NotFoundError("Recurring rule");
+      const link = await writeSignedRecurringLink(tx, rule, transaction, actor);
+      if (audit) {
+        await auditRecurringRule(tx, "LINK", recurringId, actor, audit, {
+          metadata: { transactionId, linkId: link.id, matchMethod: "manual" },
+        });
+      }
+      return { ...link, actualCurrency: transaction.currency,
+        expectedCurrency: await getVerifiedRecurringRuleCurrency(rule.id, actor.householdId, tx) };
+    }, { additionalTransactionIds: [transactionId], lockTransactionsForUpdate: true });
   }
 
   /**
    * Unlink a transaction from a recurring rule
    */
-  async unlinkTransaction(
-    linkId: string,
-    householdId: string,
-    performedBy?: string,
-  ): Promise<{
-    id: string;
-    transactionId: string;
-    recurringTransactionId: string;
-  }> {
-    const deleted = await recurringRepository.deleteLink(linkId, householdId);
-    if (!deleted) {
-      throw new NotFoundError("Link not found");
-    }
-
-    const remainingLink = await recurringRepository.findLinkByTransaction(
-      deleted.transactionId,
-      householdId,
-    );
-
-    if (!remainingLink) {
-      await transactionRepository.update(deleted.transactionId, householdId, {
-        isRecurring: false,
-        recurringTransactionId: null,
-      });
-    }
-
-    await recurringRepository.logHistory({
-      recurringTransactionId: deleted.recurringTransactionId,
-      action: "unlinked",
-      linkedTransactionId: deleted.transactionId,
-      performedBy,
-    });
-
-    return deleted;
+  unlinkTransaction(
+    recurringId: string, linkId: string, actor: HouseholdContext,
+    /** Request context for the UNLINK audit row, written in the unlink's transaction (FIN-13). */
+    audit?: RecurringAuditRequest,
+  ) {
+    return unlinkVisibleRecurringSource(recurringId, linkId, actor, audit);
   }
-
   /**
    * Auto-link a new transaction to a matching recurring rule
    */
   async autoLinkNewTransaction(
     transaction: Transaction,
     householdId: string,
+    actingUserId?: string,
   ): Promise<void> {
     if (
       transaction.isRecurring ||
@@ -313,15 +153,25 @@ export class RecurringLinkingService extends RecurringProcessingService {
       return;
     }
 
-    const match = await patternDetectionService.matchTransaction(
-      transaction,
-      householdId,
-    );
+    const member = actingUserId ? await householdRepository.findMember(householdId, actingUserId) : undefined;
+    if (actingUserId !== undefined && !member) return;
+    const actor = member && actingUserId ? { userId: actingUserId, householdId, role: member.role } : undefined;
+    const match = await patternDetectionService.matchTransaction(transaction, householdId, actor);
     if (!match) return;
 
     try {
-      // Use transaction owner for visibility check (auto-link uses owner's context)
-      // For shared transactions (null owner), use empty string which will be handled by visibility check
+      if (actor) {
+        await withWritableRecurringRule(match.rule.id, actor, async (tx, rule) => {
+          const [source] = await tx.select().from(transactions).where(and(
+            eq(transactions.id, transaction.id), visibleTransactionPredicate(actor),
+          )).limit(1);
+          if (!source || source.isRecurring || source.recurringTransactionId) return;
+          const current = patternDetectionService.matchRule(source, rule);
+          if (current) await writeSignedRecurringLink(tx, rule, source, actor, { matchMethod: "auto", matchConfidence: current.confidence });
+        }, { additionalTransactionIds: [transaction.id], lockTransactionsForUpdate: true });
+        return;
+      }
+      // Trusted background callers retain the original linking path.
       await this.linkTransaction(
         match.rule.id,
         transaction.id,
@@ -342,24 +192,30 @@ export class RecurringLinkingService extends RecurringProcessingService {
   /**
    * Get recurring summary metrics
    */
-  async getSummaryData(householdId: string) {
-    return await recurringRepository.getSummary(householdId);
+  async getSummaryData(actor: HouseholdContext) {
+    return getVisibleRecurringSummary(actor);
   }
 
   /**
-   * Get links for a recurring rule
+   * Actor reads enforce the rule audience; household-only calls remain trusted.
    */
+  getLinkedTransactions(id: string, scope: HouseholdContext): Promise<Array<RecurringTransactionLink & RecurringLinkUnits>>;
+  getLinkedTransactions(id: string, scope: string): Promise<RecurringTransactionLink[]>;
   async getLinkedTransactions(
     id: string,
-    householdId: string,
+    scope: string | HouseholdContext,
   ): Promise<RecurringTransactionLink[]> {
-    return await recurringRepository.findLinksByRecurring(id, householdId);
+    return typeof scope === "string"
+      ? recurringRepository.findLinksByRecurring(id, scope)
+      : getVisibleRecurringLinks(id, scope);
   }
 
   /**
    * Get history for a recurring rule
    */
-  async getHistory(id: string, householdId: string, limit: number = 50) {
-    return await recurringRepository.findHistory(id, householdId, limit);
+  async getHistory(id: string, scope: string | HouseholdContext, limit: number = 50) {
+    return typeof scope === "string"
+      ? recurringRepository.findHistory(id, scope, limit)
+      : getVisibleRecurringHistory(id, scope, limit);
   }
 }

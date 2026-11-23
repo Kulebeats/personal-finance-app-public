@@ -5,10 +5,12 @@ import { TrendingUp, TrendingDown, Briefcase } from "lucide-react";
 import { Link } from "wouter";
 import { Skeleton } from "@/components/ui/skeleton";
 import { WidgetErrorState } from "./WidgetErrorState";
+import { isNegative, toMoneyNumber } from "@/lib/money";
+import { formatCurrency } from "@/lib/format";
 
 export default function InvestmentSummaryWidget() {
   const { data: summary, isLoading, error, refetch } = usePortfolioSummary();
-  const { formatCurrency } = useFormatters();
+  const { numberFormat } = useFormatters();
 
   if (isLoading) {
     return (
@@ -54,7 +56,7 @@ export default function InvestmentSummaryWidget() {
           </div>
           <Link
             href="/investments"
-            className="text-xs text-primary hover:underline mt-2 inline-block"
+            className="text-xs text-primary hover:underline mt-2 inline-flex items-center max-md:min-h-11"
           >
             Start Investing
           </Link>
@@ -63,7 +65,7 @@ export default function InvestmentSummaryWidget() {
     );
   }
 
-  const isPositive = summary.totalGainLoss >= 0;
+  const isPositive = summary.totalGainLoss != null && !isNegative(summary.totalGainLoss);
   const TrendIcon = isPositive ? TrendingUp : TrendingDown;
   const trendColor = isPositive ? "text-green-500 dark:text-green-400" : "text-red-500 dark:text-red-400";
 
@@ -78,16 +80,20 @@ export default function InvestmentSummaryWidget() {
         </CardHeader>
         <CardContent>
           <div className="text-2xl font-bold">
-            {formatCurrency(summary.totalValue)}
+            {formatCurrency(toMoneyNumber(summary.totalValue), summary.totalValue.currency, numberFormat)}
           </div>
           <p className="text-xs text-muted-foreground flex items-center gap-1 mt-1">
-            <span className={`${trendColor} flex items-center`}>
-              <TrendIcon className="h-3 w-3 mr-1" />
-              {isPositive ? "+" : ""}
-              {formatCurrency(summary.totalGainLoss)} (
-              {summary.totalGainLossPercent.toFixed(2)}%)
-            </span>
-            <span className="opacity-70">all time</span>
+            {summary.totalGainLoss == null || summary.totalGainLossPercent == null ? "Gain/loss unavailable" : (
+              <>
+                <span className={`${trendColor} flex items-center`}>
+                  <TrendIcon className="h-3 w-3 mr-1" />
+                  {isPositive ? "+" : ""}
+                  {formatCurrency(toMoneyNumber(summary.totalGainLoss), summary.totalGainLoss.currency, numberFormat)} (
+                  {summary.totalGainLossPercent.toFixed(2)}%)
+                </span>
+                <span className="opacity-70">all time</span>
+              </>
+            )}
           </p>
           <div className="mt-3 text-xs text-muted-foreground">
             {summary.holdingsCount} active holdings

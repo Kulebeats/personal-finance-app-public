@@ -192,7 +192,7 @@ describe("GoalTransferService.transfer — real DB lock ordering (deadlock)", ()
       const t1 = goalTransferService.transfer(householdId, userId, {
         fromGoalId: lower.id,
         toGoalId: higher.id,
-        amount: "100.00",
+        amount: { amount: "100.00", currency: "ZMW" },
         reason: "race T1",
       });
       await waitForLockWaiters(1);
@@ -202,7 +202,7 @@ describe("GoalTransferService.transfer — real DB lock ordering (deadlock)", ()
       const t2 = goalTransferService.transfer(householdId, userId, {
         fromGoalId: higher.id,
         toGoalId: lower.id,
-        amount: "50.00",
+        amount: { amount: "50.00", currency: "ZMW" },
         reason: "race T2",
       });
       await waitForLockWaiters(2);

@@ -22,7 +22,6 @@ const nonNegativeMoneyAmountSchema = nonNegativeMoneyDtoSchema.transform(
 const positiveMoneyAmountSchema = positiveMoneyDtoSchema.transform(
   (value) => value.amount,
 );
-const moneyAmountSchema = moneyDtoSchema.transform((value) => value.amount);
 
 // BUDGET-VAL-001: Use positive amount (rejects zero) for budget creation
 export const createBudgetSchema = z
@@ -33,12 +32,18 @@ export const createBudgetSchema = z
       .max(255, "Name cannot exceed 255 characters"),
     categoryId: z.string().uuid().optional().nullable(),
     categoryGroupId: z.string().uuid().optional().nullable(),
-    amount: positiveMoneyAmountSchema, // Changed from nonNegativeMoneyAmountSchema to reject zero
+    amount: positiveMoneyDtoSchema,
     period: budgetPeriodSchema.default("monthly"),
     rolloverEnabled: z.boolean().default(false),
     warningThreshold: z.number().int().min(0).max(100).default(80),
     alertThreshold: z.number().int().min(0).max(100).default(100),
     isActive: z.boolean().default(true),
+    // "This month only": the amount is that month's limit and the budget gets
+    // no recurring default (A-16).
+    onlyFor: z.object({
+      year: z.number().int().min(2000).max(2100),
+      month: z.number().int().min(1).max(12),
+    }).strict().optional(),
   })
   .refine(
     (data) => {
@@ -64,7 +69,7 @@ export const createBudgetSchema = z
       message: "Either categoryId or categoryGroupId is required",
       path: ["categoryId"],
     },
-  );
+  ).transform(input => ({ ...input, amount: input.amount.amount, currency: input.amount.currency }));
 
 /**
  * Schema for updating a budget
@@ -75,10 +80,10 @@ export const updateBudgetSchema = z
     name: z.string().min(1).max(255).optional(),
     categoryId: z.string().uuid().optional().nullable(),
     categoryGroupId: z.string().uuid().optional().nullable(),
-    amount: positiveMoneyAmountSchema.optional(), // Changed to reject zero
+    amount: positiveMoneyDtoSchema.optional(),
     period: budgetPeriodSchema.optional(),
     rolloverEnabled: z.boolean().optional(),
-    rolloverAmount: moneyAmountSchema.optional(),
+    rolloverAmount: moneyDtoSchema.optional(),
     warningThreshold: z.number().int().min(0).max(100).optional(),
     alertThreshold: z.number().int().min(0).max(100).optional(),
     isActive: z.boolean().optional(),
@@ -94,7 +99,16 @@ export const updateBudgetSchema = z
       message: "Cannot specify both categoryId and categoryGroupId",
       path: ["categoryId"],
     },
-  );
+  ).superRefine((input, context) => {
+    if (input.amount && input.rolloverAmount && input.amount.currency !== input.rolloverAmount.currency) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["rolloverAmount", "currency"], message: "Rollover and budget amount currencies must match" });
+    }
+  }).transform(input => {
+    const { amount, rolloverAmount, ...rest } = input;
+    const currency = amount?.currency ?? rolloverAmount?.currency;
+    return { ...rest, ...(amount ? { amount: amount.amount } : {}), ...(rolloverAmount ? { rolloverAmount: rolloverAmount.amount } : {}),
+      ...(currency === undefined ? {} : { currency }) };
+  });
 
 /**
  * Schema for budget progress query
@@ -145,18 +159,26 @@ export const forecastQuerySchema = z.object({
 export const forecastUpdateSchema = z.object({
   year: z.number().int().min(2000).max(2100),
   month: z.number().int().min(1).max(12),
-  amount: nonNegativeMoneyAmountSchema, // Keep as non-negative (zero allowed for clearing)
+  amount: nonNegativeMoneyDtoSchema, // Retain the explicit denomination through validation.
   applyScope: z.enum(["this_month", "all_future"]).optional(),
   months: z.number().int().min(1).max(36).optional(),
-});
+}).transform(input => ({ ...input, amount: input.amount.amount, currency: input.amount.currency }));
 
 export const recalcBudgetsSchema = z.object({
   months: z.number().int().min(1).max(12).optional(),
+  mode: z.literal("preview").optional(),
+});
+
+export const budgetPreviewQuerySchema = z.object({
+  months: z.coerce.number().int().min(1).max(12).optional(),
 });
 
 export const clearBudgetsSchema = z.object({
   confirm: z.boolean().optional(),
 });
+
+/** POST /flex takes no input: the household comes from its context, the amount from update. */
+export const ensureFlexBudgetSchema = z.object({}).strict();
 
 export const moveBudgetSchema = z.object({
   fromBudgetId: z.string().uuid(),

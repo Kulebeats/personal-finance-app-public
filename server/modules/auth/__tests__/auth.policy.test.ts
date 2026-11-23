@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { authService } from "../auth.service";
 import { userRepository } from "../../../repositories/UserRepository";
-import * as authMfaPolicy from "../auth.mfa-policy";
 
 // Mock dependencies
 vi.mock("../../../repositories/UserRepository", () => ({
@@ -14,9 +13,10 @@ vi.mock("../../../repositories/UserRepository", () => ({
     upsertSession: vi.fn(),
   },
 }));
-
-vi.mock("../auth.mfa-policy", () => ({
-  checkMfaPolicy: vi.fn(),
+vi.mock("../../../services/session-identity", () => ({
+  assertCurrentCredential: vi.fn().mockResolvedValue(undefined),
+  registerSessionIdentity: (_user: unknown, data: unknown) => userRepository.upsertSession(data as any),
+  revokeLoginSession: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("../../../auth", () => ({
@@ -41,7 +41,7 @@ vi.mock("../auth.mfa.service", () => ({
   },
 }));
 
-vi.mock("../../services/AuditService", () => ({
+vi.mock("../../../services/AuditService", () => ({
   auditService: {
     log: vi.fn(),
     AuditEventType: {},
@@ -49,11 +49,12 @@ vi.mock("../../services/AuditService", () => ({
   AuditEventType: {},
 }));
 
-vi.mock("../../utils/logger", () => ({
+vi.mock("../../../utils/logger", () => ({
   logger: {
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
+    debug: vi.fn(),
   },
 }));
 
@@ -70,7 +71,7 @@ describe("Auth Service - MFA Policy", () => {
   });
 
   describe("login", () => {
-    it("should return suggestMfa=true when policy recommends enrollment", async () => {
+    it("returns the MFA grace deadline for a member without MFA (AH-11)", async () => {
       // Mock user
       const mockUser = {
         id: "user-1",
@@ -78,6 +79,7 @@ describe("Auth Service - MFA Policy", () => {
         passwordHash: "hash",
         mfaEnabled: false,
         emailVerified: true,
+        mfaGraceEndsAt: new Date(Date.now() + 3 * 86_400_000),
       };
 
       // Setup successful login mocks
@@ -85,16 +87,10 @@ describe("Auth Service - MFA Policy", () => {
       // verifyPassword mocked in factory to return true
       (userRepository.update as any).mockResolvedValue({});
 
-      // Mock policy check to suggest enrollment
-      (authMfaPolicy.checkMfaPolicy as any).mockResolvedValue({
-        suggestEnrollment: true,
-        requireEnrollment: false,
-        reason: "Role-based suggestion",
-      });
-
       const req = {
         ip: "127.0.0.1",
         headers: {},
+        sessionID: "policy-unit-session",
         session: {
           regenerate: (cb: any) => cb(),
           cookie: {},
@@ -107,8 +103,10 @@ describe("Auth Service - MFA Policy", () => {
         req,
       );
 
-      expect(result.suggestMfa).toBe(true);
-      expect(authMfaPolicy.checkMfaPolicy).toHaveBeenCalledWith("user-1");
+      expect(result.mfa).toEqual({ state: "grace", graceEndsAt: mockUser.mfaGraceEndsAt.toISOString(), daysRemaining: 3 });
+      expect(result.user?.id).toBe(mockUser.id);
+      expect(req.session.userId).toBe(mockUser.id);
+      expect(userRepository.upsertSession).toHaveBeenCalledWith(expect.objectContaining({ userId: mockUser.id, sessionToken: req.sessionID }));
     });
   });
 });

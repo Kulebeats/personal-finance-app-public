@@ -47,6 +47,7 @@ import {
   merchantLogoUploads,
   goalImageUploads,
   pendingReceipts,
+  receiptConversionRecords,
   auditLogs,
 } from "@shared/schema";
 import { createTestUser, createTestHousehold } from "../../../__tests__/fixtures";
@@ -190,8 +191,8 @@ async function seedHouseholdWithUploads(
   const merchantLogoFilename = `${randomUUID()}.png`;
   const merchantLogoRelPath = path.join(
     "uploads",
-    "merchants",
-    merchantId,
+    "merchant-logos",
+    householdId,
     merchantLogoFilename,
   );
   const merchantLogoPath = await writeDummyFile(merchantLogoRelPath);
@@ -361,16 +362,24 @@ describe("Right-to-Erasure Disk File Cleanup (R13 / audit v2 finding D2)", () =>
   afterAll(async () => {
     await cleanupHousehold(erased);
     await cleanupHousehold(bystander);
-    // uploads/merchants has no other test writer; remove if now empty.
-    await fs
-      .rm(path.join(UPLOADS_ROOT, "merchants"), {
-        recursive: true,
-        force: true,
-      })
-      .catch(() => undefined);
+    // Preserve any files outside this fixture; remove only an empty directory.
+    for (const fixture of [erased, bystander]) {
+      await fs
+        .rmdir(path.join(UPLOADS_ROOT, "merchant-logos", fixture.householdId))
+        .catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY" && error.code !== "EEXIST") throw error;
+        });
+    }
   });
 
   it("deletes every on-disk file owned by the erased household/user and writes the erasure audit row", async () => {
+    const [receipt] = await db.update(pendingReceipts).set({
+      matchStatus: "matched", matchedTransactionId: erased.transactionId,
+    }).where(eq(pendingReceipts.householdId, erased.householdId)).returning();
+    await db.insert(receiptConversionRecords).values({
+      householdId: erased.householdId, receiptId: receipt.id, transactionId: erased.transactionId,
+      requestVersion: 1, requestHash: "0".repeat(64),
+    });
     const result = await eraseAccount({
       userId: erased.userId,
       householdId: erased.householdId,
@@ -379,6 +388,7 @@ describe("Right-to-Erasure Disk File Cleanup (R13 / audit v2 finding D2)", () =>
     });
 
     expect(result.householdDeleted).toBe(true);
+    expect(await db.select().from(receiptConversionRecords).where(eq(receiptConversionRecords.receiptId, receipt.id))).toEqual([]);
 
     // ---- Erased household/user: every covered category is gone from disk ----
     expect(await fileExists(erased.paths.goalImagePath)).toBe(false);

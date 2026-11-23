@@ -8,7 +8,7 @@ import { useState, useEffect, useMemo } from "react";
 import { useLocation } from "wouter";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useFormatters } from "@/contexts/SettingsContext";
-import { useCategories } from "@/hooks/use-settings";
+import { useCategories, useHousehold, type Category, type CategoryGroup } from "@/hooks/use-settings";
 import { useGoals } from "@/hooks/useGoals";
 import {
   useBudgetProgress,
@@ -23,7 +23,14 @@ import {
   useMoveBudgetAmount,
 } from "@/hooks/useBudgets";
 import { useBudgetGroups } from "./useBudgetGroups";
+import { useUnavailableBudgets } from "@/hooks/useUnavailableBudgets";
+import { useUnbudgetedSpend } from "@/hooks/useUnbudgetedSpend";
+import { commonBudgetCurrency } from "../budgetMoneyDisplay";
+import { validCurrency } from "./budgetWriteCurrency";
 import type { SelectedItem, ApplyScope } from "../types";
+
+const noCategories: Category[] = [];
+const noCategoryGroups: CategoryGroup[] = [];
 
 export function useBudgetPageData() {
   const today = new Date();
@@ -32,6 +39,9 @@ export function useBudgetPageData() {
   const isMobile = useIsMobile();
   const [, setLocation] = useLocation();
   const { currency } = useFormatters();
+  // Budget writes use the household currency, never the display currency.
+  const household = useHousehold().data?.household;
+  const householdCurrency = household?.currency;
 
   const [selectedYear, setSelectedYear] = useState(todayYear);
   const [selectedMonth, setSelectedMonth] = useState(todayMonth);
@@ -52,6 +62,13 @@ export function useBudgetPageData() {
     isLoading,
     error,
   } = useBudgetProgress(selectedYear, selectedMonth);
+  const unavailableBudgets = useUnavailableBudgets(selectedYear, selectedMonth);
+  const unbudgetedSpend = useUnbudgetedSpend(selectedYear, selectedMonth);
+  const displayedAmounts = [
+    ...(apiBudgets ?? []).flatMap(({ amount, spent, remaining }) => [amount, spent, remaining]),
+    unbudgetedSpend.income, unbudgetedSpend.expense,
+  ].filter(amount => amount != null);
+  const reportingCurrency = displayedAmounts.length ? commonBudgetCurrency(displayedAmounts) : validCurrency(householdCurrency) ?? null;
   const { data: categoriesData, isLoading: categoriesLoading } =
     useCategories(categoriesQuery);
   const { data: goals } = useGoals({
@@ -86,8 +103,8 @@ export function useBudgetPageData() {
     selectedMonth,
     forecastMonths,
   );
-  const categories = categoriesData?.categories ?? [];
-  const categoryGroups = categoriesData?.groups ?? [];
+  const categories = categoriesData?.categories ?? noCategories;
+  const categoryGroups = categoriesData?.groups ?? noCategoryGroups;
   const contributionGoals =
     goals?.filter(
       (goal) =>
@@ -123,7 +140,6 @@ export function useBudgetPageData() {
     totalExpenseActual,
     incomeRemaining,
     expenseRemaining,
-    leftToBudget,
     toggleGroup,
     addItemToGroup,
     updateItem,
@@ -134,9 +150,16 @@ export function useBudgetPageData() {
     categories,
     categoryGroups,
     budgetSystem,
-    currency,
+    isBudgetView: viewMode === "budget" && budgetSettings?.budgetSystem === "flex" &&
+      !isLoading && !error && (categoriesLoading || categoryGroups.length > 0),
+    householdId: household?.id,
+    selectedYear,
+    selectedMonth,
+    householdCurrency,
+    reportingCurrency,
+    unavailableBudgets,
+    unbudgetedSpend,
     createBudget,
-    updateBudget,
     setLocation,
   });
 
@@ -203,6 +226,7 @@ export function useBudgetPageData() {
     isLoading,
     error,
     categoriesLoading,
+    categories,
     categoryGroups,
     isMobile,
     todayYear,
@@ -234,6 +258,7 @@ export function useBudgetPageData() {
     displayGroups,
     incomeGroups,
     expenseGroups: expenseGroupsDisplay,
+    unbudgetedSpend,
     savingsGroups,
     debtGroups,
 
@@ -244,7 +269,6 @@ export function useBudgetPageData() {
     totalExpenseActual,
     incomeRemaining,
     expenseRemaining,
-    leftToBudget,
 
     // Actions
     toggleGroup,
@@ -277,5 +301,9 @@ export function useBudgetPageData() {
     moveMoneyFromLocked,
     flexBudgetOption,
     currency,
+    householdCurrency,
+    reportingCurrency,
+    apiBudgets,
+    unavailableBudgets,
   };
 }

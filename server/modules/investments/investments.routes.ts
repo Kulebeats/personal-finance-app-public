@@ -9,7 +9,7 @@
 import { Router } from "express";
 import { householdGuard } from "../../middleware/householdGuard";
 import { requireRole } from "../../middleware/validateEntity";
-import { generalLimiter, analyticsLimiter } from "../../middleware/rateLimit";
+import { analyticsLimiter, strictLimiter } from "../../middleware/rateLimit";
 import { investmentsController } from "./investments.controller";
 
 const router = Router();
@@ -18,7 +18,6 @@ const router = Router();
 router.use(householdGuard);
 
 // P0-7 FIX: Apply base rate limiting to all routes (100 req/min)
-router.use(generalLimiter);
 
 // =========================================================================
 // Securities
@@ -26,14 +25,10 @@ router.use(generalLimiter);
 router.get("/securities", investmentsController.listSecurities);
 router.get("/securities/:id", investmentsController.getSecurityById);
 router.get("/securities/:id/prices", investmentsController.getSecurityPrices);
-router.post(
-  "/securities",
-  requireRole("member"),
-  investmentsController.createSecurity,
-);
+router.post("/securities", strictLimiter, requireRole("member"), investmentsController.createSecurity);
 router.put(
   "/securities/:id/price",
-  requireRole("member"),
+  requireRole("admin"),
   investmentsController.updateSecurityPrice,
 );
 
@@ -99,7 +94,7 @@ router.post(
 router.get("/fx-rates", investmentsController.listFxRates);
 router.post(
   "/fx-rates",
-  requireRole("member"),
+  requireRole("admin"),
   investmentsController.createFxRate,
 );
 router.get(

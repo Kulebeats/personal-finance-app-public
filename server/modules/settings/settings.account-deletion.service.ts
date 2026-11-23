@@ -28,18 +28,28 @@
  * @module modules/settings/account-deletion-service
  */
 
-import { randomUUID } from "crypto";
-import { and, eq, inArray } from "drizzle-orm";
+import { grzBondValuations } from "@shared/grz-bond-valuation-schema";
+import { grzPrincipalSettlements } from "@shared/grz-principal-settlement-schema";
+import { grzBondPrincipalBasis } from "@shared/grz-principal-basis-schema";
+import { anonymiseUser } from "./settings.account-deletion.identity";
+import { erasePersonalExports, pseudonymiseErasedIdentity, removeErasedExportFiles } from "./settings.account-deletion.traces";
+import { lockSipErasureHouseholds, lockSipErasureIdentity } from "./settings.account-deletion.sip";
+import { eraseActorAiTraces, scrubHouseholdAiAttempts } from "../ai/ai.erasure";
+import { abortActorInFlight } from "../ai/ai.inflight";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { PgColumn, PgTable } from "drizzle-orm/pg-core";
 import { withTransaction, type TransactionType } from "../../utils/withTransaction";
 import { businessAuditService } from "../../services/BusinessAuditService";
-import { ConflictError, NotFoundError } from "../../core/errors";
-import { logger } from "../../utils/logger";
 import {
   collectHouseholdUploadPaths,
   collectUserUploadPaths,
-  deleteErasedFiles,
+  recordErasedFileFailures,
 } from "./settings.account-deletion.files";
+import { drainErasurePurgeItems, recordPurgeItems } from "./settings.account-deletion.purge";
+import { lockUserMembership } from "../../repositories/householdMembershipLock";
+import {
+  assertNoHousehold, assertSingleHousehold, lockHouseholdMembers, pickSuccessor, type LockedMember,
+} from "./settings.account-deletion.membership";
 import {
   // household-scoped parents
   households,
@@ -47,6 +57,7 @@ import {
   householdPreferences,
   householdInvitations,
   accounts,
+  auditLogs,
   transactions,
   budgets,
   budgetPeriods,
@@ -80,6 +91,7 @@ import {
   filterPresets,
   dataExports,
   pendingReceipts,
+  receiptConversionRecords,
   notifications,
   outboxEvents,
   // investments
@@ -94,25 +106,14 @@ import {
   grzTBills,
   pensionHoldings,
   pensionContributions,
-  csdAccounts,
   // user-scoped
-  users,
-  userSessions,
-  userLoginHistory,
-  userPreferences,
-  userAIPreferences,
-  userDisplaySettings,
-  userNotificationPreferences,
-  userPushSubscriptions,
-  userQuietHours,
-  userTwoFactorAuth,
-  passwordHistory,
 } from "@shared/schema";
 
 export interface AccountDeletionContext {
   userId: string;
-  householdId: string;
-  /** Original email, kept only to record a non-reversible deletion marker. */
+  /** Null for a user with no household (A-20). */
+  householdId: string | null;
+  /** Email as the request read it, outside the transaction. Erasure does not use it: it takes the address from the locked users row. */
   userEmail: string;
   ipAddress?: string;
 }
@@ -163,18 +164,27 @@ async function deleteHouseholdFinancialData(
     .delete(taxLotDisposals)
     .where(eq(taxLotDisposals.householdId, householdId));
   await tx.delete(taxLots).where(eq(taxLots.householdId, householdId));
-  await tx
-    .delete(investmentTransactions)
-    .where(eq(investmentTransactions.householdId, householdId));
   await tx.delete(priceAlerts).where(eq(priceAlerts.householdId, householdId));
-  await tx.delete(holdings).where(eq(holdings.householdId, householdId));
 
   // GRZ, pensions, recurring investments (children via parent subquery).
+  await tx.delete(grzPrincipalSettlements).where(eq(grzPrincipalSettlements.householdId, householdId));
+  await tx.delete(grzBondPrincipalBasis).where(eq(grzBondPrincipalBasis.householdId, householdId));
+  await tx.delete(grzBondValuations).where(eq(grzBondValuations.householdId, householdId));
   await tx
     .delete(grzBondPayments)
     .where(inArray(grzBondPayments.bondId, byHH(grzBonds)));
   await tx.delete(grzBonds).where(eq(grzBonds.householdId, householdId));
   await tx.delete(grzTBills).where(eq(grzTBills.householdId, householdId));
+  // Settled installments, principal receipts and matured T-bills reference investment postings.
+  // Private system audits have no household/user FK. Remove only audits bound
+  // to actual purchases being erased, before those purchase IDs disappear.
+  await tx.delete(auditLogs).where(and(eq(auditLogs.entityType, "investment_transaction"),
+    inArray(auditLogs.entityId, byHH(investmentTransactions))));
+  await tx.delete(investmentTransactions).where(eq(investmentTransactions.householdId, householdId));
+  // A completed SIP proof makes its BUY immutable. Remove that purchase/proof
+  // before deleting custody holdings, whose FK would otherwise SET NULL on
+  // the still-proven purchase. Keep the GRZ reference chain ahead of both.
+  await tx.delete(holdings).where(eq(holdings.householdId, householdId));
   await tx
     .delete(pensionContributions)
     .where(inArray(pensionContributions.pensionHoldingId, byHH(pensionHoldings)));
@@ -238,6 +248,14 @@ async function deleteHouseholdFinancialData(
     .where(inArray(budgetPeriods.budgetId, byHH(budgets)));
   await tx.delete(budgets).where(eq(budgets.householdId, householdId));
 
+  // Last-member erasure removes conversion proof and receipt links before postings.
+  await tx.execute(sql`SELECT set_config('app.erasing_household', ${householdId}, true)`);
+  await tx.delete(receiptConversionRecords).where(eq(receiptConversionRecords.householdId, householdId));
+  await tx
+    .delete(pendingReceipts)
+    .where(eq(pendingReceipts.householdId, householdId));
+  await tx.execute(sql`SELECT set_config('app.erasing_household', '', true)`);
+
   // Transaction children, then transactions.
   await tx
     .delete(transactionAttachments)
@@ -296,293 +314,135 @@ async function deleteHouseholdFinancialData(
     .where(eq(netWorthSnapshots.householdId, householdId));
   await tx.delete(dataExports).where(eq(dataExports.householdId, householdId));
   await tx
-    .delete(pendingReceipts)
-    .where(eq(pendingReceipts.householdId, householdId));
-  await tx
     .delete(notifications)
     .where(eq(notifications.householdId, householdId));
   await tx.delete(outboxEvents).where(eq(outboxEvents.householdId, householdId));
 }
 
-/**
- * Irreversibly scrub all personal and financial-profile fields on the user
- * row, and rotate credentials to unusable random values. The row is retained
- * (not deleted) so the erasure audit record keeps a valid actor reference.
- */
-async function anonymiseUser(
-  tx: TransactionType,
-  userId: string,
-): Promise<void> {
-  const marker = randomUUID();
-
-  // Remove dependent user-scoped rows that hold PII or auth material.
-  await tx.delete(userSessions).where(eq(userSessions.userId, userId));
-  await tx.delete(userLoginHistory).where(eq(userLoginHistory.userId, userId));
-  await tx.delete(passwordHistory).where(eq(passwordHistory.userId, userId));
-  await tx
-    .delete(userPushSubscriptions)
-    .where(eq(userPushSubscriptions.userId, userId));
-  await tx.delete(userQuietHours).where(eq(userQuietHours.userId, userId));
-  await tx.delete(csdAccounts).where(eq(csdAccounts.userId, userId));
-  await tx
-    .delete(userTwoFactorAuth)
-    .where(eq(userTwoFactorAuth.userId, userId));
-  await tx.delete(userAIPreferences).where(eq(userAIPreferences.userId, userId));
-  await tx.delete(userPreferences).where(eq(userPreferences.userId, userId));
-  await tx
-    .delete(userDisplaySettings)
-    .where(eq(userDisplaySettings.userId, userId));
-  await tx
-    .delete(userNotificationPreferences)
-    .where(eq(userNotificationPreferences.userId, userId));
-  await tx.delete(notifications).where(eq(notifications.userId, userId));
-
-  await tx
-    .update(users)
-    .set({
-      username: `deleted_${marker}`,
-      email: `deleted_${marker}@deleted.invalid`,
-      passwordHash: `!erased!${marker}`,
-      emailVerified: false,
-      emailVerificationToken: null,
-      emailVerificationExpiry: null,
-      pendingEmail: null,
-      fullName: null,
-      firstName: null,
-      lastName: null,
-      displayName: null,
-      birthday: null,
-      gender: null,
-      phoneNumber: null,
-      phoneNumberMobile: null,
-      phoneNumberWork: null,
-      phoneNumberHome: null,
-      address: null,
-      occupation: null,
-      company: null,
-      profilePictureUrl: null,
-      bannerUrl: null,
-      bio: null,
-      socialLinks: null,
-      nrc: null,
-      annualIncome: null,
-      incomeFrequency: null,
-      employmentStatus: null,
-      investmentGoal: null,
-      riskTolerance: null,
-      salaryRangeEncrypted: null,
-      profileCompleteness: 0,
-      mfaEnabled: false,
-      mfaMethod: null,
-      mfaCode: null,
-      mfaCodeExpiry: null,
-      mfaBackupCodes: null,
-      updatedAt: new Date(),
-    })
-    .where(eq(users.id, userId));
+interface HouseholdOutcome {
+  readonly householdDeleted: boolean;
+  readonly ownerSuccessorUserId: string | null;
+  /** Purge items recorded for the household's files (A-34). */
+  readonly purgeIds: readonly string[];
 }
 
 /**
- * Pick the most-senior member (earliest `joinedAt`, then `userId` as a
- * deterministic tiebreak; null `joinedAt` sorts last) to inherit ownership when
- * the erased user was the household's sole owner and members remain.
+ * Remove the erased user's membership, SCOPED to the resolved household (Gap
+ * 1: not every household this user_id appears in), then decide the household
+ * row's fate from the locked member snapshot.
  */
-function pickSuccessor<T extends { userId: string; joinedAt: Date | null }>(
-  members: readonly T[],
-): T | undefined {
-  return [...members].sort((a, b) => {
-    const ta = a.joinedAt ? a.joinedAt.getTime() : Number.MAX_SAFE_INTEGER;
-    const tb = b.joinedAt ? b.joinedAt.getTime() : Number.MAX_SAFE_INTEGER;
-    if (ta !== tb) return ta - tb;
-    return a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0;
-  })[0];
-}
-
-/**
- * Lock the household row FOR UPDATE as the serialization anchor for erasure
- * (membership-lifecycle race, Gap 2). A concurrent acceptInvite/addMember for
- * the same household must serialize against this erasure instead of racing it:
- * without a shared lock, a sole-member erase and an invite acceptance share no
- * common row, and the joiner can be inserted into a household this erase then
- * deletes — silently cascade-removing the joiner (household_members.household_id
- * is ON DELETE CASCADE). acceptInvite takes the same lock; holding it here also
- * makes the member snapshot below sound — no new member can be inserted between
- * the snapshot and the fate decision. Throws if the household is already gone.
- */
-async function lockHouseholdForErasure(
-  tx: TransactionType,
-  householdId: string,
-): Promise<void> {
-  const [householdRow] = await tx
-    .select({ id: households.id })
-    .from(households)
-    .where(eq(households.id, householdId))
-    .for("update")
-    .limit(1);
-  if (!householdRow) {
-    throw new NotFoundError("Household not found");
-  }
-}
-
-/**
- * Assert the user belongs ONLY to the resolved household (membership-lifecycle
- * race, Gap 1). Multi-household membership is not a supported state
- * (household.create rejects a second household; invitations.acceptInvite rejects
- * a user who already belongs to one), so the membership delete in eraseAccount is
- * scoped to the resolved household. If this user is somehow a member of ANOTHER
- * household, anonymising them here would leave that other household with a
- * scrubbed member (and, if they were its owner, no real owner) — so we fail
- * loudly rather than proceed. A plain read suffices: the household row is already
- * locked and the delete is scoped, so nothing here is orphaned; this is a
- * precondition tripwire, and locking the user's rows out of userId order would
- * risk a deadlock with the userId-ordered member lock below. The offending
- * household ids are logged server-side, not surfaced to the client.
- */
-async function assertSingleHousehold(
+async function settleHousehold(
   tx: TransactionType,
   userId: string,
   householdId: string,
-): Promise<void> {
-  const membershipRows = await tx
-    .select({ membershipHouseholdId: householdMembers.householdId })
-    .from(householdMembers)
-    .where(eq(householdMembers.userId, userId));
-  const otherHouseholdIds = [
-    ...new Set(
-      membershipRows
-        .map((m) => m.membershipHouseholdId)
-        .filter((id): id is string => id !== null && id !== householdId),
-    ),
-  ];
-  if (otherHouseholdIds.length > 0) {
-    logger.warn("Account erasure blocked: multi-household membership", {
-      userId,
-      householdId,
-      otherHouseholdIds,
-    });
-    throw new ConflictError(
-      "Account erasure blocked: this account belongs to more than one " +
-        "household. Multi-household membership is not supported; resolve the " +
-        "extra membership(s) before erasing this account.",
-    );
+  lockedMembers: readonly LockedMember[],
+): Promise<HouseholdOutcome> {
+  await tx
+    .delete(householdMembers)
+    .where(and(eq(householdMembers.householdId, householdId), eq(householdMembers.userId, userId)));
+  const remainingMembers = lockedMembers.filter((m) => m.userId !== userId);
+
+  if (remainingMembers.length === 0) {
+    // Sole member / last one out: the shared data has no other owner, so the
+    // household-scoped financial rows, the household row, and its
+    // preferences/invitations are all hard-deleted. The upload paths those
+    // rows reference are collected and recorded as durable purge items
+    // BEFORE they're deleted below — this is the last point they're readable,
+    // and the household delete cascades their storage_objects manifest rows.
+    const purgeIds = await recordPurgeItems(tx, await collectHouseholdUploadPaths(tx, householdId));
+    await deleteHouseholdFinancialData(tx, householdId);
+    await tx.delete(householdPreferences).where(eq(householdPreferences.householdId, householdId));
+    await tx.delete(householdInvitations).where(eq(householdInvitations.householdId, householdId));
+    await tx.delete(notifications).where(eq(notifications.householdId, householdId));
+    // The household cascade deletes ai_requests and detaches their attempts;
+    // scrub those attempts' provider ids while they can still be found.
+    await scrubHouseholdAiAttempts(tx, householdId);
+    await tx.delete(households).where(eq(households.id, householdId));
+    return { householdDeleted: true, ownerSuccessorUserId: null, purgeIds };
   }
+  if (remainingMembers.some((m) => m.role === "owner")) {
+    return { householdDeleted: false, ownerSuccessorUserId: null, purgeIds: [] };
+  }
+
+  // Other members remain: the jointly-owned shared data is RETAINED. The
+  // erased user was the only owner, so promote the most-senior remaining
+  // member, else the household would be ungovernable (governance needs an
+  // owner). userId is nullable at the type level, so only real ids inherit.
+  const candidates: { userId: string; joinedAt: Date | null }[] = [];
+  for (const m of remainingMembers) {
+    if (m.userId !== null) candidates.push({ userId: m.userId, joinedAt: m.joinedAt });
+  }
+  const successor = pickSuccessor(candidates);
+  if (!successor) return { householdDeleted: false, ownerSuccessorUserId: null, purgeIds: [] };
+  await tx
+    .update(householdMembers)
+    .set({ role: "owner" })
+    .where(and(eq(householdMembers.householdId, householdId), eq(householdMembers.userId, successor.userId)));
+  return { householdDeleted: false, ownerSuccessorUserId: successor.userId, purgeIds: [] };
 }
 
 /**
  * Execute the full account erasure for a user inside one transaction. The
  * household's shared financial data is hard-deleted only when this user is the
  * last member out; while other members remain it is retained and, if needed,
- * ownership succeeds to the most-senior remaining member. The household row is
- * locked first as a serialization anchor against a concurrent invite-accept
- * (Gap 2), and single-household membership is asserted (Gap 1) before any
- * destructive write. Writes a durable erasure audit row.
+ * ownership succeeds to the most-senior remaining member. A user with no
+ * household (A-20: newly registered, or a member who left) is erased the same
+ * way minus the household steps. The household row is locked with all
+ * historical SIP anchors in UUID order before member/identity locks.
+ * Single-household membership (Gap 1) and the fresh operational scope are
+ * checked before any destructive write. Writes a durable erasure audit row.
  */
 export async function eraseAccount(
   ctx: AccountDeletionContext,
 ): Promise<AccountDeletionResult> {
   // Filesystem cleanup cannot share atomicity with the DB transaction below
-  // (a rollback can't "undelete" a unlinked file), so on-disk paths are only
-  // collected here — inside the transaction, while the owning rows/columns
-  // still exist — and the actual unlink runs AFTER the transaction commits,
-  // once the erasure is durable. See settings.account-deletion.files.ts.
-  const filesToDelete: string[] = [];
+  // (a rollback can't "undelete" an unlinked file), so stored files are only
+  // collected inside the transaction, while the owning rows still exist, and
+  // recorded there as durable purge items (A-34). The deletion runs AFTER the
+  // transaction commits; a process that stops first leaves the items for the
+  // boot drain. See settings.account-deletion.purge.ts.
+  const { householdId } = ctx;
+  const purgeIds: string[] = [];
+  const exportIds: string[] = [];
 
   const result = await withTransaction(async (tx) => {
-    // 0. Serialization anchor (Gap 2) + single-household assertion (Gap 1),
-    //    both before any destructive write so a violation rolls back cleanly.
-    await lockHouseholdForErasure(tx, ctx.householdId);
-    await assertSingleHousehold(tx, ctx.userId, ctx.householdId);
+    // 0. Acquire every current/historical SIP anchor before member/user locks.
+    //    Keep the existing current-membership precondition (Gap 1).
+    const sipHouseholds = await lockSipErasureHouseholds(tx, ctx.userId, householdId);
+    if (householdId) await assertSingleHousehold(tx, ctx.userId, householdId);
 
-    // 1. Lock this household's member rows FOR UPDATE (ordered by userId,
-    //    deadlock-safe) so the household-fate decision and any owner-succession
-    //    write form one race-safe unit.
-    const lockedMembers = await tx
-      .select({
-        userId: householdMembers.userId,
-        role: householdMembers.role,
-        joinedAt: householdMembers.joinedAt,
-      })
-      .from(householdMembers)
-      .where(eq(householdMembers.householdId, ctx.householdId))
-      .orderBy(householdMembers.userId)
-      .for("update");
+    // 1. Lock this household's member rows before the identity lock.
+    const lockedMembers = householdId ? await lockHouseholdMembers(tx, householdId) : [];
 
-    // 2. Remove this user's membership, SCOPED to the resolved household (Gap 1:
-    //    not every household this user_id appears in), then decide the
-    //    household-row fate from the locked snapshot.
-    await tx
-      .delete(householdMembers)
-      .where(
-        and(
-          eq(householdMembers.householdId, ctx.householdId),
-          eq(householdMembers.userId, ctx.userId),
-        ),
-      );
+    // A-20: with no household, serialise with this user's joins (invite
+    // accept, household create) on the per-user membership lock, in their
+    // order: household rows, then this lock, then the users row.
+    if (!householdId) await lockUserMembership(tx, ctx.userId);
 
-    const remainingMembers = lockedMembers.filter(
-      (m) => m.userId !== ctx.userId,
-    );
+    // Fence actor grant writers and reject any newly unbound household before
+    // membership deletion, financial deletion or collecting post-commit files.
+    const lockedEmail = await lockSipErasureIdentity(tx, ctx.userId, householdId, sipHouseholds);
+    if (!householdId) await assertNoHousehold(tx, ctx.userId);
+    exportIds.push(...(await erasePersonalExports(tx, ctx.userId)));
 
-    let householdDeleted = false;
-    let ownerSuccessorUserId: string | null = null;
+    // The erased user's own uploads (profile banner + profile picture).
+    // Resolve them to their stored objects FIRST: a household delete below
+    // cascades the storage_objects manifest rows, after which their keys are
+    // unknowable, and anonymiseUser later clears users.banner_url /
+    // users.profile_picture_url.
+    purgeIds.push(...(await recordPurgeItems(tx, await collectUserUploadPaths(tx, ctx.userId, householdId))));
 
-    if (remainingMembers.length === 0) {
-      // Sole member / last one out: the shared data has no other owner, so the
-      // household-scoped financial rows, the household row, and its
-      // preferences/invitations are all hard-deleted. Collect the upload
-      // paths those rows reference BEFORE they're deleted below — this is
-      // the last point they're readable.
-      filesToDelete.push(
-        ...(await collectHouseholdUploadPaths(tx, ctx.householdId)),
-      );
-      await deleteHouseholdFinancialData(tx, ctx.householdId);
-      await tx
-        .delete(householdPreferences)
-        .where(eq(householdPreferences.householdId, ctx.householdId));
-      await tx
-        .delete(householdInvitations)
-        .where(eq(householdInvitations.householdId, ctx.householdId));
-      // Prior audit rows for this household are removed before we write the
-      // durable erasure record (which is scoped to no household so it survives).
-      await tx
-        .delete(notifications)
-        .where(eq(notifications.householdId, ctx.householdId));
-      await tx.delete(households).where(eq(households.id, ctx.householdId));
-      householdDeleted = true;
-    } else if (!remainingMembers.some((m) => m.role === "owner")) {
-      // Other members remain: the jointly-owned shared data is RETAINED. The
-      // erased user was the only owner, so promote the most-senior remaining
-      // member, else the household would be ungovernable (governance needs an
-      // owner). userId is nullable at the type level, so only real ids inherit.
-      const candidates: { userId: string; joinedAt: Date | null }[] = [];
-      for (const m of remainingMembers) {
-        if (m.userId !== null) {
-          candidates.push({ userId: m.userId, joinedAt: m.joinedAt });
-        }
-      }
-      const successor = pickSuccessor(candidates);
-      if (successor) {
-        await tx
-          .update(householdMembers)
-          .set({ role: "owner" })
-          .where(
-            and(
-              eq(householdMembers.householdId, ctx.householdId),
-              eq(householdMembers.userId, successor.userId),
-            ),
-          );
-        ownerSuccessorUserId = successor.userId;
-      }
-    }
+    // 2. Decide the household's fate from the locked snapshot.
+    const outcome: HouseholdOutcome = householdId
+      ? await settleHousehold(tx, ctx.userId, householdId, lockedMembers)
+      : { householdDeleted: false, ownerSuccessorUserId: null, purgeIds: [] };
+    purgeIds.push(...outcome.purgeIds);
 
     // 3. Irreversibly anonymise the user row (kept for audit-actor reference).
-    //    Collect the erased user's own uploads (profile banner + profile
-    //    picture) BEFORE anonymiseUser clears users.banner_url /
-    //    users.profile_picture_url below.
-    filesToDelete.push(
-      ...(await collectUserUploadPaths(tx, ctx.userId, ctx.householdId)),
-    );
-    await anonymiseUser(tx, ctx.userId);
+    //    The user's own uploads were collected above, before any cascade.
+    const tombstoneEmail = await anonymiseUser(tx, ctx.userId);
+    await pseudonymiseErasedIdentity(tx, ctx.userId, lockedEmail, tombstoneEmail);
+    await eraseActorAiTraces(tx, ctx.userId);
 
     // 4. Durable erasure audit record, written through this transaction so it
     //    is atomic with the deletion and not itself erased. Scoped to no
@@ -596,20 +456,27 @@ export async function eraseAccount(
       entityId: ctx.userId,
       details: {
         reason: "right_to_erasure",
-        erasedHouseholdId: ctx.householdId,
-        householdDeleted,
-        ownerSuccessorUserId,
+        erasedHouseholdId: householdId,
+        householdDeleted: outcome.householdDeleted,
+        ownerSuccessorUserId: outcome.ownerSuccessorUserId,
       },
       ipAddress: ctx.ipAddress,
     });
 
-    return { householdDeleted };
+    return { householdDeleted: outcome.householdDeleted };
   });
 
+  // The erasure is durable: stop the erased actor's in-flight Thandi provider
+  // calls in this process (R17 follow-up); the exchange fence refuses any
+  // late answer from elsewhere.
+  abortActorInFlight(ctx.userId);
+
   // Only reached once the transaction above has committed. Best-effort: a
-  // failure to remove a file from disk is logged but never thrown, so it can
-  // never turn an already-durable erasure into a user-facing failure.
-  await deleteErasedFiles(filesToDelete);
+  // failure to remove a file is logged and audited, and its purge item stays
+  // queued, but it never turns an already-durable erasure into a user-facing
+  // failure.
+  await recordErasedFileFailures(ctx.userId, await drainErasurePurgeItems(purgeIds));
+  await removeErasedExportFiles(exportIds);
 
   return result;
 }

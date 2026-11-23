@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD COLUMN "mfa_grace_ends_at" timestamp with time zone DEFAULT now() + interval '14 days' NOT NULL;

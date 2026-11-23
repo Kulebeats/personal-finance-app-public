@@ -11,7 +11,7 @@ import { Request, Response } from "express";
 import { transactionService as legacyTransactionService } from "../../services/TransactionService";
 import { ValidationError, NotFoundError } from "../../core/errors";
 import { businessAuditService } from "../../services/BusinessAuditService";
-import { mapTransactionMoney } from "./transactions.helpers";
+import { mapVisibleTransactionMoney } from "./transactions.helpers";
 import { categoryRepository } from "../../repositories/CategoryRepository";
 import { bulkSetTransactionOwnerSchema } from "./transactions.validation";
 
@@ -54,7 +54,7 @@ export async function bulkUpdateOwner(
     { ipAddress },
   );
 
-  const responseTransactions = transactions.map(mapTransactionMoney);
+  const responseTransactions = await Promise.all(transactions.map(row => mapVisibleTransactionMoney(row.id, req.householdContext!)));
 
   res.json({
     success: true,
@@ -171,41 +171,21 @@ export async function bulkAddTags(req: Request, res: Response): Promise<void> {
   // PERF: Parallel execution with Promise.allSettled (fixes N+1)
   const tagResults = await Promise.allSettled(
     transactionIds.map((id: string) =>
-      transactionService.addTagsToTransaction(id, tagIds, householdId, userId)
+      transactionService.addTagsToTransaction(id, tagIds, householdId, userId, ipAddress)
     )
   );
 
-  // Build results and collect successful IDs for audit
+  // The atomic writer owns the sole audit, including the actual link delta.
   const results: Array<{ id: string; success: boolean }> = [];
-  const successfulIds: string[] = [];
 
   tagResults.forEach((result, index) => {
     const id = transactionIds[index];
     if (result.status === "fulfilled") {
       results.push({ id, success: true });
-      successfulIds.push(id);
     } else {
       results.push({ id, success: false });
     }
   });
-
-  // PERF: Batch audit logging in parallel (non-blocking)
-  Promise.all(
-    successfulIds.map((id) =>
-      businessAuditService.logUpdate({
-        userId,
-        householdId,
-        entityType: "transaction",
-        entityId: id,
-        newValue: { addedTagIds: tagIds },
-        ipAddress,
-        metadata: {
-          operation: "bulkAddTags",
-          batchSize: transactionIds.length,
-        },
-      })
-    )
-  ).catch(() => {}); // Non-blocking audit
 
   const successCount = results.filter((r) => r.success).length;
   res.json({

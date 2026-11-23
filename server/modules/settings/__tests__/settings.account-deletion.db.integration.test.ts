@@ -25,12 +25,15 @@ import {
   households,
   householdMembers,
   accounts,
+  grzTBills,
+  investmentTransactions,
   transactions,
   transactionSplits,
   budgets,
   budgetPeriods,
   goals,
   goalContributions,
+  goalProgressAdjustments,
   recurringTransactions,
   auditLogs,
   categoryGroups,
@@ -114,6 +117,12 @@ describe("Settings Account Deletion - DB Integration (SCP-332)", () => {
       currency: "ZMW",
     });
 
+    const [maturity] = await db.insert(investmentTransactions).values({ householdId, accountId, type: "maturity",
+      amount: "100.00", currency: "ZMW", transactionDate: "2025-04-02" }).returning();
+    await db.insert(grzTBills).values({ householdId, accountId, tbillName: "Historical maturity", tenorDays: 91,
+      faceValue: "100.00", purchasePrice: "98.00", purchaseDate: "2025-01-01", maturityDate: "2025-04-02",
+      maturedDate: "2025-04-02", status: "matured", maturityInvestmentTxId: maturity.id });
+
     categoryGroupId = randomUUID();
     await db.insert(categoryGroups).values({
       id: categoryGroupId,
@@ -195,6 +204,11 @@ describe("Settings Account Deletion - DB Integration (SCP-332)", () => {
       date: "2024-05-02",
       notes: "Erasure contribution",
     });
+    // child of goal (#222): a transfer's half, whose ref has no foreign key
+    await db.insert(goalProgressAdjustments).values({
+      goalId, kind: "transfer_in", refId: randomUUID(), amount: "50.00", appliedDelta: "50.00",
+      placedAt: new Date(), createdBy: userId,
+    });
 
     recurringId = randomUUID();
     await db.insert(recurringTransactions).values({
@@ -261,6 +275,8 @@ describe("Settings Account Deletion - DB Integration (SCP-332)", () => {
       // Primary household rows are mostly gone after the test; clean up
       // whatever remains plus the anonymised user and the durable audit row.
       await db.delete(auditLogs).where(eq(auditLogs.userId, userId));
+      await db.delete(grzTBills).where(eq(grzTBills.householdId, householdId));
+      await db.delete(investmentTransactions).where(eq(investmentTransactions.householdId, householdId));
       await db.delete(auditLogs).where(eq(auditLogs.householdId, householdId));
       await db
         .delete(recurringTransactions)
@@ -364,6 +380,8 @@ describe("Settings Account Deletion - DB Integration (SCP-332)", () => {
 
     // ---- No readable financial rows remain for the household ----
     const remaining = {
+      bills: await db.select().from(grzTBills).where(eq(grzTBills.householdId, householdId)),
+      investmentPostings: await db.select().from(investmentTransactions).where(eq(investmentTransactions.householdId, householdId)),
       accounts: await db
         .select()
         .from(accounts)
@@ -392,6 +410,10 @@ describe("Settings Account Deletion - DB Integration (SCP-332)", () => {
         .select()
         .from(goalContributions)
         .where(eq(goalContributions.goalId, goalId)),
+      goalProgressAdjustments: await db
+        .select()
+        .from(goalProgressAdjustments)
+        .where(eq(goalProgressAdjustments.goalId, goalId)),
       recurring: await db
         .select()
         .from(recurringTransactions)

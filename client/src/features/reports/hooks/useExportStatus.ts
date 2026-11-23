@@ -1,3 +1,7 @@
+import { throwIfResNotOk } from "@/lib/queryClient";
+import { protectedFetch } from "@/lib/protected-fetch";
+import { downloadProtectedResource, reportProtectedMediaError } from "@/lib/protected-media";
+import { captureOperationLifetime } from "@/lib/operation-lifetime";
 /**
  * useExportStatus Hook
  *
@@ -14,10 +18,11 @@ export type ExportStatus = "pending" | "completed" | "failed";
 
 // Simple fetch helper for export status
 async function fetchExport(id: string): Promise<ReportsExportItem> {
-  const res = await fetch(`/api/reports/exports/${id}`, {
+  const res = await protectedFetch(`/api/reports/exports/${id}`, {
     credentials: "include",
   });
-  if (!res.ok) throw new Error("Failed to fetch export status");
+  await throwIfResNotOk(res);
+
   const json = await res.json();
   if (!json.success) throw new Error(json.error?.message || "Unknown error");
   return json.data;
@@ -25,11 +30,12 @@ async function fetchExport(id: string): Promise<ReportsExportItem> {
 
 // Simple fetch helper for active exports
 async function fetchActiveExports(): Promise<{ exports: ReportsExportItem[] }> {
-  const res = await fetch(
+  const res = await protectedFetch(
     "/api/reports/exports?status=pending&status=processing",
     { credentials: "include" },
   );
-  if (!res.ok) throw new Error("Failed to fetch active exports");
+  await throwIfResNotOk(res);
+
   const json = await res.json();
   if (!json.success) throw new Error(json.error?.message || "Unknown error");
   return json.data;
@@ -110,6 +116,7 @@ export function useExportStatus(
     if (!data || hasNotified) return;
 
     if (data.status === "completed") {
+      const operation = captureOperationLifetime();
       setIsPolling(false);
       setHasNotified(true);
       if (showToasts) {
@@ -118,7 +125,7 @@ export function useExportStatus(
           action: {
             label: "Download",
             onClick: () => {
-              window.open(`/api/reports/exports/${data.id}?download=true`);
+              void downloadProtectedResource(`/api/reports/exports/${data.id}?download=true`, undefined, operation).catch(reportProtectedMediaError);
             },
           },
         });

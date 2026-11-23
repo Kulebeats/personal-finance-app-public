@@ -1,0 +1,98 @@
+{
+  "applicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+  "preservationSha": "520fe2e63025e49590024038b3436f4e3930e30b",
+  "nodeHost": "22.23.2",
+  "npmHost": "11.19.1",
+  "postgresSynthetic": "18.6",
+  "migrationJournalEntries": 12,
+  "files": [
+    {
+      "path": "package.json",
+      "sha256": "D1C841D18FCE0F7F48E701023A655D76296410A77AB2D6C15E65C36702B785F8"
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "F922633679C79AA0248FEB4DA6582C5F976A3C36D90750FF48B7820D428D83BC"
+    },
+    {
+      "path": "shared/schema.ts",
+      "sha256": "15500178DD6153514A423665C981A9D7F51C1F59B9161272B3353877425D7E5F"
+    },
+    {
+      "path": "migrations/meta/_journal.json",
+      "sha256": "A7AA99362F7A9D961AC8D832EB565D3E337E6B1471694D7A90FB07B234C8E5DB"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "FE89AB07B0CE8D009035197165A4F075FDB1DAF9B2E9DF201FDCC100A3AC2ED2"
+    },
+    {
+      "path": "render.yaml",
+      "sha256": "0B7DBAFF3AF3E0D7DF3E5A00664921FA09CF49C88F32F4EAC9CE162A4022DA4F"
+    },
+    {
+      "path": "server/db.ts",
+      "sha256": "C358211FAEBD093C135E62FC6F2460BCCD933DAEB4639EE89DF1A2E6BA7712AD"
+    },
+    {
+      "path": "server/vitest.config.ts",
+      "sha256": "9284235FFA5FE1F62323ED496A4EF96BB2BEFFD1A6D8A6A86418902C8F4E65C4"
+    },
+    {
+      "path": "vitest.config.ts",
+      "sha256": "DD29FFA78E09A78BDF7385CFB89C0FF668A44EB192090C14C359E4E78CF2F2E9"
+    },
+    {
+      "path": "playwright.config.ts",
+      "sha256": "7310F1C80B2209156FB9A294F66AAB7078C4D64CD8A6C442972BA32ABFC26114"
+    },
+    {
+      "path": "migrations/0000_youthful_speed.sql",
+      "sha256": "5B851533C1B4BD34590FF110D1DC5FE38690C7EB012B4C0FACE30F2849BC0DAF"
+    },
+    {
+      "path": "migrations/0001_curvy_matthew_murdock.sql",
+      "sha256": "256074D3BFC04FA476AA7AC210036F103442A8A9A7A7F2DF0E3A6A5DC843CE40"
+    },
+    {
+      "path": "migrations/0002_last_matthew_murdock.sql",
+      "sha256": "AB184885751A6D0ECE4C1EF714CD51D88F2C015859065370D27DCCC1ECB14C30"
+    },
+    {
+      "path": "migrations/0003_chilly_diamondback.sql",
+      "sha256": "3BFC769B686B356A7805CFE9D42941C0A4B6B0550BCFD8F725219321FBA5EB77"
+    },
+    {
+      "path": "migrations/0004_massive_puck.sql",
+      "sha256": "544A7F89B4C4057732027FC2228046F0724506E5E01CA0F5CC1ECD00921D5BE1"
+    },
+    {
+      "path": "migrations/0005_household_members_unique.sql",
+      "sha256": "EA6EEBDD79848CF4BC054FBF718D958DF719DBFC3372545571ABEFBD6BBC019E"
+    },
+    {
+      "path": "migrations/0006_filter_presets_default_unique.sql",
+      "sha256": "363C7ABDB619A38950BFA2709228A9E6144D5847224E302FD60D5DCB4C89621B"
+    },
+    {
+      "path": "migrations/0007_filter_presets_name_unique.sql",
+      "sha256": "2262A971ED908A05BCCD2D76F9ECCF739D1EFCBB712F82328FEFE9E8A4AE5E22"
+    },
+    {
+      "path": "migrations/0008_budget_period_monthly_check.sql",
+      "sha256": "8E51679A112D53665D87FCCD052F18799F80ED5E8CECC67182014ED21A2A0941"
+    },
+    {
+      "path": "migrations/0009_reconcile_custom_migration_snapshots.sql",
+      "sha256": "B360D71BEE3DAA6082DAD6FA7511ADFDE191E91268B3CCB80FCFD605C3A8C591"
+    },
+    {
+      "path": "migrations/0010_password_reset_tokens.sql",
+      "sha256": "69C58B59122A9AE7A37F05F50807F2C05F8AB20F74057E642F172BA04DE83188"
+    },
+    {
+      "path": "migrations/0011_hash_email_verification_tokens.sql",
+      "sha256": "FAFED8AD6196E197CA248F0E0FDA6C718212B92709FD8C3A06B99911E07E024E"
+    }
+  ]
+}

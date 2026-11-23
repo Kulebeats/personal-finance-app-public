@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./protected-test";
 import { getTestUser } from "./utils/testUser";
 import { pickVisible } from "./utils/locators";
 
@@ -91,8 +91,9 @@ test.describe("Navigation", () => {
       name: "Transactions",
       exact: true,
     });
-    await expect(transactionsLink.locator("div").first()).toHaveClass(
-      /bg-sidebar-accent/
-    );
+    // The active styling and aria-current now sit on the link itself; the
+    // inner wrapper div was removed so the link is the only focus target.
+    await expect(transactionsLink).toHaveAttribute("aria-current", "page");
+    await expect(transactionsLink).toHaveClass(/(^|\s)bg-sidebar-accent(\s|$)/);
   });
 });

@@ -4,6 +4,7 @@
  * This file provides backwards compatibility with the old localStorage-based hooks.
  * It now proxies to the new TanStack Query API hooks for real database operations.
  */
+import { calendarToday, useCalendarTimeZone } from "@/lib/calendarZone";
 import { useMemo, useCallback } from "react";
 import { useFormatters } from "@/contexts/SettingsContext";
 import {
@@ -22,7 +23,6 @@ import {
   useDeleteTransaction,
 } from "./useTransactions";
 import {
-  useBudgets as useBudgetsAPI,
   useBudgetProgress,
   useCreateBudget,
   useUpdateBudget,
@@ -234,15 +234,17 @@ export function useAccounts() {
 // ============================================================================
 
 export function useTransactions() {
-  const now = new Date();
+  useCalendarTimeZone(); // NEW-15: re-derive when the household zone arrives.
+  const today = calendarToday();
   const { currency } = useFormatters();
   const {
     data: response,
     isLoading,
     refetch,
   } = useTransactionsAPI({
-    startDate: new Date(now.getFullYear(), 0, 1).toISOString().split("T")[0],
-    endDate: now.toISOString().split("T")[0],
+    // NEW-15: year to date in the calendar zone, not UTC.
+    startDate: `${today.slice(0, 4)}-01-01`,
+    endDate: today,
   });
   const createMutation = useCreateTransaction();
   const updateMutation = useUpdateTransaction();
@@ -384,36 +386,33 @@ export function useTransactions() {
 // ============================================================================
 
 export function useBudgets() {
-  const now = new Date();
+  useCalendarTimeZone(); // NEW-15: re-derive when the household zone arrives.
   const { currency } = useFormatters();
-  const { data: budgets, isLoading, refetch } = useBudgetsAPI();
-  const { data: progress } = useBudgetProgress(
-    now.getFullYear(),
-    now.getMonth() + 1
-  );
+  // NEW-15: the calendar zone's month, not the UTC month.
+  const [year, month] = calendarToday().split("-").map((part) => parseInt(part, 10));
+  const { data: progress, isLoading, refetch } = useBudgetProgress(year, month);
   const createMutation = useCreateBudget();
   const updateMutation = useUpdateBudget();
   const deleteMutation = useDeleteBudget();
 
   // Transform to legacy format with progress
   const legacyBudgets = useMemo(() => {
-    if (!budgets) return [];
-    return budgets.map((b): Budget => {
-      const prog = progress?.find((p) => p.id === b.id);
+    if (!progress) return [];
+    return progress.map((b): Budget => {
       return {
         id: b.id,
         name: b.name,
         category: b.categoryId || "General",
         amount: toMoneyNumber(b.amount),
-        spent: prog ? toMoneyNumber(prog.spent) : 0,
+        spent: toMoneyNumber(b.spent),
         period: b.period as Budget["period"],
-        year: now.getFullYear(),
-        month: now.getMonth() + 1,
+        year,
+        month,
         createdAt: b.createdAt,
         updatedAt: b.updatedAt,
       };
     });
-  }, [budgets, progress]);
+  }, [progress, year, month]);
 
   const add = useCallback(
     (data: {
@@ -458,10 +457,9 @@ export function useBudgets() {
   );
 
   const getByMonth = useCallback(
-    (year: number, month: number) => {
-      return legacyBudgets; // Already filtered for current month
-    },
-    [legacyBudgets]
+    (requestedYear: number, requestedMonth: number) =>
+      requestedYear === year && requestedMonth === month ? legacyBudgets : [],
+    [legacyBudgets, year, month]
   );
 
   const updateAllSpent = useCallback(
@@ -842,9 +840,7 @@ export function useDashboardSummary() {
   const { accounts, getTotalBalance, getNetWorth } = useAccounts();
   const { transactions, getSummary } = useTransactions();
 
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth() + 1;
+  const [year, month] = calendarToday().split("-").map((part) => parseInt(part, 10));
   const monthlySummary = getSummary(year, month);
 
   const recentTransactions = useMemo(() => {

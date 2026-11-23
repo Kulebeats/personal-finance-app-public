@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import express from "express";
 import request from "supertest";
+import { ForbiddenError } from "../../../core/errors";
 
 // ============================================================================
 // MOCKS (Hoisted)
@@ -48,10 +49,13 @@ const {
 
 const {
   mockReportsExportService,
+  mockExportMetadata,
+  mockReportExportCreation,
 } = vi.hoisted(() => ({
+  mockExportMetadata: { list: vi.fn(), read: vi.fn() },
+  mockReportExportCreation: vi.fn(),
   mockReportsExportService: {
     listExports: vi.fn(),
-    createExport: vi.fn(),
     getExportById: vi.fn(),
     generateExportFile: vi.fn(),
   },
@@ -84,6 +88,13 @@ vi.mock("../reports.service", () => ({
 vi.mock("../reports.export.service", () => ({
   reportsExportService: mockReportsExportService,
 }));
+// Current authority and real source cuts are covered by signed DB tests; this
+// fixture verifies the controller invokes those boundaries (no real sessions).
+vi.mock("../reportExportMetadata", () => ({
+  listAuthorizedExportMetadata: mockExportMetadata.list,
+  readAuthorizedExportMetadata: mockExportMetadata.read,
+}));
+vi.mock("../reportExportCreation", () => ({ createAuthorizedReportExport: mockReportExportCreation }));
 
 // Mock BusinessAuditService
 vi.mock("../../../services/BusinessAuditService", () => ({
@@ -940,6 +951,65 @@ describe("Reports Integration Tests", () => {
   });
 
   describe("GET /api/reports/custom - Custom Chart (Query)", () => {
+    it.each(["monthly", "quarterly", "biannual", "annual"])(
+      "accepts %s from the original builder request",
+      async period => {
+        mockReportsService.executeCustomChart.mockResolvedValue({ data: [] });
+
+        await request(app).get("/api/reports/custom").query({
+          chartType: "bar", primaryMetric: "expenses", groupBy: "category",
+          from: "2026-01-01", to: "2026-12-31", aggregation: period,
+        }).expect(200);
+
+        expect(mockReportsService.executeCustomChart).toHaveBeenCalledWith(
+          "house-123", "user-123",
+          expect.objectContaining({ config: expect.objectContaining({ period, aggregation: undefined }) }),
+        );
+      },
+    );
+
+    it.each(["monthly", "quarterly", "biannual", "annual"])(
+      "passes the %s period independently of the aggregation operation on both verbs",
+      async period => {
+        mockReportsService.executeCustomChart.mockResolvedValue({ data: [] });
+        const chart = {
+          chartType: "bar", primaryMetric: "expenses", aggregation: "sum",
+          from: "2026-01-01", to: "2026-12-31", period,
+        };
+
+        await request(app).get("/api/reports/custom").query(chart).expect(200);
+        await request(app).post("/api/reports/custom").send(chart).expect(200);
+
+        const execution = expect.objectContaining({
+          config: expect.objectContaining({ period, aggregation: "sum" }),
+        });
+        expect(mockReportsService.executeCustomChart).toHaveBeenNthCalledWith(
+          1, "house-123", "user-123", execution,
+        );
+        expect(mockReportsService.executeCustomChart).toHaveBeenNthCalledWith(
+          2, "house-123", "user-123", execution,
+        );
+      },
+    );
+
+    it("rejects an operation supplied as a time period", async () => {
+      await request(app).get("/api/reports/custom").query({
+        chartType: "bar", primaryMetric: "expenses", period: "sum",
+        from: "2026-01-01", to: "2026-12-31",
+      }).expect(400);
+      expect(mockReportsService.executeCustomChart).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { primaryMetric: "netWorth", groupBy: "category" },
+      { primaryMetric: "savingsContributions" },
+    ])("rejects custom-chart inputs that cannot produce the named values (%j)", async invalid => {
+      const chart = { chartType: "line", from: "2026-01-01", to: "2026-12-31", period: "quarterly", ...invalid };
+      await request(app).get("/api/reports/custom").query(chart).expect(400);
+      await request(app).post("/api/reports/custom").send(chart).expect(400);
+      expect(mockReportsService.executeCustomChart).not.toHaveBeenCalled();
+    });
+
     it("should execute custom chart from query params", async () => {
       const mockChart = {
         data: [
@@ -1060,7 +1130,7 @@ describe("Reports Integration Tests", () => {
         { id: "export-2", reportType: "cashflow", status: "pending", createdAt: "2026-01-20" },
       ];
 
-      mockReportsExportService.listExports.mockResolvedValue(mockExports);
+      mockExportMetadata.list.mockResolvedValue(mockExports);
 
       const res = await request(app)
         .get("/api/reports/exports")
@@ -1068,43 +1138,44 @@ describe("Reports Integration Tests", () => {
 
       expect(res.body.success).toBe(true);
       expect(res.body.data).toHaveLength(2);
-      expect(mockReportsExportService.listExports).toHaveBeenCalledWith({
-        householdId: "house-123",
-        userId: "user-123",
-        includeHousehold: true, // admin role
-      });
+      expect(mockExportMetadata.list).toHaveBeenCalledWith(DEFAULT_GUARD_CONTEXT,
+        expect.objectContaining({ snapshot: { id: "user-123" } }), {});
     });
 
     it("should accept status filter", async () => {
-      mockReportsExportService.listExports.mockResolvedValue([]);
+      mockExportMetadata.list.mockResolvedValue([]);
 
       await request(app)
         .get("/api/reports/exports?status=completed")
         .expect(200);
 
-      expect(mockReportsExportService.listExports).toHaveBeenCalledWith(
-        expect.objectContaining({
-          status: "completed",
-        })
+      expect(mockExportMetadata.list).toHaveBeenCalledWith(
+        DEFAULT_GUARD_CONTEXT, expect.any(Object), expect.objectContaining({ status: "completed" })
       );
     });
 
     it("should accept limit parameter", async () => {
-      mockReportsExportService.listExports.mockResolvedValue([]);
+      mockExportMetadata.list.mockResolvedValue([]);
 
       await request(app)
         .get("/api/reports/exports?limit=50")
         .expect(200);
 
-      expect(mockReportsExportService.listExports).toHaveBeenCalledWith(
-        expect.objectContaining({
-          limit: 50,
-        })
+      expect(mockExportMetadata.list).toHaveBeenCalledWith(
+        DEFAULT_GUARD_CONTEXT, expect.any(Object), expect.objectContaining({ limit: 50 })
       );
     });
   });
 
   describe("POST /api/reports/exports - Create Export", () => {
+    it("uses the current authorized source cut for transaction export production", async () => {
+      mockReportExportCreation.mockResolvedValue({ id: "export-transactions", status: "completed" });
+      await request(app).post("/api/reports/exports").send({ reportType: "transactions", format: "csv",
+        startDate: "2026-01-01", endDate: "2026-01-31", scope: "mine" }).expect(200);
+      expect(mockReportExportCreation).toHaveBeenCalledWith(DEFAULT_GUARD_CONTEXT,
+        expect.objectContaining({ snapshot: { id: "user-123" } }), "mine",
+        expect.objectContaining({ reportType: "transactions", includePending: true }), "127.0.0.1");
+    });
     it("should create a new export job", async () => {
       const mockExport = {
         id: "export-123",
@@ -1113,7 +1184,7 @@ describe("Reports Integration Tests", () => {
         createdAt: "2026-01-29",
       };
 
-      mockReportsExportService.createExport.mockResolvedValue(mockExport);
+      mockReportExportCreation.mockResolvedValue(mockExport);
 
       const res = await request(app)
         .post("/api/reports/exports")
@@ -1127,6 +1198,10 @@ describe("Reports Integration Tests", () => {
 
       expect(res.body.success).toBe(true);
       expect(res.body.data.id).toBe("export-123");
+      // Non-transaction exports use the same current-grant authority boundary.
+      expect(mockReportExportCreation).toHaveBeenCalledWith(DEFAULT_GUARD_CONTEXT,
+        expect.objectContaining({ snapshot: { id: "user-123" } }), "household",
+        expect.objectContaining({ reportType: "spending" }), "127.0.0.1");
     });
 
     it("should reject unsupported format (not CSV)", async () => {
@@ -1168,6 +1243,7 @@ describe("Reports Integration Tests", () => {
       };
 
       mockReportsExportService.getExportById.mockResolvedValue(mockExport);
+      mockExportMetadata.read.mockResolvedValue(mockExport);
 
       const res = await request(app)
         .get(`/api/reports/exports/${EXPORT_ID}`)
@@ -1175,6 +1251,7 @@ describe("Reports Integration Tests", () => {
 
       expect(res.body.success).toBe(true);
       expect(res.body.data.id).toBe(EXPORT_ID);
+      expect(mockExportMetadata.read).toHaveBeenCalledWith(DEFAULT_GUARD_CONTEXT, expect.any(Object), EXPORT_ID);
     });
 
     it("should return 404 for non-existent export", async () => {
@@ -1203,6 +1280,7 @@ describe("Reports Integration Tests", () => {
       };
 
       mockReportsExportService.getExportById.mockResolvedValue(mockExport);
+      mockExportMetadata.read.mockRejectedValueOnce(new ForbiddenError("Report access unavailable"));
 
       const res = await request(app)
         .get(`/api/reports/exports/${EXPORT_ID}`)

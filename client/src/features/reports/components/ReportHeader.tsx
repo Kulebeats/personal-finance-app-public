@@ -54,8 +54,9 @@ export function ReportHeader({
 }: ReportHeaderProps) {
   return (
     <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-border pb-4">
-      <div className="flex items-center gap-6">
-        <div>
+      {/* min-w-0: the title-and-tabs group may shrink, so the tab strip scrolls instead of widening the page. */}
+      <div className="flex min-w-0 items-center gap-6">
+        <div className="shrink-0">
           <h1 className="text-2xl font-bold text-foreground tracking-tight">
             Reports
           </h1>
@@ -67,7 +68,7 @@ export function ReportHeader({
         </div>
 
         {/* Pill Tabs */}
-        <div className="flex gap-2 overflow-x-auto no-scrollbar py-1">
+        <div className="flex min-w-0 gap-2 overflow-x-auto no-scrollbar py-1">
           {REPORT_TABS.map((tab) => (
             <button
               key={tab.id}
@@ -75,7 +76,7 @@ export function ReportHeader({
               aria-label={`${tab.label} report tab`}
               aria-current={activeTab === tab.id ? "page" : undefined}
               className={cn(
-                "px-4 py-1.5 rounded-full text-sm font-medium transition-all whitespace-nowrap",
+                "px-4 py-1.5 max-md:min-h-11 rounded-full text-sm font-medium transition-all whitespace-nowrap",
                 activeTab === tab.id
                   ? "bg-orange-500 dark:bg-orange-600 text-white shadow-sm hover:bg-orange-600 dark:hover:bg-orange-700"
                   : "text-muted-foreground hover:text-foreground hover:bg-muted/50 dark:hover:bg-muted/30",
@@ -87,13 +88,13 @@ export function ReportHeader({
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2">
         {/* Customize Dropdown */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
               aria-label="Customize report settings"
-              className="h-9 px-3 border border-input bg-background hover:bg-accent hover:text-accent-foreground rounded-md text-sm font-medium flex items-center gap-2 transition-colors shadow-sm"
+              className="h-9 max-md:h-11 px-3 border border-input bg-background hover:bg-accent hover:text-accent-foreground rounded-md text-sm font-medium flex items-center gap-2 transition-colors shadow-sm"
             >
               <Settings className="w-4 h-4 text-muted-foreground" aria-hidden="true" />
               Customize
@@ -162,7 +163,7 @@ export function ReportHeader({
           <DropdownMenuTrigger asChild>
             <button
               aria-label="Export report options"
-              className="h-9 px-3 border border-input bg-background hover:bg-accent hover:text-accent-foreground rounded-md text-sm font-medium flex items-center gap-2 transition-colors shadow-sm"
+              className="h-9 max-md:h-11 px-3 border border-input bg-background hover:bg-accent hover:text-accent-foreground rounded-md text-sm font-medium flex items-center gap-2 transition-colors shadow-sm"
             >
               <Download className="w-4 h-4 text-muted-foreground" aria-hidden="true" />
               Export

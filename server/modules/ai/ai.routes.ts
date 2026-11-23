@@ -2,14 +2,15 @@
  * AI Module Routes
  *
  * Defines HTTP routes for AI assistant endpoints.
- * Applies rate limiting and consent check middleware.
+ * Applies the consent check; the chat quota is the durable admission ledger
+ * (ai.admission.repository.ts) and raw volume is throttled by the global general API limiter.
  *
  * @module ai/ai.routes
  */
 
 import { Router } from 'express';
 import * as aiController from './ai.controller';
-import { rateLimitMiddleware, consentCheckMiddleware } from './ai.middleware';
+import { consentCheckMiddleware } from './ai.middleware';
 import { requireAuth, householdGuard, requireRole } from '../../middleware/auth';
 
 const router = Router();
@@ -18,8 +19,8 @@ const router = Router();
 // FIX SEC-AI-001: Added householdGuard to prevent 500 errors and enforce tenant isolation
 router.use(requireAuth, householdGuard);
 
-// Apply consent check and rate limiting to AI query endpoints
-const aiMiddleware = [consentCheckMiddleware, rateLimitMiddleware];
+// Consent check for AI query endpoints (R17: quota is enforced at admission)
+const aiMiddleware = [consentCheckMiddleware];
 
 /**
  * POST /api/ai/chat
@@ -28,11 +29,12 @@ const aiMiddleware = [consentCheckMiddleware, rateLimitMiddleware];
  * Middleware:
  * - requireAuth: User must be authenticated
  * - consentCheckMiddleware: Household must have given AI consent
- * - rateLimitMiddleware: 50 queries/household/day (FIX AI-RATE-001)
+ * - admission ledger: 50 answered queries/household/rolling 24 h (R17)
  *
  * Body:
  * - message: string (1-1000 chars)
  * - conversationId?: string (optional)
+ * - clientRequestKey?: string (idempotency key; resend on retry)
  */
 router.post('/chat', aiMiddleware, aiController.chat);
 

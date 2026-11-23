@@ -1,10 +1,14 @@
+import { throwIfResNotOk } from "@/lib/queryClient";
+import { protectedFetch } from "@/lib/protected-fetch";
 /**
  * React Query hooks for Report Widget Preferences
  */
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useRef, useEffect, useState } from "react";
+import { useCallback, useRef, useEffect } from "react";
 import { apiCall } from "@/lib/api";
+import { assertOperationLifetime, captureOperationLifetime } from "@/lib/operation-lifetime";
+import { reportPreferencesPatchResponse, reportPreferencesResetResponse, reportPreferencesResponse } from "@/lib/report-preference-response";
 
 // ============================================================================
 // TYPES
@@ -13,6 +17,7 @@ import { apiCall } from "@/lib/api";
 import {
   CustomChartConfig,
   ReportWidgetPreferences,
+  ReportWidgetPreferencesPatch,
   WidgetPreference,
 } from "@shared/reports";
 
@@ -23,6 +28,7 @@ import {
 export type WidgetConfig = WidgetPreference; // Alias for backward compatibility if needed
 
 type ApiResponse<T> = { success: boolean; data: T; message?: string };
+const reportPreferencesKey = ["settings", "report-widgets"] as const;
 
 // ============================================================================
 // HOOKS
@@ -32,17 +38,18 @@ type ApiResponse<T> = { success: boolean; data: T; message?: string };
  * Fetch report widget preferences
  */
 export function useReportWidgetPreferences() {
+  const operation = useRef(captureOperationLifetime());
   return useQuery({
-    queryKey: ["settings", "report-widgets"],
+    queryKey: reportPreferencesKey,
     queryFn: async () => {
-      const res = await fetch("/api/settings/report-widgets", {
+      assertOperationLifetime(operation.current);
+      const res = await protectedFetch("/api/settings/report-widgets", {
         credentials: "include",
-      });
-      const json = (await res.json()) as ApiResponse<{
-        preferences: ReportWidgetPreferences;
-      }>;
-      if (!json.success) throw new Error("Failed to load widget preferences");
-      return json.data.preferences;
+      }, operation.current);
+      await throwIfResNotOk(res);
+      const json = await res.json();
+      assertOperationLifetime(operation.current);
+      return reportPreferencesResponse(json);
     },
     staleTime: 60_000, // 1 minute
   });
@@ -53,21 +60,51 @@ export function useReportWidgetPreferences() {
  */
 export function useUpdateReportWidgetPreferences() {
   const queryClient = useQueryClient();
+  const operation = useRef(captureOperationLifetime());
 
   return useMutation({
-    mutationFn: async (updates: Partial<ReportWidgetPreferences>) => {
+    scope: { id: "report-widget-preferences" },
+    mutationFn: async (updates: ReportWidgetPreferencesPatch) => {
+      assertOperationLifetime(operation.current);
+      const body = JSON.stringify(updates);
       // Through apiCall so the PATCH carries x-csrf-token.
       const json = await apiCall<
         ApiResponse<{ preferences: ReportWidgetPreferences }>
       >("/settings/report-widgets", {
         method: "PATCH",
-        body: JSON.stringify(updates),
+        body,
       });
-      if (!json.success) throw new Error("Failed to update widget preferences");
-      return json.data.preferences;
+      assertOperationLifetime(operation.current);
+      return reportPreferencesPatchResponse(json, JSON.parse(body) as ReportWidgetPreferencesPatch);
     },
-    onSuccess: (newPreferences) => {
-      queryClient.setQueryData(["settings", "report-widgets"], newPreferences);
+    onSuccess: async (newPreferences) => {
+      assertOperationLifetime(operation.current);
+      // A GET started before the write may still be resolving. Its older value
+      // must not replace this validated acknowledgement in the shared cache.
+      await queryClient.cancelQueries({ queryKey: reportPreferencesKey, exact: true });
+      assertOperationLifetime(operation.current);
+      queryClient.setQueryData(reportPreferencesKey, newPreferences);
+    },
+  });
+}
+
+/** Restore the server's existing layout defaults while retaining custom charts. */
+export function useResetReportWidgetPreferences() {
+  const queryClient = useQueryClient();
+  const operation = useRef(captureOperationLifetime());
+  return useMutation({
+    scope: { id: "report-widget-preferences" },
+    mutationFn: async () => {
+      assertOperationLifetime(operation.current);
+      const json = await apiCall<unknown>("/settings/report-widgets/reset", { method: "POST", body: "{}" });
+      assertOperationLifetime(operation.current);
+      return reportPreferencesResetResponse(json);
+    },
+    onSuccess: async preferences => {
+      assertOperationLifetime(operation.current);
+      await queryClient.cancelQueries({ queryKey: reportPreferencesKey, exact: true });
+      assertOperationLifetime(operation.current);
+      queryClient.setQueryData(reportPreferencesKey, preferences);
     },
   });
 }
@@ -76,7 +113,7 @@ export function useUpdateReportWidgetPreferences() {
  * Convenience hook for enabling/disabling widgets
  */
 export function useWidgetToggle() {
-  const { mutate } = useUpdateReportWidgetPreferences();
+  const { mutateAsync: mutate } = useUpdateReportWidgetPreferences();
   const { data: preferences } = useReportWidgetPreferences();
 
   const toggleWidget = useCallback(
@@ -85,14 +122,14 @@ export function useWidgetToggle() {
       widgetId: string,
       enabled: boolean
     ) => {
-      if (!preferences) return;
+      if (!preferences) return Promise.reject(new Error("Widget preferences are not loaded. Please retry."));
 
       const widget = preferences[section][widgetId];
-      if (!widget) return;
+      if (!widget) return Promise.reject(new Error("Widget preferences are unavailable. Please reload."));
 
-      mutate({
+      return mutate({
         [section]: {
-          [widgetId]: { ...widget, enabled },
+          [widgetId]: { enabled },
         },
       });
     },
@@ -105,14 +142,14 @@ export function useWidgetToggle() {
       widgetId: string,
       newOrder: number
     ) => {
-      if (!preferences) return;
+      if (!preferences) return Promise.reject(new Error("Widget preferences are not loaded. Please retry."));
 
       const widget = preferences[section][widgetId];
-      if (!widget) return;
+      if (!widget) return Promise.reject(new Error("Widget preferences are unavailable. Please reload."));
 
-      mutate({
+      return mutate({
         [section]: {
-          [widgetId]: { ...widget, order: newOrder },
+          [widgetId]: { order: newOrder },
         },
       });
     },
@@ -125,14 +162,14 @@ export function useWidgetToggle() {
       widgetId: string,
       chartType: string
     ) => {
-      if (!preferences) return;
+      if (!preferences) return Promise.reject(new Error("Widget preferences are not loaded. Please retry."));
 
       const widget = preferences[section][widgetId];
-      if (!widget) return;
+      if (!widget) return Promise.reject(new Error("Widget preferences are unavailable. Please reload."));
 
-      mutate({
+      return mutate({
         [section]: {
-          [widgetId]: { ...widget, chartType },
+          [widgetId]: { chartType },
         },
       });
     },
@@ -152,6 +189,7 @@ export function useWidgetChartType(
   const { data: preferences } = useReportWidgetPreferences();
   const { setChartType: persistChartType } = useWidgetToggle();
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
+  const operation = useRef(captureOperationLifetime());
 
   const widget = preferences?.[section]?.[widgetId];
   const chartType = widget?.chartType;
@@ -165,6 +203,7 @@ export function useWidgetChartType(
 
       // Debounce persistence to avoid rapid API calls
       debounceRef.current = setTimeout(() => {
+        try { assertOperationLifetime(operation.current); } catch { return; }
         persistChartType(section, widgetId, newChartType);
       }, 500);
     },
@@ -178,7 +217,7 @@ export function useWidgetChartType(
         clearTimeout(debounceRef.current);
       }
     };
-  }, []);
+  }, [section, widgetId]);
 
   return { chartType, setChartType };
 }
@@ -187,12 +226,12 @@ export function useWidgetChartType(
  * Hook for managing custom charts
  */
 export function useCustomCharts() {
-  const { mutate } = useUpdateReportWidgetPreferences();
+  const { mutateAsync: mutate } = useUpdateReportWidgetPreferences();
   const { data: preferences } = useReportWidgetPreferences();
 
   const addCustomChart = useCallback(
-    (chart: Omit<CustomChartConfig, "id" | "order" | "createdAt">) => {
-      if (!preferences) return;
+    async (chart: Omit<CustomChartConfig, "id" | "order" | "createdAt">) => {
+      if (!preferences) throw new Error("Widget preferences are not loaded. Please retry.");
       if ((preferences.customCharts || []).length >= 10) {
         throw new Error("Maximum 10 custom charts allowed");
       }
@@ -204,7 +243,7 @@ export function useCustomCharts() {
         order: (preferences.customCharts || []).length,
       };
 
-      mutate({
+      return mutate({
         customCharts: [...(preferences.customCharts || []), newChart],
       });
     },
@@ -212,34 +251,34 @@ export function useCustomCharts() {
   );
 
   const updateCustomChart = useCallback(
-    (chartId: string, updates: Partial<Omit<CustomChartConfig, "id">>) => {
-      if (!preferences) return;
+    async (chartId: string, updates: Partial<Omit<CustomChartConfig, "id">>) => {
+      if (!preferences) throw new Error("Widget preferences are not loaded. Please retry.");
 
       const updatedCharts = (preferences.customCharts || []).map((chart) =>
         chart.id === chartId ? { ...chart, ...updates } : chart
       );
 
-      mutate({ customCharts: updatedCharts });
+      return mutate({ customCharts: updatedCharts });
     },
     [mutate, preferences]
   );
 
   const deleteCustomChart = useCallback(
-    (chartId: string) => {
-      if (!preferences) return;
+    async (chartId: string) => {
+      if (!preferences) throw new Error("Widget preferences are not loaded. Please retry.");
 
       const updatedCharts = (preferences.customCharts || [])
         .filter((chart) => chart.id !== chartId)
         .map((chart, index) => ({ ...chart, order: index }));
 
-      mutate({ customCharts: updatedCharts });
+      return mutate({ customCharts: updatedCharts });
     },
     [mutate, preferences]
   );
 
   const reorderCustomCharts = useCallback(
-    (chartIds: string[]) => {
-      if (!preferences) return;
+    async (chartIds: string[]) => {
+      if (!preferences) throw new Error("Widget preferences are not loaded. Please retry.");
 
       const currentCharts = preferences.customCharts || [];
       const updatedCharts = chartIds
@@ -249,7 +288,7 @@ export function useCustomCharts() {
         })
         .filter(Boolean) as CustomChartConfig[];
 
-      mutate({ customCharts: updatedCharts });
+      return mutate({ customCharts: updatedCharts });
     },
     [mutate, preferences]
   );
@@ -268,49 +307,28 @@ export function useCustomCharts() {
  * Hook for managing widget onboarding state
  */
 export function useWidgetOnboarding() {
-  const { data: preferences, isLoading } = useReportWidgetPreferences();
-  const { mutate } = useUpdateReportWidgetPreferences();
-  const storageKey = "reportsWidgetSetupComplete";
-  const [localCompleted, setLocalCompleted] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    return window.localStorage.getItem(storageKey) === "true";
-  });
-
-  useEffect(() => {
-    if (preferences?.hasCompletedWidgetSetup && !localCompleted) {
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem(storageKey, "true");
-      }
-      setLocalCompleted(true);
-    }
-  }, [preferences?.hasCompletedWidgetSetup, localCompleted, storageKey]);
+  const { data: preferences, isLoading, error, refetch } = useReportWidgetPreferences();
+  const { mutateAsync: mutate } = useUpdateReportWidgetPreferences();
 
   const completeOnboarding = useCallback(
-    (selectedPrefs: Partial<ReportWidgetPreferences>) => {
-      mutate({
+    (selectedPrefs: ReportWidgetPreferencesPatch) => {
+      return mutate({
         ...selectedPrefs,
         hasCompletedWidgetSetup: true,
       });
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem(storageKey, "true");
-      }
-      setLocalCompleted(true);
     },
-    [mutate, storageKey]
+    [mutate]
   );
 
   const resetOnboarding = useCallback(() => {
-    mutate({ hasCompletedWidgetSetup: false });
-    if (typeof window !== "undefined") {
-      window.localStorage.removeItem(storageKey);
-    }
-    setLocalCompleted(false);
-  }, [mutate, storageKey]);
+    return mutate({ hasCompletedWidgetSetup: false });
+  }, [mutate]);
 
   return {
-    hasCompletedSetup:
-      (preferences?.hasCompletedWidgetSetup ?? false) || localCompleted,
+    hasCompletedSetup: preferences?.hasCompletedWidgetSetup,
     isLoading,
+    error,
+    refetch,
     completeOnboarding,
     resetOnboarding,
   };

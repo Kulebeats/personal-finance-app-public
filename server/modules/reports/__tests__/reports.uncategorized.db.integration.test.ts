@@ -19,6 +19,8 @@ import { eq } from "drizzle-orm";
 import { db } from "../../../db";
 import {
   households,
+  householdMembers,
+  users,
   accounts,
   categoryGroups,
   categories,
@@ -69,6 +71,11 @@ describe("Reports — uncategorized and merchant-less expenses (real DB)", () =>
     await db
       .insert(households)
       .values({ id: householdId, name: "Uncategorized HH", currency: "ZMW" });
+    // The annual report's net worth reads the account summary's audience, so
+    // the reader must be an actual owner member, as every real session is.
+    await db.insert(users).values({ id: userId, email: `uncat-${userId}@example.invalid`,
+      username: `uncat-${userId}`, passwordHash: "synthetic-not-a-login", emailVerified: true });
+    await db.insert(householdMembers).values({ householdId, userId, role: "owner" });
     await db.insert(accounts).values({
       id: accountId,
       householdId,
@@ -132,6 +139,7 @@ describe("Reports — uncategorized and merchant-less expenses (real DB)", () =>
   });
 
   afterAll(async () => {
+    await db.delete(householdMembers).where(eq(householdMembers.householdId, householdId));
     await db.delete(transactions).where(eq(transactions.householdId, householdId));
     await db.delete(merchants).where(eq(merchants.householdId, householdId));
     await db.delete(categories).where(eq(categories.householdId, householdId));
@@ -140,6 +148,7 @@ describe("Reports — uncategorized and merchant-less expenses (real DB)", () =>
       .where(eq(categoryGroups.householdId, householdId));
     await db.delete(accounts).where(eq(accounts.householdId, householdId));
     await db.delete(households).where(eq(households.id, householdId));
+    await db.delete(users).where(eq(users.id, userId));
   });
 
   async function breakdown(groupBy: string) {

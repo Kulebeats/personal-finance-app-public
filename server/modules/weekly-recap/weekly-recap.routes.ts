@@ -5,7 +5,8 @@
 import { Router } from "express";
 import { requireAuth } from "../../middleware/auth";
 import { householdGuard } from "../../middleware/householdGuard";
-import { analyticsLimiter, generalLimiter } from "../../middleware/rateLimit";
+import { requireCapability } from "../../core/authz/requireCapability";
+import { analyticsLimiter } from "../../middleware/rateLimit";
 import { weeklyRecapController } from "./weekly-recap.controller";
 
 const router = Router();
@@ -17,14 +18,16 @@ router.get(
   analyticsLimiter,
   weeklyRecapController.getRecap
 );
-router.post("/feedback", householdGuard, generalLimiter, weeklyRecapController.submitFeedback);
+// AH-09: ad hoc generation and feedback need financial.export (not view_only/professional).
+const canExport = requireCapability("financial.export");
+router.post("/feedback", householdGuard, canExport, weeklyRecapController.submitFeedback);
 
 // History and generation
 router.get("/history", householdGuard, analyticsLimiter, weeklyRecapController.getHistory);
-router.post("/generate", householdGuard, analyticsLimiter, weeklyRecapController.generateRecap);
+router.post("/generate", householdGuard, canExport, analyticsLimiter, weeklyRecapController.generateRecap);
 
 // Settings endpoints
-router.get("/settings", generalLimiter, weeklyRecapController.getSettings);
-router.patch("/settings", generalLimiter, weeklyRecapController.updateSettings);
+router.get("/settings", weeklyRecapController.getSettings);
+router.patch("/settings", weeklyRecapController.updateSettings);
 
 export default router;

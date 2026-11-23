@@ -12,6 +12,7 @@ import {
   useReorderCategories,
 } from "@/hooks/use-settings";
 import type { Category, CategoryGroup } from "@shared/schema";
+import { useCalendarYearMonth } from "@/lib/calendarZone";
 import { CategoryFormState, GroupFormState } from "../types";
 
 /**
@@ -19,15 +20,16 @@ import { CategoryFormState, GroupFormState } from "../types";
  * Extracts form state management and CRUD handlers from the main component.
  */
 export function useCategoriesState() {
-  const now = useMemo(() => new Date(), []);
+  // "This month" is the household calendar's month, never the browser's (NEW-15).
+  const { year, month } = useCalendarYearMonth();
   const categoriesQuery = useMemo(
     () => ({
       includeArchived: true,
       includeStats: true,
-      month: now.getMonth() + 1,
-      year: now.getFullYear(),
+      month,
+      year,
     }),
-    [now],
+    [month, year],
   );
 
   const { data, isLoading } = useCategories(categoriesQuery);

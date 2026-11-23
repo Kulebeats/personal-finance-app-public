@@ -4,6 +4,10 @@ import { type Transaction, type RecurringTransaction } from "@shared/schema";
 import { logger } from "../utils/logger";
 import { Money } from "../core/money";
 import type { Frequency } from "../core/calculations/recurring/types";
+import type { HouseholdContext } from "../middleware/householdGuard";
+import { detectVisiblePatterns } from "./recurring/RecurringPatternSelection";
+import { listVisibleRecurringRules } from "./recurring/RecurringAudienceQuery";
+import type { PatternSelection } from "@shared/recurring-pattern";
 
 export interface DetectionOptions {
   minOccurrences?: number;
@@ -17,7 +21,11 @@ export interface DetectedPattern {
   name: string;
   type: "income" | "expense";
   merchantId?: string | null;
-  estimatedAmount: number;
+  estimatedAmount: number | string;
+  currency?: string;
+  amountTolerance?: number;
+  selection?: PatternSelection;
+  confirmationIssue?: string;
   amountVariance: number;
   frequency: string;
   dayOfMonth?: number;
@@ -43,8 +51,10 @@ export class PatternDetectionService {
    */
   async detectPatterns(
     householdId: string,
-    options: DetectionOptions = {}
+    options: DetectionOptions = {},
+    actor?: HouseholdContext,
   ): Promise<DetectedPattern[]> {
+    if (actor) return detectVisiblePatterns(householdId, options, actor);
     const {
       minOccurrences = 3,
       lookbackMonths = 6,
@@ -55,7 +65,8 @@ export class PatternDetectionService {
 
     const transactions = await transactionRepository.findForPatternDetection(
       householdId,
-      { lookbackMonths, merchantId, categoryId }
+      { lookbackMonths, merchantId, categoryId },
+      actor,
     );
 
     const groups = this.groupTransactions(transactions);
@@ -78,28 +89,25 @@ export class PatternDetectionService {
    */
   async matchTransaction(
     transaction: Transaction,
-    householdId: string
+    householdId: string,
+    actor?: HouseholdContext,
   ): Promise<MatchResult | null> {
-    const rules = await recurringRepository.findByHousehold(householdId);
+    const rules = actor ? await listVisibleRecurringRules(actor) : await recurringRepository.findByHousehold(householdId);
 
     let bestMatch: MatchResult | null = null;
 
     for (const rule of rules) {
-      if (rule.autoLinkEnabled === false) continue;
-
-      const { confidence, reasons } = this.calculateMatchScore(
-        transaction,
-        rule
-      );
-
-      if (confidence >= this.CONFIDENCE_THRESHOLD) {
-        if (!bestMatch || confidence > bestMatch.confidence) {
-          bestMatch = { rule, confidence, matchReasons: reasons };
-        }
-      }
+      const match = this.matchRule(transaction, rule);
+      if (match && (!bestMatch || match.confidence > bestMatch.confidence)) bestMatch = match;
     }
 
     return bestMatch;
+  }
+
+  matchRule(transaction: Transaction, rule: RecurringTransaction): MatchResult | null {
+    if (rule.autoLinkEnabled === false || rule.isActive === false || rule.isPaused === true) return null;
+    const { confidence, reasons } = this.calculateMatchScore(transaction, rule);
+    return confidence >= this.CONFIDENCE_THRESHOLD ? { rule, confidence, matchReasons: reasons } : null;
   }
 
   /**
@@ -345,7 +353,7 @@ export class PatternDetectionService {
   }
 
   private detectDayOfMonth(transactions: Transaction[]): number | undefined {
-    const days = transactions.map((t) => new Date(t.date).getDate());
+    const days = transactions.map((t) => new Date(t.date).getUTCDate());
     const counts = new Map<number, number>();
 
     for (const day of days) {
@@ -360,7 +368,7 @@ export class PatternDetectionService {
   }
 
   private detectDayOfWeek(transactions: Transaction[]): number | undefined {
-    const days = transactions.map((t) => new Date(t.date).getDay());
+    const days = transactions.map((t) => new Date(t.date).getUTCDay());
     const counts = new Map<number, number>();
 
     for (const day of days) {

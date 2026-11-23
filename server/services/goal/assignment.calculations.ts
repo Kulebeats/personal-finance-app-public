@@ -10,16 +10,23 @@ import { db } from "../../db";
 import {
   accounts,
   goalAccountAssignments,
+  fxRates,
   goals,
   holdings,
   securities,
 } from "@shared/schema";
 import type { Goal } from "@shared/schema";
 import { eq, inArray, and } from "drizzle-orm";
-import { getLatestFxRates } from "../../core/calculations";
+import { readLatestFxRates } from "../../core/calculations/currency/latest-rates-query";
 import { Money } from "../../core/money";
 import { buildGoalBalanceUpdate } from "../goalCalculations";
+import {
+  assertHouseholdSecurityPriceAvailable,
+  householdPricedSecurityColumns,
+  householdSecurityPriceEvidence,
+} from "../investment/householdSecurityPriceRead";
 import type { TransactionType } from "../../utils/withTransaction";
+import { CalculationError } from "../../core/calculations/errors";
 
 // Database executor - can be either the db instance or a transaction
 export type DbExecutor = typeof db | TransactionType;
@@ -133,7 +140,11 @@ export async function calculateHoldingsValue(
 ): Promise<Money> {
   // FIX DATA-GOAL-005: Filter holdings by household to prevent cross-tenant access
   const holdingsRows = await executor
-    .select({ holding: holdings, security: securities })
+    .select({
+      holding: holdings,
+      security: householdPricedSecurityColumns(householdId),
+      priceEvidence: householdSecurityPriceEvidence(householdId),
+    })
     .from(holdings)
     .innerJoin(securities, eq(holdings.securityId, securities.id))
     .where(
@@ -155,21 +166,29 @@ export async function calculateHoldingsValue(
   );
 
   // Use centralized calculation engine for FX rates
-  const fxRatesByCurrency = await getLatestFxRates(currencies, normalizedBase);
+  const fxRatesByCurrency = await readLatestFxRates(executor, fxRates, currencies, normalizedBase, householdId);
+
+  // A-30: the holdings screen's price-evidence check. A position with shares and
+  // no usable price throws "unavailable"; it is never valued at zero.
+  for (const { holding, priceEvidence } of holdingsRows) {
+    assertHouseholdSecurityPriceAvailable(priceEvidence, holding.quantity);
+  }
 
   let totalValue = Money.zero(normalizedBase);
   for (const { holding, security } of holdingsRows) {
     const currency = (security.currency || normalizedBase).toUpperCase();
-    const quantity = parseFloat(holding.quantity ?? "0"); // Quantity is share count, not currency
+    // After the check above, only a zero-share position can lack a price.
     const price = new Money(security.currentPrice ?? "0");
-    const localValue = price.multiply(quantity);
-    const fxRate =
-      currency === normalizedBase
-        ? 1
-        : fxRatesByCurrency.get(currency) ??
-          (holding.acquisitionFxRate
-            ? parseFloat(String(holding.acquisitionFxRate))
-            : 1);
+    // Quantity is a share count, not money: it stays a decimal string into Decimal
+    // multiplication. A float keeps ~17 significant digits and loses cents (P2).
+    const localValue = price.multiply(holding.quantity ?? "0");
+    // R12: the household's own rate, else the shared rate. A missing rate is a
+    // typed error, never 1 and never the stale acquisition rate (D11).
+    const fxRate = currency === normalizedBase ? 1 : fxRatesByCurrency.get(currency);
+    if (fxRate === undefined) {
+      throw new CalculationError("MISSING_FX_RATE", { from: currency, to: normalizedBase, householdId },
+        `Exchange rate unavailable for ${currency} -> ${normalizedBase}`);
+    }
     totalValue = totalValue.add(localValue.multiply(fxRate));
   }
 

@@ -9,6 +9,8 @@
 
 import { eq, and, isNull, sql, or, gte, lte } from "drizzle-orm";
 import { db } from "../db";
+import { couponCashDescriptionFields } from "../services/grz/couponCashDescription";
+import { postedTransactionPredicate } from "./postedTransactionPredicate";
 import {
   transactions,
   accounts,
@@ -71,6 +73,7 @@ export class TransactionCountRepository {
     },
   ): Promise<number> {
     // Build conditions mirroring findByHousehold filters
+    const cashDescription = couponCashDescriptionFields();
     const conditions = [
       eq(transactions.householdId, householdId),
       isNull(transactions.deletedAt),
@@ -78,7 +81,7 @@ export class TransactionCountRepository {
 
     // R-07: Mirror pending filter from findByHousehold
     if (!options?.includePending) {
-      conditions.push(eq(transactions.isPending, false));
+      conditions.push(postedTransactionPredicate);
     }
 
     if (options?.accountId) {
@@ -110,7 +113,7 @@ export class TransactionCountRepository {
     }
 
     if (options?.merchantId) {
-      conditions.push(eq(transactions.merchantId, options.merchantId));
+      conditions.push(eq(cashDescription.merchantId, options.merchantId));
     }
 
     if (options?.amountMin) {
@@ -129,10 +132,10 @@ export class TransactionCountRepository {
     if (options?.search) {
       const searchPattern = `%${options.search}%`;
       const searchCondition = or(
-        sql`LOWER(${transactions.name}) LIKE LOWER(${searchPattern})`,
-        sql`LOWER(${transactions.originalName}) LIKE LOWER(${searchPattern})`,
-        sql`LOWER(${transactions.notes}) LIKE LOWER(${searchPattern})`,
-        sql`${transactions.merchantId} IN (
+        sql`LOWER(${cashDescription.name}) LIKE LOWER(${searchPattern})`,
+        sql`LOWER(${cashDescription.originalName}) LIKE LOWER(${searchPattern})`,
+        sql`LOWER(${cashDescription.notes}) LIKE LOWER(${searchPattern})`,
+        sql`${cashDescription.merchantId} IN (
           SELECT ${merchants.id} FROM ${merchants}
           WHERE ${merchants.householdId} = ${householdId}
           AND LOWER(${merchants.name}) LIKE LOWER(${searchPattern})

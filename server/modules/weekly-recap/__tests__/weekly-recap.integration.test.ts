@@ -8,7 +8,7 @@
 import request from "supertest";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Express } from "express";
-import { db } from "../../../db";
+import { db, pool } from "../../../db";
 import { eq, and } from "drizzle-orm";
 import {
   users,
@@ -21,7 +21,11 @@ import {
   categories,
   userDisplaySettings,
   userNotificationPreferences,
+  netWorthSnapshots,
+  accountBalanceSnapshots,
 } from "@shared/schema";
+import { seedLegacyCashCapture } from "../../../testing/fixtures/legacy-cash-capture";
+import { snapshotWorker } from "../../../jobs/snapshotWorker";
 import {
   createTestUser,
   createTestHousehold,
@@ -136,6 +140,8 @@ describe("Weekly Recap Integration Tests", () => {
 
   afterAll(async () => {
     // Cleanup
+    // Persisted Express sessions have no user/household FK cascade.
+    await pool.query('delete from "session" where sess->>\'userId\'=$1 or sess->>\'mfaPendingUserId\'=$1', [userId]);
     await db.delete(auditLogs).where(eq(auditLogs.householdId, householdId));
     await db
       .delete(transactions)
@@ -176,8 +182,8 @@ describe("Weekly Recap Integration Tests", () => {
       expect(data).toHaveProperty("recurring");
     });
 
-    // CONTRACT-005: Verify netWorth has trend field
-    it("should include trend in netWorth (CONTRACT-005)", async () => {
+    // CONTRACT-005: Field remains present, but absent evidence has no trend.
+    it("keeps the worth contract explicit when no historical snapshots are proven", async () => {
       const res = await request(app)
         .get("/api/weekly-recap")
         .set("Cookie", authCookie)
@@ -191,7 +197,24 @@ describe("Weekly Recap Integration Tests", () => {
       expect(netWorth).toHaveProperty("changePercent");
       expect(netWorth).toHaveProperty("series");
       expect(netWorth).toHaveProperty("trend");
-      expect(["up", "down", "steady"]).toContain(netWorth.trend);
+      expect(netWorth).toMatchObject({ status: "unavailable", current: null, previous: null, change: null, changePercent: null, trend: null, series: [] });
+    });
+
+    it("retains a numeric comparison and trend when both dated snapshots are available", async () => {
+      try {
+        expect(await snapshotWorker.processHousehold(householdId)).toBe(true);
+        const [capture] = await db.select({ date: netWorthSnapshots.date }).from(netWorthSnapshots)
+          .where(eq(netWorthSnapshots.householdId, householdId));
+        const end = new Date(`${capture.date}T00:00:00Z`);
+        const daysBefore = (days: number) => new Date(end.getTime() - days * 86_400_000).toISOString().slice(0, 10);
+        await seedLegacyCashCapture(householdId, daysBefore(8), { accountId: testAccountId, balance: "4500.00" });
+        const response = await request(app).get("/api/weekly-recap")
+          .query({ weekStart: daysBefore(6), weekEnd: capture.date }).set("Cookie", authCookie).expect(200);
+        expect(response.body.data.netWorth).toMatchObject({ status: "available", currency: "ZMW", current: 5000, previous: 4500, change: 500, trend: "up" });
+      } finally {
+        await db.delete(netWorthSnapshots).where(eq(netWorthSnapshots.householdId, householdId));
+        await db.delete(accountBalanceSnapshots).where(eq(accountBalanceSnapshots.accountId, testAccountId));
+      }
     });
 
     // CONTRACT-001/002/005: Verify spending structure alignment
@@ -475,7 +498,7 @@ describe("Weekly Recap Integration Tests", () => {
       expect(res.body.data).toEqual({
         enabled: true,
         emailEnabled: false,
-        dayOfWeek: 0,
+        dayOfWeek: 1, // OPS-007: Monday, the day the recap e-mail uses when none is saved
         includeGoals: true,
         includeRecurring: true,
       });
@@ -521,7 +544,7 @@ describe("Weekly Recap Integration Tests", () => {
         .limit(1);
 
       expect(display).toBeDefined();
-      expect(display?.firstDayOfWeek).toBe("Monday");
+      expect(display?.firstDayOfWeek).toBe("Sunday");
 
       const stored = display?.dashboardWidgets as
         | { weeklyRecap?: { dayOfWeek?: number; includeGoals?: boolean; includeRecurring?: boolean } }
@@ -585,13 +608,12 @@ describe("Weekly Recap Integration Tests", () => {
       ).toBe(true);
     });
 
-    it("should use generalLimiter for POST /feedback (100 req/min)", async () => {
+    it("should inherit general quota for POST /feedback without a duplicate mount", async () => {
       expect(
         routeUsesMiddleware(weeklyRecapRouter, "/feedback", "post", generalLimiter),
-      ).toBe(true);
+      ).toBe(false);
 
-      // This test verifies that feedback uses the general limiter
-      // We don't want to hit 100 requests, so we just verify it works
+      // Global request accounting is exercised by scripts/__tests__/limiters.test.mjs.
       const res = await request(app)
         .post("/api/weekly-recap/feedback")
         .set("Cookie", authCookie)
@@ -602,7 +624,7 @@ describe("Weekly Recap Integration Tests", () => {
           feedback: "positive",
         });
 
-      expect([200, 429]).toContain(res.status);
+      expect(res.status).toBe(200);
     });
   });
 
@@ -705,6 +727,7 @@ describe("Weekly Recap Integration Tests", () => {
     });
 
     afterAll(async () => {
+      await pool.query('delete from "session" where sess->>\'userId\'=$1 or sess->>\'mfaPendingUserId\'=$1', [otherUserId]);
       await db
         .delete(householdMembers)
         .where(eq(householdMembers.householdId, otherHouseholdId));

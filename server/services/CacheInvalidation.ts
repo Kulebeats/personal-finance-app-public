@@ -1,5 +1,6 @@
 import { analyticsCache } from "./AnalyticsCache";
 import { logger } from "../utils/logger";
+import { OrdinaryAnalyticsInvalidationError } from "./ordinary-analytics-invalidation";
 
 /**
  * Cache Invalidation Service
@@ -25,6 +26,7 @@ const INVALIDATION_MAP = {
     "expenseClassification", // Uses transaction data for classification
     "forecast", // Uses historical transaction data for forecasting
     "customChart", // May use transaction data in custom charts
+    "goalsProgress", // Whether a goal's progress is visible follows its linked transactions
   ],
   account: [
     "netWorth",
@@ -32,6 +34,7 @@ const INVALIDATION_MAP = {
     "netWorthChanges", // Uses account balance snapshots
     "financialRatios", // Uses account balances for ratio calculations
     "debtAnalysis", // Uses debt account balances
+    "goalsProgress", // Whether a goal's progress is visible follows account privacy
   ],
   category: [
     "spendingBreakdown",
@@ -43,6 +46,7 @@ const INVALIDATION_MAP = {
   budget: [
     "dashboard",
     "forecast", // Uses budget data for forecasting
+    "cashflow", // includeForecast responses share the cashflow endpoint key.
   ],
   goal: [
     "goalsProgress", // Uses goal data for progress tracking
@@ -71,11 +75,30 @@ export async function invalidateOnChange(
     endpoints,
   });
 
-  await Promise.all(
+  const outcomes = await Promise.allSettled(
     endpoints.map((endpoint) =>
       analyticsCache.invalidateEndpoint(endpoint, householdId)
     )
   );
+  const failures = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
+  // A concurrent ordinary failure must not conceal a required profile refusal.
+  const requiredFailure = failures.find(outcome => !(outcome.reason instanceof OrdinaryAnalyticsInvalidationError));
+  if (requiredFailure) throw requiredFailure.reason;
+  if (failures.length > 0) throw failures[0].reason;
+}
+
+/** Optional ordinary cache work after commit must not fail an already completed write. */
+export async function invalidateOnChangeAfterCommit(
+  entity: InvalidationEntity,
+  householdId: string,
+): Promise<void> {
+  try {
+    await invalidateOnChange(entity, householdId);
+  } catch (error) {
+    // A required injected profile refusal is not an ordinary cache fallback.
+    if (!(error instanceof OrdinaryAnalyticsInvalidationError)) throw error;
+    logger.warn("Optional analytics cache invalidation failed after commit", { entity, householdId, error });
+  }
 }
 
 /**

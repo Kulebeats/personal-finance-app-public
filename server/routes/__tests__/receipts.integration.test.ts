@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import express from "express";
 import request from "supertest";
+import { receiptRow } from "../../modules/receipts/__tests__/receipt-row.fixture";
 import {
   apiErrorMiddleware,
   NotFoundError,
@@ -14,6 +15,7 @@ const { mockReceiptService, mockBusinessAuditService } = vi.hoisted(() => ({
   mockReceiptService: {
     getPendingReceipts: vi.fn(),
     getReceipt: vi.fn(),
+    getVisibleReceipt: vi.fn(),
     uploadReceipt: vi.fn(),
     linkReceiptToTransaction: vi.fn(),
     deleteReceipt: vi.fn(),
@@ -84,7 +86,7 @@ describe("Receipts Integration", () => {
   describe("GET /api/receipts", () => {
     it("returns pending receipts with pagination", async () => {
       mockReceiptService.getPendingReceipts.mockResolvedValue({
-        receipts: [{ id: receiptId }],
+        receipts: [receiptRow({ id: receiptId })],
         total: 1,
       });
 
@@ -95,7 +97,7 @@ describe("Receipts Integration", () => {
       expect(res.body.data).toHaveLength(1);
       expect(res.body.pagination.total).toBe(1);
       expect(mockReceiptService.getPendingReceipts).toHaveBeenCalledWith(
-        householdId,
+        expect.objectContaining({ householdId: householdId }),
         expect.objectContaining({ status: "pending" })
       );
     });
@@ -109,7 +111,7 @@ describe("Receipts Integration", () => {
 
     it("passes search parameter to service", async () => {
       mockReceiptService.getPendingReceipts.mockResolvedValue({
-        receipts: [{ id: receiptId }],
+        receipts: [receiptRow({ id: receiptId })],
         total: 1,
       });
 
@@ -118,7 +120,7 @@ describe("Receipts Integration", () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(mockReceiptService.getPendingReceipts).toHaveBeenCalledWith(
-        householdId,
+        expect.objectContaining({ householdId: householdId }),
         expect.objectContaining({ search: "target" })
       );
     });
@@ -133,7 +135,7 @@ describe("Receipts Integration", () => {
 
       expect(res.status).toBe(200);
       expect(mockReceiptService.getPendingReceipts).toHaveBeenCalledWith(
-        householdId,
+        expect.objectContaining({ householdId: householdId }),
         expect.objectContaining({ status: "matched" })
       );
     });
@@ -148,7 +150,7 @@ describe("Receipts Integration", () => {
 
       expect(res.status).toBe(200);
       expect(mockReceiptService.getPendingReceipts).toHaveBeenCalledWith(
-        householdId,
+        expect.objectContaining({ householdId: householdId }),
         expect.objectContaining({ limit: 10, offset: 20 })
       );
     });
@@ -164,7 +166,7 @@ describe("Receipts Integration", () => {
 
   describe("GET /api/receipts/:id", () => {
     it("returns a receipt by id", async () => {
-      mockReceiptService.getReceipt.mockResolvedValue({ id: receiptId });
+      mockReceiptService.getVisibleReceipt.mockResolvedValue(receiptRow({ id: receiptId }));
 
       const res = await request(app).get(`/api/receipts/${receiptId}`);
 
@@ -174,7 +176,7 @@ describe("Receipts Integration", () => {
     });
 
     it("returns 404 when receipt is missing", async () => {
-      mockReceiptService.getReceipt.mockRejectedValue(
+      mockReceiptService.getVisibleReceipt.mockRejectedValue(
         new NotFoundError("Receipt not found")
       );
 
@@ -230,7 +232,7 @@ describe("Receipts Integration", () => {
 
   describe("POST /api/receipts/:id/match", () => {
     it("links a receipt to a transaction", async () => {
-      mockReceiptService.linkReceiptToTransaction.mockResolvedValue(undefined);
+      mockReceiptService.linkReceiptToTransaction.mockResolvedValue(true);
 
       const res = await request(app)
         .post(`/api/receipts/${receiptId}/match`)
@@ -284,7 +286,7 @@ describe("Receipts Integration", () => {
     });
 
     it("accepts skipAmountValidation flag to override amount check", async () => {
-      mockReceiptService.linkReceiptToTransaction.mockResolvedValue(undefined);
+      mockReceiptService.linkReceiptToTransaction.mockResolvedValue(true);
 
       const res = await request(app)
         .post(`/api/receipts/${receiptId}/match`)
@@ -297,12 +299,12 @@ describe("Receipts Integration", () => {
         transactionId,
         householdId,
         "user-123",
-        { skipAmountValidation: true }
+        expect.objectContaining({ skipAmountValidation: true })
       );
     });
 
     it("passes skipAmountValidation=false when not provided", async () => {
-      mockReceiptService.linkReceiptToTransaction.mockResolvedValue(undefined);
+      mockReceiptService.linkReceiptToTransaction.mockResolvedValue(true);
 
       const res = await request(app)
         .post(`/api/receipts/${receiptId}/match`)
@@ -314,7 +316,7 @@ describe("Receipts Integration", () => {
         transactionId,
         householdId,
         "user-123",
-        { skipAmountValidation: false }
+        expect.objectContaining({ skipAmountValidation: false })
       );
     });
   });

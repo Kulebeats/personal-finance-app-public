@@ -12,10 +12,10 @@
  * @module ai/ai.conversation.service
  */
 
-import { randomUUID } from 'crypto';
-import { NotFoundError } from '../../core/errors';
+import { HttpError, NotFoundError } from '../../core/errors';
 import { logger } from '../../utils/logger';
-import { aiConversationRepository } from './ai.conversation.repository';
+import { aiConversationRepository, type ExchangePersistedHook } from './ai.conversation.repository';
+import type { PersistResult } from './ai.exchange-settlement';
 import type {
   ConversationDetails,
   ConversationListResponse,
@@ -30,7 +30,12 @@ export class AIConversationService {
    * and the exchange is appended to the same thread.
    *
    * Failure to persist must NOT fail the chat response the user already has, so
-   * a store error is logged and we fall back to the supplied (or a fresh) id.
+   * a store error is logged and the outcome is reported as not persisted, for
+   * the caller to settle and audit elsewhere. No id is invented (N6): the
+   * supplied id is kept only when it names an existing thread the actor owns,
+   * otherwise there is no thread ("").
+   * A deliberate refusal (an HttpError, e.g. the actor was erased while the
+   * request ran) is not a store error and propagates (Astra #255 r3).
    */
   async recordExchange(params: {
     householdId: string;
@@ -39,33 +44,50 @@ export class AIConversationService {
     userMessage: string;
     assistantReply: string;
     toolsUsed: string[];
-  }): Promise<string> {
+    /** Runs inside the exchange's transaction (R17 ledger settlement). */
+    onPersisted?: ExchangePersistedHook;
+  }): Promise<PersistResult> {
     const {
       householdId,
       userId,
       conversationId,
       userMessage,
       assistantReply,
-      toolsUsed
+      toolsUsed,
+      onPersisted
     } = params;
 
     try {
-      return await aiConversationRepository.appendExchange({
+      const persistedId = await aiConversationRepository.appendExchange({
         householdId,
         userId,
         conversationId,
         messages: [
           { role: 'user', content: userMessage },
           { role: 'assistant', content: assistantReply, toolsUsed }
-        ]
+        ],
+        onPersisted
       });
+      return { conversationId: persistedId, persisted: true };
     } catch (error) {
+      if (error instanceof HttpError) throw error;
       logger.error('Failed to persist AI conversation', {
         error,
         householdId,
         userId
       });
-      return conversationId ?? randomUUID();
+      return { conversationId: await this.ownedThreadOrNone(householdId, userId, conversationId), persisted: false };
+    }
+  }
+
+  /** The supplied id when it names an existing thread the actor owns, else "" (no thread). */
+  private async ownedThreadOrNone(householdId: string, userId: string, conversationId: string | undefined): Promise<string> {
+    if (!conversationId) return '';
+    try {
+      return (await aiConversationRepository.isOwnedThread({ householdId, userId, conversationId })) ? conversationId : '';
+    } catch (error) {
+      logger.error('Failed to check AI conversation ownership', { error, householdId, userId });
+      return '';
     }
   }
 

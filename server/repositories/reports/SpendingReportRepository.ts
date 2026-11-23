@@ -98,20 +98,20 @@ export class SpendingReportRepository extends BaseReportRepository {
     const currency = await this.getHouseholdCurrency(householdId);
 
     // SCP-321: fail closed BEFORE aggregating — the SQL rate expression
-    // silently converts at 1 when a rate row is missing.
+    // converts at 1 on a missing row. A-24: only the type this breakdown reads.
     await this.assertFxRatesAvailable(householdId, currency, {
       from,
       to,
       includePending,
-      scope,
-      userId,
+      scope, userId,
+      transactionFilter: sql`t.type::text = ${type}::text`,
     });
 
     const currencyExpr = sql`COALESCE(et.currency, a.currency, ${currency}::text)`;
     const fxRateExpr = this.buildFxRateExpr(
       currencyExpr,
       currency,
-      sql`et.date`
+      sql`et.date`, { householdId }
     );
 
     const selectEntityId =
@@ -158,16 +158,16 @@ export class SpendingReportRepository extends BaseReportRepository {
             LEFT JOIN ${merchants} m ON m.id = et.merchant_id
           `
         : sql`
-            LEFT JOIN ${categories} c ON c.id = et.category_id
-            LEFT JOIN ${categoryGroups} cg ON cg.id = c.group_id
+            LEFT JOIN ${categories} c ON c.id = et.category_id AND c.household_id = et.household_id
+            LEFT JOIN ${categoryGroups} cg ON cg.id = c.group_id AND cg.household_id = et.household_id
           `;
 
     const categoryGroupFilterClause =
       groupBy === "categoryGroup" || groupBy === "category"
-        ? sql`AND (${categoryGroupFilterId}::uuid IS NULL OR cg.id = ${categoryGroupFilterId}::uuid)`
+        ? sql`AND (et.category_id IS NULL OR c.id IS NOT NULL) AND (c.group_id IS NULL OR cg.id IS NOT NULL)
+              AND (${categoryGroupFilterId}::uuid IS NULL OR cg.id = ${categoryGroupFilterId}::uuid)`
         : sql``;
 
-    // Build the spending query with splits support
     const result = await db.execute<{
       entity_id: string;
       label: string;

@@ -6,6 +6,7 @@
  * before a timeout expires. If not undone, the actual deletion is performed.
  */
 
+import { userErrorMessage } from "@/lib/errorCopy";
 import { useCallback, useRef } from "react";
 import { toast } from "sonner";
 
@@ -58,7 +59,7 @@ export function useUndoableDelete<T extends { id: string }>({
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         toast.error(`Failed to delete ${itemLabel}`, {
-          description: error.message,
+          description: userErrorMessage(error, "Please try again."),
         });
         onError?.(error);
       }

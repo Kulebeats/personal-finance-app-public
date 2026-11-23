@@ -38,6 +38,7 @@ import { useSettings } from "@/contexts/SettingsContext";
 import { useCommandPalette } from "@/contexts/CommandPaletteContext";
 import { useFilterPresets } from "@/features/transactions/hooks/useFilterPresets";
 import { buildTransactionsUrl } from "@/features/transactions/transactionFilterParams";
+import { presetToTransactionFilters } from "@/features/transactions/filterPresetFilters";
 
 export function CommandPalette() {
   const { open, setOpen, toggle } = useCommandPalette();
@@ -53,16 +54,16 @@ export function CommandPalette() {
   // Global Key Handler
   React.useEffect(() => {
     let lastKeyTime = 0;
-    let lastKey = "";
 
     const down = (e: KeyboardEvent) => {
       // Ignore if typing in an input
-      const target = e.target as HTMLElement;
+      const target = e.target instanceof HTMLElement ? e.target : null;
       if (
-        target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA" ||
-        target.isContentEditable
+        e.defaultPrevented || e.isComposing || e.repeat || !target ||
+        target.isContentEditable ||
+        target.closest('input, textarea, select, [contenteditable="true"], [role="combobox"], [role="listbox"], [role="menu"], [role="dialog"]')
       ) {
+        lastKeyString = "";
         return;
       }
 
@@ -77,28 +78,23 @@ export function CommandPalette() {
       */
 
       // Toggle Sidebar ( [ )
-      if (e.key === "[") {
+      if (e.key === "[" && !e.altKey && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         toggleSidebar();
         return;
       }
 
       // Toggle Theme (Alt + T)
-      if (e.key.toLowerCase() === "t" && e.altKey) {
+      if (e.key.toLowerCase() === "t" && e.altKey && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         setTheme(theme === "dark" ? "light" : "dark");
         return;
       }
 
       // "G then ..." Navigation Logic
+      if (e.altKey || e.ctrlKey || e.metaKey) { lastKeyString = ""; return; }
       const currentTime = Date.now();
       const key = e.key.toLowerCase();
-
-      if (key === "g") {
-        lastKeyString = "g";
-        lastKeyTime = currentTime;
-        return;
-      }
 
       if (lastKeyString === "g" && currentTime - lastKeyTime < 1000) {
         // Handle second key press within 1 second of 'g'
@@ -119,6 +115,10 @@ export function CommandPalette() {
           setLocation(shortcuts[key]);
           lastKeyString = ""; // Reset
         }
+      } else if (key === "g") {
+        lastKeyString = "g";
+        lastKeyTime = currentTime;
+        return;
       }
     };
 
@@ -269,35 +269,10 @@ export function CommandPalette() {
                   key={preset.id}
                   onSelect={() =>
                     runCommand(() => {
-                      // Navigate to transactions with preset filters applied,
-                      // via the shared URL contract (R8) so this stays correct
-                      // as the filter shape evolves.
-                      // NOTE: startDate/endDate are intentionally omitted -
-                      // preset.filters comes back from the API as JSON, so
-                      // dates arrive as ISO strings rather than Date
-                      // instances despite the FilterPreset type. Wiring
-                      // date-range presets needs a defined (de)serialization
-                      // contract; left as TODO(R10/R11).
-                      const {
-                        categoryId,
-                        accountId,
-                        type,
-                        search,
-                        reviewed,
-                        owner,
-                        tagIds,
-                      } = preset.filters;
-                      setLocation(
-                        buildTransactionsUrl({
-                          categoryId,
-                          accountId,
-                          type,
-                          search,
-                          reviewed,
-                          owner,
-                          tagIds,
-                        }),
-                      );
+                      // Navigate via the shared URL contract (R8). The preset's
+                      // JSON is read with the same parser the page uses (R11),
+                      // so dates and invalid values round-trip safely.
+                      setLocation(buildTransactionsUrl(presetToTransactionFilters(preset.filters)));
                     })
                   }
                 >

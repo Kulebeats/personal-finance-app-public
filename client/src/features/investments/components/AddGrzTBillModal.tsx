@@ -5,6 +5,7 @@ import * as z from "zod";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -29,12 +30,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useCreateGrzTBill } from "@/hooks/useGrzSecurities";
+import { useAccounts } from "@/hooks/useAccounts";
+import { TBillSettlementAccountField } from "./TBillSettlementAccountField";
 import { Loader2 } from "lucide-react";
 import { addDays } from "date-fns";
 
 const formSchema = z.object({
   tbillName: z.string().min(1, "T-Bill Name is required"),
   isin: z.string().optional(),
+  // A-42: the maturity run pays into this account, so it is required.
+  accountId: z.string().min(1, "Choose the account this T-bill matures into"),
   tenorDays: z.coerce.number().min(1, "Tenor is required"),
   faceValue: z.coerce.number().min(0.01, "Face Value must be positive"),
   purchasePrice: z.coerce.number().min(0.01, "Purchase Price must be positive"),
@@ -61,12 +66,15 @@ export function AddGrzTBillModal({
   const setOpen = isControlled ? setControlledOpen : setInternalOpen;
 
   const createTBill = useCreateGrzTBill();
+  const { data: accounts = [] } = useAccounts(undefined, open);
+  const settlementAccounts = accounts.filter(account => account.currency === "ZMW" && account.isAsset && !account.isArchived);
 
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
     defaultValues: {
       tbillName: "",
       isin: "",
+      accountId: "",
       tenorDays: 91,
       faceValue: 0,
       purchasePrice: 0,
@@ -105,6 +113,7 @@ export function AddGrzTBillModal({
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
           <DialogTitle>Add Treasury Bill</DialogTitle>
+          <DialogDescription>Use the figures from your purchase confirmation and choose the ZMW account the bill matures into.</DialogDescription>
         </DialogHeader>
 
         <Form {...form}>
@@ -122,6 +131,10 @@ export function AddGrzTBillModal({
                 </FormItem>
               )}
             />
+
+            <FormField control={form.control} name="accountId" render={({ field }) => (
+              <TBillSettlementAccountField value={field.value} onChange={field.onChange} accounts={settlementAccounts} />
+            )} />
 
             <div className="grid grid-cols-2 gap-4">
               <FormField

@@ -144,6 +144,33 @@ describe("GRZ Money Correctness (SCP-311)", () => {
     }
   });
 
+  it("persists a reopened bond's cleanly separated cost, principal and issue-anchored coupon schedule", async () => {
+    const terms = { bondName: "Reopened August issue", tenorYears: 3, accountId, faceValue: "100",
+      purchasePrice: "95", purchaseDate: "2027-07-20", firstCouponDate: "2027-08-31",
+      maturityDate: "2028-08-31", couponRate: "0.18989999999999999" };
+    const result = await authRequest(request(app).post("/api/grz/bonds")).send(terms).expect(201);
+    const id = result.body.data.id;
+    const [holding] = await db.select().from(grzBonds).where(eq(grzBonds.id, id));
+    expect(holding).toMatchObject({ faceValue: "100.00", purchasePrice: "95.00", couponRate: "0.1899" });
+    const coupons = await db.select().from(grzBondPayments).where(and(eq(grzBondPayments.bondId, id),
+      eq(grzBondPayments.paymentType, "coupon"))).orderBy(asc(grzBondPayments.paymentDate));
+    expect(coupons.map(row => [row.paymentDate, row.grossAmount])).toEqual([
+      ["2027-08-31", "9.50"], ["2028-02-29", "9.50"], ["2028-08-31", "9.50"],
+    ]);
+    const february = await authRequest(request(app).post("/api/grz/bonds"))
+      .send({ ...terms, maturityDate: "2028-02-29" }).expect(201);
+    const clipped = await db.select().from(grzBondPayments).where(and(eq(grzBondPayments.bondId, february.body.data.id),
+      eq(grzBondPayments.paymentType, "coupon"))).orderBy(asc(grzBondPayments.paymentDate));
+    expect(clipped.map(row => row.paymentDate)).toEqual(["2027-08-31", "2028-02-29"]);
+    for (const invalid of [{ firstCouponDate: "2027-08-29" }, { firstCouponDate: null },
+      { couponFrequency: 25 }, { couponRate: "18.99" }]) {
+      const bondName = "Unsupported issue terms";
+      await authRequest(request(app).post("/api/grz/bonds")).send({ ...terms, bondName, ...invalid }).expect(400);
+      expect(await db.select({ id: grzBonds.id }).from(grzBonds)
+        .where(and(eq(grzBonds.householdId, householdId), eq(grzBonds.bondName, bondName)))).toEqual([]);
+    }
+  });
+
   it("persists bond coupon, withholding tax, and net amount to the exact cent", async () => {
     // Fixture chosen so the per-period coupon is exactly 836.70 (preserving the
     // service's existing coupon-rate semantics: gross uses the stored rate directly).
@@ -154,10 +181,10 @@ describe("GRZ Money Correctness (SCP-311)", () => {
       .send({
         bondName: "GRZ Money Precision Bond",
         tenorYears: 2,
-        faceValue: "100.00",
-        purchasePrice: "98.00",
+        faceValue: "11156.00",
+        purchasePrice: "10932.88",
         purchaseDate: "2026-01-01",
-        couponRate: "16.7340",
+        couponRate: "0.1500",
         couponFrequency: 2,
         maturityDate: "2028-01-01",
         accountId,
@@ -198,9 +225,9 @@ describe("GRZ Money Correctness (SCP-311)", () => {
       )
       .limit(1);
     expect(principal).toBeDefined();
-    expect(principal.grossAmount).toBe("100.00");
+    expect(principal.grossAmount).toBe("11156.00");
     expect(principal.withholdingTax).toBe("0.00");
-    expect(principal.netAmount).toBe("100.00");
+    expect(principal.netAmount).toBe("11156.00");
   });
 
   it("persists T-bill discount and yield to the exact cent", async () => {
@@ -239,10 +266,10 @@ describe("GRZ Money Correctness (SCP-311)", () => {
       .send({
         bondName: "GRZ Money Coupon Pay Bond",
         tenorYears: 2,
-        faceValue: "100.00",
-        purchasePrice: "98.00",
+        faceValue: "11156.00",
+        purchasePrice: "10932.88",
         purchaseDate: "2026-01-01",
-        couponRate: "16.7340",
+        couponRate: "0.1500",
         couponFrequency: 2,
         maturityDate: "2028-01-01",
         accountId,

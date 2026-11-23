@@ -28,17 +28,23 @@
  */
 
 import request from "supertest";
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { Express } from "express";
-import { db } from "../../../db";
-import { eq, and } from "drizzle-orm";
+import { db, pool } from "../../../db";
+import { eq, and, inArray, or, sql } from "drizzle-orm";
 import {
   users,
   households,
   householdMembers,
+  householdPreferences,
   accounts,
   transactions,
   auditLogs,
+  outboxEvents,
+  fxRates,
+  providerFxQuotes,
+  securityAuditLogs,
+  session,
   type Transaction,
 } from "@shared/schema";
 import {
@@ -46,6 +52,8 @@ import {
   createTestUser,
   createTestHousehold,
 } from "../../../__tests__/fixtures";
+import { createFXRateRepository, createFXRateService, setGlobalFXService } from "../../../core/calculations";
+import { AnalyticsCache, analyticsCache } from "../../../services/AnalyticsCache";
 import { transferService } from "../../../services/TransferService";
 import { transactionRepository } from "../../../repositories/TransactionRepository";
 import { ValidationError } from "../../../utils/errorHandler";
@@ -182,37 +190,397 @@ describe("Transactions REAL-DB Integration (SCP-316)", () => {
   });
 
   afterAll(async () => {
+    const fixtureUserIds = [userId, otherUserId].filter(Boolean);
+    const fixtureHouseholdIds = [householdId, otherHouseholdId].filter(Boolean);
+
+    // Non-cascading identity rows and nullable-user audits must go before users.
+    // Let errors reject afterAll so incomplete teardown cannot look successful.
+    await db.transaction(async (tx) => {
+      if (fixtureUserIds.length > 0) {
+        await tx.delete(session).where(or(
+          inArray(sql<string>`${session.sess}->>'userId'`, fixtureUserIds),
+          inArray(sql<string>`${session.sess}->>'mfaPendingUserId'`, fixtureUserIds),
+        ));
+        await tx.delete(securityAuditLogs).where(or(
+          inArray(securityAuditLogs.userId, fixtureUserIds),
+          inArray(securityAuditLogs.targetUserId, fixtureUserIds),
+        ));
+        await tx.delete(auditLogs).where(inArray(auditLogs.userId, fixtureUserIds));
+        await tx.delete(outboxEvents).where(
+          inArray(sql<string>`${outboxEvents.payload}->>'userId'`, fixtureUserIds),
+        );
+      }
+
+      if (fixtureHouseholdIds.length > 0) {
+        await tx.delete(outboxEvents).where(inArray(outboxEvents.householdId, fixtureHouseholdIds));
+        await tx.delete(auditLogs).where(inArray(auditLogs.householdId, fixtureHouseholdIds));
+        await tx.delete(transactions).where(inArray(transactions.householdId, fixtureHouseholdIds));
+        await tx.delete(accounts).where(inArray(accounts.householdId, fixtureHouseholdIds));
+        await tx.delete(householdMembers).where(inArray(householdMembers.householdId, fixtureHouseholdIds));
+      }
+
+      if (fixtureUserIds.length > 0) {
+        await tx.delete(users).where(inArray(users.id, fixtureUserIds));
+      }
+      if (fixtureHouseholdIds.length > 0) {
+        await tx.delete(households).where(inArray(households.id, fixtureHouseholdIds));
+      }
+    });
+  });
+
+  it("shows a card purchase in a previously read net-worth report after the ledger commits", async () => {
+    // getTestApp registers routes without the FX service installed by runApp.
+    setGlobalFXService(createFXRateService(createFXRateRepository(db, fxRates), {
+      cacheTtlSeconds: 300, baseCurrency: "USD", fallbackDays: 30,
+    }));
+
+    const creditId = randomUUID();
+    await db.insert(accounts).values({ id: creditId, householdId: otherHouseholdId, ownerUserId: otherUserId,
+      name: "Card purchase net worth", type: "credit", currency: "ZMW", isAsset: false,
+      initialBalance: "500.00", balance: "500.00" });
+    const login = await request(app).post("/api/auth/login")
+      .send({ email: `txn-realdb-other-${timestamp}@example.com`, password: "OtherPassword123" }).expect(200);
+    const headers = { Cookie: (login.headers["set-cookie"] as unknown as string[]).join("; "),
+      "X-Capital-Subject": otherUserId, "X-Capital-Household": otherHouseholdId };
+    const money = (amount: string) => ({ amount, currency: "ZMW" });
+    const before = { assets: money("5000.00"), liabilities: money("500.00"), netWorth: money("4500.00") };
+    // Simulate a previously stored response from a worker running the old cache policy.
+    const legacy = { data: { latest: before }, generatedAt: "2026-01-31T00:00:00.000Z" };
+    let legacyReads = 0, legacyWrites = 0;
+    const backend = {
+      assertCurrent() {},
+      async getJson<T>(key: string) {
+        if (!key.startsWith("analytics:netWorth:")) return null;
+        legacyReads++;
+        return legacy as T;
+      },
+      async setJson(key: string) { if (key.startsWith("analytics:netWorth:")) legacyWrites++; },
+      invalidate: async () => 0,
+    };
+    const cache = new AnalyticsCache(backend);
+    const read = vi.spyOn(analyticsCache, "getOrCompute").mockImplementation(cache.getOrCompute.bind(cache));
+    const endpoint = vi.spyOn(analyticsCache, "invalidateEndpoint").mockImplementation(cache.invalidateEndpoint.bind(cache));
+    const household = vi.spyOn(analyticsCache, "invalidateHousehold").mockImplementation(cache.invalidateHousehold.bind(cache));
+    const report = async (to = "2026-01-31") => (await request(app).get("/api/reports/net-worth").set(headers)
+      .query({ from: "2026-01-01", to }).expect(200)).body.data.latest;
     try {
-      await db.delete(auditLogs).where(eq(auditLogs.householdId, householdId));
-      await db
-        .delete(auditLogs)
-        .where(eq(auditLogs.householdId, otherHouseholdId));
-      await db
-        .delete(transactions)
-        .where(eq(transactions.householdId, householdId));
-      await db
-        .delete(transactions)
-        .where(eq(transactions.householdId, otherHouseholdId));
-      await db.delete(accounts).where(eq(accounts.householdId, householdId));
-      await db
-        .delete(accounts)
-        .where(eq(accounts.householdId, otherHouseholdId));
-      await db
-        .delete(householdMembers)
-        .where(eq(householdMembers.householdId, householdId));
-      await db
-        .delete(householdMembers)
-        .where(eq(householdMembers.householdId, otherHouseholdId));
-      await db.delete(users).where(eq(users.id, userId));
-      await db.delete(users).where(eq(users.id, otherUserId));
-      await db.delete(households).where(eq(households.id, householdId));
-      await db.delete(households).where(eq(households.id, otherHouseholdId));
-    } catch (error) {
-      // eslint-disable-next-line no-console
-      console.error("Transactions SCP-316 cleanup error", error);
+      expect(await report()).toMatchObject(before);
+      const purchaseBody = { accountId: creditId, type: "expense", date: "2026-01-10",
+        name: "Card purchase oracle", amount: money("45.50"), idempotencyKey: randomUUID() };
+      const post = () => request(app).post("/api/transactions").set(headers).send(purchaseBody);
+      const purchase = await post().expect(201);
+      const [card] = await db.select({ balance: accounts.balance }).from(accounts).where(eq(accounts.id, creditId));
+      const [expense] = await db.select({ amount: transactions.amount, type: transactions.type, currency: transactions.currency })
+        .from(transactions).where(eq(transactions.id, purchase.body.data.id));
+      expect(card.balance).toBe("545.50");
+      expect(expense).toEqual({ amount: "45.50", type: "expense", currency: "ZMW" });
+      const after = { assets: money("5000.00"), liabilities: money("545.50"), netWorth: money("4454.50") };
+      expect(await report("2026-01-30")).toMatchObject(after);
+      expect(await report()).toMatchObject(after);
+      expect((await post().expect(200)).body.isDuplicate).toBe(true);
+      expect(await report()).toMatchObject(after);
+
+      // A transfer changes assets and liabilities while preserving net worth.
+      const cashId = randomUUID();
+      await db.insert(accounts).values({ id: cashId, householdId: otherHouseholdId, ownerUserId: otherUserId,
+        name: "Card advance destination", type: "checking", currency: "ZMW", isAsset: true, initialBalance: "0.00", balance: "0.00" });
+      await request(app).post("/api/settings/security/step-up").set(headers).send({ password: "OtherPassword123" }).expect(200);
+      await request(app).post("/api/transactions/transfer").set(headers).send({ fromAccountId: creditId, toAccountId: cashId,
+        amount: money("100.00"), date: "2026-01-10", name: "Card advance", idempotencyKey: randomUUID() }).expect(201);
+      expect(await report()).toMatchObject({ assets: money("5100.00"), liabilities: money("645.50"), netWorth: money("4454.50") });
+
+      const uri = "/api/transactions/" + purchase.body.data.id;
+      await request(app).put(uri).set(headers).send({ amount: money("65.50"), expectedUpdatedAt: purchase.body.data.updatedAt }).expect(200);
+      expect(await report()).toMatchObject({ assets: money("5100.00"), liabilities: money("665.50"), netWorth: money("4434.50") });
+      await request(app).delete(uri).set(headers).expect(200);
+      expect(await report()).toMatchObject({ assets: money("5100.00"), liabilities: money("600.00"), netWorth: money("4500.00") });
+      expect(legacyReads).toBe(0);
+      expect(legacyWrites).toBe(0);
+    } finally {
+      household.mockRestore();
+      endpoint.mockRestore();
+      read.mockRestore();
     }
   });
 
+  it("labels every transaction summary amount in the household currency before and after a posting", async () => {
+    const id = randomUUID(), currency = "USD", date = "2026-02-12";
+    await db.insert(accounts).values({ id, householdId, ownerUserId: userId, name: "USD ledger",
+      type: "checking", currency, isAsset: true, initialBalance: "100.00", balance: "100.00" });
+    await db.update(households).set({ currency }).where(eq(households.id, householdId));
+    const summary = () => request(app).get("/api/transactions/summary").set("Cookie", authCookie)
+      .query({ startDate: date, endDate: date, accountId: id }).expect(200);
+    try {
+      const empty = await summary();
+      await request(app).post("/api/transactions").set("Cookie", authCookie).send({
+        accountId: id, date, name: "USD summary expense", type: "expense", amount: { amount: "12.35", currency },
+      }).expect(201);
+      const posted = await summary();
+      expect.soft(empty.body.data).toMatchObject({ currency, transactionCount: 0,
+        totalIncome: { amount: "0.00", currency }, totalExpenses: { amount: "0.00", currency }, netFlow: { amount: "0.00", currency } });
+      expect(posted.body.data).toMatchObject({ currency, transactionCount: 1,
+        totalIncome: { amount: "0.00", currency }, totalExpenses: { amount: "12.35", currency }, netFlow: { amount: "-12.35", currency } });
+    } finally {
+      await db.update(households).set({ currency: "ZMW" }).where(eq(households.id, householdId));
+    }
+  });
+
+  describe("FIN-17 dated flow FX over signed HTTP", () => {
+    const quoteIds: string[] = [], legacyIds: string[] = [];
+    const headers = () => ({ Cookie: authCookie, "X-Capital-Subject": userId, "X-Capital-Household": householdId });
+    let fxService: ReturnType<typeof createFXRateService>;
+    beforeAll(async () => {
+      // getTestApp omits runApp's FX initialization. Install the real DB reader
+      // so the old implementation fails on its wrong latest-rate result, not an
+      // uninitialized service. No FX/network/summary implementation is mocked.
+      fxService = createFXRateService(createFXRateRepository(db, fxRates), { cacheTtlSeconds: 0, baseCurrency: "USD", fallbackDays: 30 });
+      setGlobalFXService(fxService);
+      const id = randomUUID(); legacyIds.push(id);
+      // A provider-shaped label in the legacy store is not provider evidence.
+      // The far later date also exposes accidental latest/spot conversion.
+      await db.insert(fxRates).values({ id, fromCurrency: "USD", toCurrency: "ZMW", date: "2199-12-31", rate: "99.9900", source: "yahoo_finance" });
+    });
+    afterAll(async () => {
+      try {
+        await db.transaction(async tx => {
+          if (quoteIds.length) await tx.delete(providerFxQuotes).where(inArray(providerFxQuotes.id, quoteIds));
+          if (legacyIds.length) await tx.delete(fxRates).where(inArray(fxRates.id, legacyIds));
+        });
+      } finally { fxService?.clearCache(); }
+    });
+
+    async function freshAccount(currency = "USD") {
+      const id = randomUUID();
+      await db.insert(accounts).values({ id, householdId, ownerUserId: userId, name: "FIN-17 dated flow fixture", type: "checking",
+        currency, isAsset: true, isPrivate: false, initialBalance: "1000.00", balance: "1000.00" });
+      return id;
+    }
+    async function observe(effectiveDate: string, validThrough: string, rate: string, provider: "yahoo_finance" | "exchangerate_api" = "yahoo_finance", hour = "10") {
+      const id = randomUUID(); quoteIds.push(id);
+      // Synthetic trusted-store input, not a claim that a real provider/network
+      // observation occurred. Explicit instants satisfy storage provenance checks.
+      await db.insert(providerFxQuotes).values({ id, fromCurrency: "USD", toCurrency: "ZMW", provider, effectiveDate, validThrough, rate,
+        quotedAt: new Date(`${effectiveDate}T${hour}:00:00Z`), recordedAt: new Date(`${effectiveDate}T23:00:00Z`) });
+      return id;
+    }
+    const post = (id: string, date: string, type: "income" | "expense", amount: string, currency = "USD") => request(app)
+      .post("/api/transactions").set(headers()).send({ accountId: id, date, type, name: "FIN-17 signed dated posting", amount: { amount, currency }, idempotencyKey: randomUUID() });
+    const summary = (id: string, startDate: string, endDate = startDate) => request(app)
+      .get("/api/transactions/summary").set(headers()).query({ accountId: id, startDate, endDate });
+    const money = (amount: string) => ({ amount, currency: "ZMW" });
+    async function assertNoOtherQuotes(start: string, end: string) {
+      const existing = await pool.query("SELECT id FROM provider_fx_quotes WHERE from_currency='USD' AND to_currency='ZMW' AND effective_date BETWEEN $1::date AND $2::date", [start, end]);
+      expect(existing.rows).toEqual([]);
+    }
+
+    it("honors both pending markers and retains legacy null status across summary, list and count", async () => {
+      const id = await freshAccount("ZMW");
+      const date = "1985-07-10";
+      const common = { householdId, accountId: id, ownerUserId: userId, date,
+        type: "income" as const, currency: "ZMW", name: "Pending preference control" };
+      // is_pending is NOT NULL in the ledger. status and legacy posting receipts are nullable.
+      const posted = await db.insert(transactions).values([
+        { ...common, amount: "2.00", isPending: false, status: null },
+        { ...common, amount: "3.00", isPending: false, status: "cleared" },
+        { ...common, amount: "5.00", isPending: false, status: "reconciled" },
+      ]).returning({ id: transactions.id });
+      const pending = await db.insert(transactions).values([
+        { ...common, amount: "7.00", isPending: true, status: "cleared" },
+        { ...common, amount: "11.00", isPending: false, status: "pending" },
+        { ...common, amount: "13.00", isPending: true, status: "pending" },
+      ]).returning({ id: transactions.id });
+      const [previous] = await db.select().from(householdPreferences)
+        .where(eq(householdPreferences.householdId, householdId));
+      try {
+        for (const showPendingTransactions of [false, true]) {
+          await db.insert(householdPreferences).values({ householdId, showPendingTransactions })
+            .onConflictDoUpdate({ target: householdPreferences.householdId, set: { showPendingTransactions } });
+          const ids = (showPendingTransactions ? [...posted, ...pending] : posted).map(row => row.id).sort();
+          const expectedIncome = money(showPendingTransactions ? "41.00" : "10.00");
+          const totals = await summary(id, date).expect(200);
+          expect(totals.body.data).toMatchObject({ transactionCount: ids.length, totalIncome: expectedIncome,
+            totalExpenses: money("0.00"), netFlow: expectedIncome });
+          const list = await request(app).get("/api/transactions").set(headers())
+            .query({ accountId: id, startDate: date, endDate: date }).expect(200);
+          expect(list.body.data.map((row: { id: string }) => row.id).sort()).toEqual(ids);
+          expect(list.body.pagination.totalCount).toBe(ids.length);
+        }
+      } finally {
+        if (previous) {
+          await db.update(householdPreferences).set({ showPendingTransactions: previous.showPendingTransactions })
+            .where(eq(householdPreferences.householdId, householdId));
+        } else {
+          await db.delete(householdPreferences).where(eq(householdPreferences.householdId, householdId));
+        }
+      }
+    });
+
+    it("uses each posting date, inclusive prior validity and household currency instead of either later trap", async () => {
+      const id = await freshAccount();
+      await assertNoOtherQuotes("1976-04-07", "1976-04-18");
+      const early = await observe("1976-04-10", "1976-04-13", "25.123400000000");
+      // Earlier observation on the same effective day must not win over10:00.
+      await observe("1976-04-10", "1976-04-13", "20.000000000000", "exchangerate_api", "09");
+      const later = await observe("1976-04-14", "1976-04-17", "26.500000000000", "exchangerate_api");
+      await observe("1976-04-15", "1976-04-18", "90.000000000000");
+      const stored = await db.select().from(providerFxQuotes).where(inArray(providerFxQuotes.id, [early, later]));
+      expect(stored).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: early, rate: "25.123400000000", effectiveDate: "1976-04-10", validThrough: "1976-04-13" }),
+        expect.objectContaining({ id: later, rate: "26.500000000000", effectiveDate: "1976-04-14", validThrough: "1976-04-17" }),
+      ]));
+      const empty = await summary(id, "1976-04-10", "1976-04-14").expect(200);
+      expect(empty.body.data).toMatchObject({ currency: "ZMW", transactionCount: 0, totalIncome: money("0.00"), totalExpenses: money("0.00"), netFlow: money("0.00") });
+      expect(empty.body.data).toMatchObject({ largestIncome: money("0.00"), largestExpense: money("0.00"), firstTransactionDate: null, lastTransactionDate: null });
+      const posted = [
+        await post(id, "1976-04-10", "expense", "25.00").expect(201),
+        await post(id, "1976-04-13", "expense", "10.00").expect(201),
+        await post(id, "1976-04-14", "expense", "75.00").expect(201),
+        await post(id, "1976-04-14", "income", "20.00").expect(201),
+      ];
+      const captured = (await pool.query("SELECT id, date::text, type, amount, currency FROM transactions WHERE account_id=$1 ORDER BY id", [id])).rows;
+      expect(captured).toHaveLength(4);
+      for (const [index, value] of [["1976-04-10", "expense", "25.00"], ["1976-04-13", "expense", "10.00"], ["1976-04-14", "expense", "75.00"], ["1976-04-14", "income", "20.00"]].entries()) {
+        expect(captured).toContainEqual({ id: posted[index].body.data.id, date: value[0], type: value[1], amount: value[2], currency: "USD" });
+      }
+      expect((await pool.query("SELECT balance, currency FROM accounts WHERE id=$1", [id])).rows).toEqual([{ balance: "910.00", currency: "USD" }]);
+      expect((await pool.query("SELECT currency FROM households WHERE id=$1", [householdId])).rows[0].currency).toBe("ZMW");
+      const first = await summary(id, "1976-04-10").expect(200);
+      expect.soft(first.body.data).toMatchObject({ currency: "ZMW", transactionCount: 1, totalIncome: money("0.00"), totalExpenses: money("628.09"), netFlow: money("-628.09") });
+      const prior = await summary(id, "1976-04-13").expect(200);
+      expect.soft(prior.body.data).toMatchObject({ currency: "ZMW", transactionCount: 1, totalIncome: money("0.00"), totalExpenses: money("251.23"), netFlow: money("-251.23") });
+      const second = await summary(id, "1976-04-14").expect(200);
+      expect.soft(second.body.data).toMatchObject({ currency: "ZMW", transactionCount: 2, totalIncome: money("530.00"), totalExpenses: money("1987.50"), netFlow: money("-1457.50") });
+      const total = await summary(id, "1976-04-10", "1976-04-14").expect(200);
+      expect.soft(total.body.data).toMatchObject({ currency: "ZMW", transactionCount: 4, totalIncome: money("530.00"), totalExpenses: money("2866.82"), netFlow: money("-2336.82") });
+      expect(total.body.data).toMatchObject({ largestIncome: money("530.00"), largestExpense: money("1987.50"), firstTransactionDate: "1976-04-10", lastTransactionDate: "1976-04-14" });
+      const income = await summary(id, "1976-04-10", "1976-04-14").query({ type: "income", ownerUserId: userId,
+        search: "signed dated", amountMin: 19, amountMax: 21, reviewed: "unreviewed" }).expect(200);
+      expect(income.body.data).toMatchObject({ transactionCount: 1, totalIncome: money("530.00"), totalExpenses: money("0.00") });
+      const shared = await summary(id, "1976-04-10", "1976-04-14").query({ ownerUserId: "shared" }).expect(200);
+      expect(shared.body.data).toMatchObject({ transactionCount: 0, netFlow: money("0.00") });
+    }, 15000);
+
+    it("aggregates fractional-cent flows before rounding and derives dates only from list-eligible rows", async () => {
+      const id = await freshAccount(), date = "1980-02-10";
+      await assertNoOtherQuotes("1980-02-07", "1980-02-15");
+      await observe(date, "1980-02-13", "0.600000000000");
+      const hiddenFirst = await post(id, "1980-02-08", "expense", "7.00").expect(201);
+      const excludedFirst = await post(id, "1980-02-09", "expense", "13.00").expect(201);
+      const tiny = [
+        await post(id, date, "income", "0.01").expect(201),
+        await post(id, date, "income", "0.01").expect(201),
+        await post(id, date, "expense", "0.01").expect(201),
+      ];
+      const excludedLast = await post(id, "1980-02-11", "income", "17.00").expect(201);
+      const hiddenLast = await post(id, "1980-02-12", "income", "11.00").expect(201);
+      const hiddenIds = [hiddenFirst.body.data.id, hiddenLast.body.data.id] as string[];
+      const excludedIds = [excludedFirst.body.data.id, excludedLast.body.data.id] as string[];
+      await db.update(transactions).set({ isExcludedFromReports: true }).where(inArray(transactions.id, excludedIds));
+      await db.update(transactions).set({ isPrivate: true, ownerUserId: null }).where(inArray(transactions.id, hiddenIds));
+      expect((await pool.query("SELECT id, date::text, amount, currency FROM transactions WHERE id=ANY($1::uuid[]) ORDER BY id", [tiny.map(row => row.body.data.id)])).rows)
+        .toEqual(expect.arrayContaining(tiny.map(row => ({ id: row.body.data.id, date, amount: "0.01", currency: "USD" }))));
+      expect((await pool.query("SELECT balance, currency FROM accounts WHERE id=$1", [id])).rows).toEqual([{ balance: "1008.01", currency: "USD" }]);
+      const listed = await request(app).get("/api/transactions").set(headers())
+        .query({ accountId: id, startDate: "1980-02-08", endDate: "1980-02-12", limit: 100 }).expect(200);
+      const eligibleIds = [...tiny.map(row => row.body.data.id), ...excludedIds].sort();
+      expect(listed.body.data.map((row: { id: string }) => row.id).sort()).toEqual(eligibleIds);
+      // Exact unrounded buckets are 0.012 and 0.006 ZMW: two incomes must
+      // aggregate to 0.01, not the 0.02 produced by rounding each posting.
+      // Net is the difference of displayed buckets, not round(0.012-0.006).
+      const result = await summary(id, "1980-02-08", "1980-02-12").expect(200);
+      expect(result.body.data).toMatchObject({ currency: "ZMW", transactionCount: 5,
+        totalIncome: money("0.01"), totalExpenses: money("0.01"), netFlow: money("0.00"),
+        largestIncome: money("0.01"), largestExpense: money("0.01"),
+        firstTransactionDate: "1980-02-09", lastTransactionDate: "1980-02-11" });
+    }, 15000);
+
+    it("keeps signed net equal to displayed buckets when dated sub-cent income and expense round differently", async () => {
+      const id = await freshAccount();
+      await assertNoOtherQuotes("1982-03-07", "1982-03-14");
+      await observe("1982-03-10", "1982-03-13", "0.600000000000");
+      await observe("1982-03-11", "1982-03-14", "0.400000000000");
+      const income = await post(id, "1982-03-10", "income", "0.01").expect(201);
+      const expense = await post(id, "1982-03-11", "expense", "0.01").expect(201);
+      expect((await pool.query("SELECT id, date::text, type, amount, currency FROM transactions WHERE account_id=$1 ORDER BY date", [id])).rows).toEqual([
+        { id: income.body.data.id, date: "1982-03-10", type: "income", amount: "0.01", currency: "USD" },
+        { id: expense.body.data.id, date: "1982-03-11", type: "expense", amount: "0.01", currency: "USD" },
+      ]);
+      expect((await pool.query("SELECT balance FROM accounts WHERE id=$1", [id])).rows).toEqual([{ balance: "1000.00" }]);
+      const result = await summary(id, "1982-03-10", "1982-03-11").expect(200);
+      // 0.006 income -> 0.01, 0.004 expense -> 0.00. Rounding their raw
+      // difference would report 0.00 and contradict the displayed buckets.
+      expect(result.body.data).toMatchObject({ currency: "ZMW", transactionCount: 2,
+        totalIncome: money("0.01"), totalExpenses: money("0.00"), netFlow: money("0.01"),
+        largestIncome: money("0.01"), largestExpense: money("0.00"),
+        firstTransactionDate: "1982-03-10", lastTransactionDate: "1982-03-11" });
+    });
+
+    it("refuses a visible nonzero legacy row with no captured denomination without returning a total", async () => {
+      const id = await freshAccount(), txId = randomUUID(), date = "1983-05-10";
+      // Deliberately historical, pre-receipt data: the current account's USD
+      // denomination is not evidence of this old row's missing source currency.
+      await db.insert(transactions).values({ id: txId, householdId, accountId: id, ownerUserId: userId,
+        date, name: "FIN-17 unresolved legacy denomination", type: "expense", amount: "1.00", currency: null });
+      expect((await pool.query("SELECT amount, currency, posted_balance_delta, posting_mode, posted_account_is_asset FROM transactions WHERE id=$1", [txId])).rows)
+        .toEqual([{ amount: "1.00", currency: null, posted_balance_delta: null, posting_mode: null, posted_account_is_asset: null }]);
+      const result = await summary(id, date);
+      expect(result.status).toBe(422);
+      expect(result.body).toMatchObject({ success: false, error: { code: "FINANCIAL_DATA_UNAVAILABLE" } });
+      expect(result.body).not.toHaveProperty("data");
+      for (const field of ["totalIncome", "totalExpenses", "netFlow", "largestIncome", "largestExpense"]) expect(result.body).not.toHaveProperty(field);
+      for (const value of ["currency", "ZMW", date]) expect(JSON.stringify(result.body.error)).toContain(value);
+      expect((await pool.query("SELECT balance, currency FROM accounts WHERE id=$1", [id])).rows).toEqual([{ balance: "1000.00", currency: "USD" }]);
+    });
+
+    it("summarizes a schema-admissible zero native adjustment without requiring a foreign quote", async () => {
+      const id = await freshAccount(), date = "1984-06-10";
+      await assertNoOtherQuotes("1984-06-07", "1984-06-13");
+      // Zero ordinary income/expense is prohibited by the actual schema. Use
+      // its admitted neutral adjustment through the real posting repository.
+      const created = await transactionRepository.create({ householdId, accountId: id, ownerUserId: userId,
+        date, name: "FIN-17 zero native adjustment", type: "balance_adjustment", amount: "0.00", currency: "USD" });
+      expect((await pool.query("SELECT amount, currency, posted_balance_delta, posting_mode FROM transactions WHERE id=$1", [created.transaction.id])).rows)
+        .toEqual([{ amount: "0.00", currency: "USD", posted_balance_delta: "0.00", posting_mode: "posted" }]);
+      expect((await pool.query("SELECT balance FROM accounts WHERE id=$1", [id])).rows).toEqual([{ balance: "1000.00" }]);
+      const result = await summary(id, date).expect(200);
+      expect(result.body.data).toMatchObject({ currency: "ZMW", transactionCount: 1,
+        totalIncome: money("0.00"), totalExpenses: money("0.00"), netFlow: money("0.00"),
+        largestIncome: money("0.00"), largestExpense: money("0.00"), firstTransactionDate: date, lastTransactionDate: date });
+    });
+
+    it.each([
+      { label: "missing provider observation", date: "1977-06-10", start: "1977-06-07", end: "1977-06-13", quote: null },
+      { label: "only an observation after the flow date", date: "1977-07-10", start: "1977-07-07", end: "1977-07-14", quote: ["1977-07-11", "1977-07-14"] },
+      { label: "expired prior validity", date: "1977-08-10", start: "1977-08-06", end: "1977-08-13", quote: ["1977-08-06", "1977-08-09"] },
+      { label: "future observed and recorded timestamps", date: "2097-09-10", start: "2097-09-07", end: "2097-09-13", quote: ["2097-09-10", "2097-09-13"] },
+    ])("requires dated evidence for $label despite the provider-shaped legacy trap", async scenario => {
+      const id = await freshAccount();
+      await assertNoOtherQuotes(scenario.start, scenario.end);
+      if (scenario.quote) await observe(scenario.quote[0], scenario.quote[1], "26.500000000000");
+      const created = await post(id, scenario.date, "expense", "1.00").expect(201);
+      expect((await pool.query("SELECT date::text, currency, amount FROM transactions WHERE id=$1", [created.body.data.id])).rows)
+        .toEqual([{ date: scenario.date, currency: "USD", amount: "1.00" }]);
+      const result = await summary(id, scenario.date);
+      expect.soft(result.status).toBe(422);
+      expect.soft(result.body).toMatchObject({ success: false, error: { code: "FINANCIAL_DATA_UNAVAILABLE" } });
+      const diagnostic = JSON.stringify(result.body.error ?? result.body);
+      for (const value of ["USD", "ZMW", scenario.date]) expect.soft(diagnostic).toContain(value);
+    });
+
+    it("does not require FX for an excluded or currently invisible signed foreign posting", async () => {
+      const id = await freshAccount("EUR"), date = "1978-10-10";
+      const created = await post(id, date, "expense", "1.00", "EUR").expect(201);
+      const txId = created.body.data.id as string;
+      await db.update(transactions).set({ isExcludedFromReports: true }).where(eq(transactions.id, txId));
+      const excluded = await summary(id, date).expect(200);
+      expect(excluded.body.data).toMatchObject({ currency: "ZMW", transactionCount: 1, totalIncome: money("0.00"), totalExpenses: money("0.00"), netFlow: money("0.00") });
+      // This valid nullable-owner privacy state also arises after owner erasure.
+      // The posting itself remains real; only its current metadata is changed.
+      await db.update(transactions).set({ isExcludedFromReports: false, isPrivate: true, ownerUserId: null }).where(eq(transactions.id, txId));
+      const hidden = await summary(id, date).expect(200);
+      expect(hidden.body.data).toMatchObject({ currency: "ZMW", transactionCount: 0, totalIncome: money("0.00"), totalExpenses: money("0.00"), netFlow: money("0.00") });
+    });
+  });
   // Seed a fresh source/destination account pair in the primary household.
   async function seedTransferPair(sourceBalance: string): Promise<{
     fromId: string;
@@ -453,21 +821,57 @@ describe("Transactions REAL-DB Integration (SCP-316)", () => {
       expect(await balanceOf(overdrawnAccountId)).toBe("-30.00");
     });
 
-    it("allows liability-account expenses to move the balance negative", async () => {
+
+    it("R08 refuses deleting spent income without partial reversal and permits recovery", async () => {
+      const guardedAccountId = randomUUID();
+      await db.insert(accounts).values({ id: guardedAccountId, householdId, name: "R08 spent income",
+        type: "checking", balance: "0.00", initialBalance: "0.00", currency: "ZMW", isAsset: true });
+      const headers = { Cookie: authCookie, "X-Capital-Subject": userId, "X-Capital-Household": householdId };
+      const income = await request(app).post("/api/transactions").set(headers).send({
+        accountId: guardedAccountId, amount: { amount: "100.00", currency: "ZMW" },
+        type: "income", date: "2026-02-15", name: "R08 guarded deposit",
+      }).expect(201);
+      const expense = await request(app).post("/api/transactions").set(headers).send({
+        accountId: guardedAccountId, amount: { amount: "80.00", currency: "ZMW" },
+        type: "expense", date: "2026-02-15", name: "R08 spent deposit",
+      }).expect(201);
+      const incomeId: string = income.body.data.id, expenseId: string = expense.body.data.id;
+      const ids = [incomeId, expenseId];
+      const snapshot = async () => ({
+        account: await db.select().from(accounts).where(eq(accounts.id, guardedAccountId)),
+        transactions: await db.select().from(transactions).where(inArray(transactions.id, ids)).orderBy(transactions.id),
+        audit: await db.select().from(auditLogs).where(inArray(auditLogs.entityId, ids)).orderBy(auditLogs.id),
+        events: await db.select().from(outboxEvents).where(inArray(outboxEvents.aggregateId, ids)).orderBy(outboxEvents.id),
+      });
+      expect(await balanceOf(guardedAccountId)).toBe("20.00");
+      const before = await snapshot();
+      const rejected = await request(app).delete("/api/transactions/" + incomeId).set(headers).expect(400);
+      expect(rejected.body.success).toBe(false);
+      expect(await snapshot()).toEqual(before);
+      await request(app).delete("/api/transactions/" + expenseId).set(headers).expect(200);
+      expect(await balanceOf(guardedAccountId)).toBe("100.00");
+      await request(app).delete("/api/transactions/" + incomeId).set(headers).expect(200);
+      expect(await balanceOf(guardedAccountId)).toBe("0.00");
+    });
+
+    it("R08 zero-debt liability expense records positive debt", async () => {
       const liabilityAccountId = randomUUID();
       await db.insert(accounts).values({
         id: liabilityAccountId,
         householdId,
-        name: "Credit Card",
+        name: "Zero-debt Credit Card",
         type: "credit",
         balance: "0.00",
+        initialBalance: "0.00",
         currency: "ZMW",
         isAsset: false,
       });
 
-      await request(app)
+      const created = await request(app)
         .post("/api/transactions")
         .set("Cookie", authCookie)
+        .set("X-Capital-Subject", userId)
+        .set("X-Capital-Household", householdId)
         .send({
           accountId: liabilityAccountId,
           amount: { amount: "30.00", currency: "ZMW" },
@@ -476,9 +880,161 @@ describe("Transactions REAL-DB Integration (SCP-316)", () => {
           name: "Credit spend",
         })
         .expect(201);
+      expect(created.body.success).toBe(true);
 
-      expect(await balanceOf(liabilityAccountId)).toBe("-30.00");
+      const [postedAccount] = await db
+        .select()
+        .from(accounts)
+        .where(eq(accounts.id, liabilityAccountId));
+      expect.soft(postedAccount).toMatchObject({
+        balance: "30.00",
+        initialBalance: "0.00",
+        currency: "ZMW",
+        isAsset: false,
+      });
+      const postedRows = await db
+        .select()
+        .from(transactions)
+        .where(eq(transactions.accountId, liabilityAccountId));
+      expect(postedRows).toHaveLength(1);
+      expect(postedRows[0]).toMatchObject({
+        id: created.body.data.id,
+        accountId: liabilityAccountId,
+        householdId,
+        amount: "30.00",
+        currency: "ZMW",
+        type: "expense",
+        deletedAt: null,
+      });
     });
+
+    it.each([
+      {
+        label: "asset",
+        accountType: "checking" as const,
+        currency: "USD",
+        isAsset: true,
+        openingBalance: "1000.00",
+        createdBalance: "954.50",
+        editedBalance: "940.00",
+      },
+      {
+        label: "liability with positive debt",
+        accountType: "credit" as const,
+        currency: "ZMW",
+        isAsset: false,
+        openingBalance: "500.00",
+        createdBalance: "545.50",
+        editedBalance: "560.00",
+      },
+    ])(
+      "R08 manual expense lifecycle preserves $label balances and denomination",
+      async ({
+        label,
+        accountType,
+        currency,
+        isAsset,
+        openingBalance,
+        createdBalance,
+        editedBalance,
+      }) => {
+        const lifecycleAccountId = randomUUID();
+        await db.insert(accounts).values({
+          id: lifecycleAccountId,
+          householdId,
+          name: `R08 ${label}`,
+          type: accountType,
+          balance: openingBalance,
+          initialBalance: openingBalance,
+          currency,
+          isAsset,
+        });
+
+        const [openingAccount] = await db
+          .select()
+          .from(accounts)
+          .where(eq(accounts.id, lifecycleAccountId));
+        expect(openingAccount).toMatchObject({
+          balance: openingBalance,
+          initialBalance: openingBalance,
+          currency,
+          isAsset,
+        });
+
+        const created = await request(app)
+          .post("/api/transactions")
+          .set("Cookie", authCookie)
+          .set("X-Capital-Subject", userId)
+          .set("X-Capital-Household", householdId)
+          .send({
+            accountId: lifecycleAccountId,
+            amount: { amount: "45.50", currency },
+            type: "expense",
+            date: "2026-02-12",
+            name: `R08 ${label} expense`,
+          })
+          .expect(201);
+        expect(created.body.success).toBe(true);
+        const transactionId: string = created.body.data.id;
+
+        // Read persisted rows directly; the production delta helper is not an oracle.
+        const assertPostedState = async (
+          expectedBalance: string,
+          expectedAmount: string,
+          deleted: boolean,
+        ) => {
+          const [account] = await db
+            .select()
+            .from(accounts)
+            .where(eq(accounts.id, lifecycleAccountId));
+          const postedRows = await db
+            .select()
+            .from(transactions)
+            .where(eq(transactions.accountId, lifecycleAccountId));
+
+          // Continue through edit/delete even when the create balance is wrong.
+          expect.soft(account).toMatchObject({
+            householdId,
+            balance: expectedBalance,
+            initialBalance: openingBalance,
+            currency,
+            isAsset,
+          });
+          expect.soft(postedRows).toHaveLength(1);
+          expect.soft(postedRows[0]).toMatchObject({
+            id: transactionId,
+            householdId,
+            accountId: lifecycleAccountId,
+            amount: expectedAmount,
+            currency,
+            type: "expense",
+            date: "2026-02-12",
+            deletedAt: deleted ? expect.any(Date) : null,
+          });
+        };
+
+        await assertPostedState(createdBalance, "45.50", false);
+
+        const edited = await request(app)
+          .put(`/api/transactions/${transactionId}`)
+          .set("Cookie", authCookie)
+          .set("X-Capital-Subject", userId)
+          .set("X-Capital-Household", householdId)
+          .send({ amount: { amount: "60.00", currency } })
+          .expect(200);
+        expect(edited.body.success).toBe(true);
+        await assertPostedState(editedBalance, "60.00", false);
+
+        const deleted = await request(app)
+          .delete(`/api/transactions/${transactionId}`)
+          .set("Cookie", authCookie)
+          .set("X-Capital-Subject", userId)
+          .set("X-Capital-Household", householdId)
+          .expect(200);
+        expect(deleted.body.success).toBe(true);
+        await assertPostedState(openingBalance, "60.00", true);
+      },
+    );
   });
 
   describe("PUT /api/transactions/:id (update)", () => {

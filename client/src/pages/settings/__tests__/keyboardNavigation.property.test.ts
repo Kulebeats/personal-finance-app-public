@@ -139,8 +139,16 @@ describe("Property 8: Keyboard Navigation Support", () => {
   it("Tab key navigation works without errors", () => {
     fc.assert(
       fc.property(
-        fc.array(categoryGenerator, { minLength: 1, maxLength: 2 }),
-        fc.array(groupGenerator, { minLength: 1, maxLength: 2 }),
+        fc.uniqueArray(categoryGenerator, {
+          minLength: 1,
+          maxLength: 2,
+          selector: category => category.id,
+        }),
+        fc.uniqueArray(groupGenerator, {
+          minLength: 1,
+          maxLength: 2,
+          selector: group => group.id,
+        }),
         (categories, groups) => {
           const mockCallbacks = {
             onCategoryEdit: vi.fn(),

@@ -122,11 +122,11 @@ describe("BudgetDetailModal", () => {
 
   it("renders an honest empty state instead of fake numbers when there is no real spend history", () => {
     mockUseBudgetCategoryHistory.mockReturnValue({
-      points: REAL_POINTS.map((p) => ({ ...p, actual: 0 })),
+      points: REAL_POINTS.map((p) => ({ ...p, actual: null })),
       isLoading: false,
       isError: false,
       hasData: false,
-      average: 0,
+      average: null,
     });
 
     render(
@@ -139,7 +139,7 @@ describe("BudgetDetailModal", () => {
       />,
     );
 
-    expect(screen.getByTestId("budget-history-empty-state")).toBeInTheDocument();
+    expect(screen.getByTestId("budget-history-empty-state")).toHaveTextContent("Spending history is unavailable");
     expect(screen.queryByText("$8500")).not.toBeInTheDocument();
   });
 
@@ -203,7 +203,7 @@ describe("BudgetDetailModal", () => {
         item: BudgetCategory,
         group: BudgetGroup,
         value: number,
-      ) => void;
+      ) => Promise<boolean>;
     }) {
       const snapshot = createSelected();
       const [groups, setGroups] = useState<BudgetGroup[]>([
@@ -237,7 +237,7 @@ describe("BudgetDetailModal", () => {
 
     it("shows the typed amount and commits it on blur", async () => {
       const user = userEvent.setup();
-      const onCommitBudget = vi.fn();
+      const onCommitBudget = vi.fn().mockResolvedValue(true);
       render(<Harness onCommitBudget={onCommitBudget} />);
 
       const input = screen.getByDisplayValue("500");
@@ -266,7 +266,7 @@ describe("BudgetDetailModal", () => {
 
     it("commits a return to the original amount after another amount was saved", async () => {
       const user = userEvent.setup();
-      const onCommitBudget = vi.fn();
+      const onCommitBudget = vi.fn().mockResolvedValue(true);
       render(<Harness onCommitBudget={onCommitBudget} />);
 
       const input = screen.getByDisplayValue("500");
@@ -282,7 +282,7 @@ describe("BudgetDetailModal", () => {
 
     it("does not re-commit when blurring an amount that was already saved", async () => {
       const user = userEvent.setup();
-      const onCommitBudget = vi.fn();
+      const onCommitBudget = vi.fn().mockResolvedValue(true);
       render(<Harness onCommitBudget={onCommitBudget} />);
 
       const input = screen.getByDisplayValue("500");
@@ -293,6 +293,24 @@ describe("BudgetDetailModal", () => {
       await user.tab();
 
       expect(onCommitBudget).toHaveBeenCalledTimes(1);
+    });
+
+    // A-17: the commit opens the scope chooser. Cancelling it saves nothing,
+    // so typing the same amount again must reopen it, not be skipped.
+    it("commits the same amount again after the scope dialog was cancelled", async () => {
+      const user = userEvent.setup();
+      const onCommitBudget = vi.fn().mockResolvedValue(false);
+      render(<Harness onCommitBudget={onCommitBudget} />);
+
+      const input = screen.getByDisplayValue("500");
+      await user.clear(input);
+      await user.type(input, "750");
+      await user.tab();
+      await user.clear(input);
+      await user.type(input, "750");
+      await user.tab();
+
+      expect(onCommitBudget.mock.calls.map((call) => call[2])).toEqual([750, 750]);
     });
   });
 });

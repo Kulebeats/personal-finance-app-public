@@ -26,6 +26,11 @@ export interface MerchantComboboxProps {
   placeholder?: string;
   disabled?: boolean;
   recentLimit?: number;
+  // Supplied by the form's FormControl so the trigger is labelled and
+  // reported as invalid (the submit alert finds and focuses it).
+  id?: string;
+  "aria-invalid"?: boolean;
+  "aria-describedby"?: string;
 }
 
 export function MerchantCombobox({
@@ -39,6 +44,9 @@ export function MerchantCombobox({
   placeholder = "Select merchant",
   disabled = false,
   recentLimit = 8,
+  id,
+  "aria-invalid": ariaInvalid,
+  "aria-describedby": ariaDescribedBy,
 }: MerchantComboboxProps) {
   const combobox = useMerchantCombobox({ value, selectedMerchantId, recentLimit });
 
@@ -78,7 +86,10 @@ export function MerchantCombobox({
       <PopoverTrigger asChild>
         <Button
           variant="outline"
+          id={id}
           role="combobox"
+          aria-invalid={ariaInvalid}
+          aria-describedby={ariaDescribedBy}
           type="button"
           className={cn("w-full justify-between", !value && "text-muted-foreground")}
           disabled={disabled}

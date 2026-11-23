@@ -6,7 +6,15 @@
 
 import { accountTypeEnum } from "@shared/schema";
 
-type AccountType = (typeof accountTypeEnum.enumValues)[number];
+export type AccountType = (typeof accountTypeEnum.enumValues)[number];
+
+/** Accounts whose balance counts as liquid assets in the financial ratios. */
+export const LIQUID_ACCOUNT_TYPES: AccountType[] = [
+  "checking",
+  "savings",
+  "cash",
+  "mobile_money",
+];
 
 export const LIABILITY_ACCOUNT_TYPES: AccountType[] = [
   "credit",

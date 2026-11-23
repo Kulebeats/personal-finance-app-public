@@ -1,5 +1,9 @@
 ﻿import { eq } from "drizzle-orm";
+import { getPostgresError } from "../../utils/postgresError";
+import { readRecurringCreateReplay } from "../transaction/idempotentReplay";
 import {
+  accounts,
+  households,
   recurringTransactionHistory,
   recurringTransactionLinks,
   recurringTransactions,
@@ -15,6 +19,7 @@ import type { Frequency, IntervalUnit } from "../../core/calculations/recurring/
 import { NotFoundError, ValidationError } from "../../utils/errorHandler";
 import { logger } from "../../utils/logger";
 import { withTransaction } from "../../utils/withTransaction";
+import { businessAuditService } from "../BusinessAuditService";
 import { goalAccountAssignmentService } from "../GoalAccountAssignmentService";
 import {
   ensureMerchantAlias,
@@ -26,6 +31,9 @@ import type {
   CreateRecurringFromTransactionInput,
 } from "../../modules/recurring/recurring.validation";
 import { RecurringBaseService } from "./RecurringBaseService";
+import { attachRecurringDefinition, recordRecurringDenomination, type VisibleRecurringRule } from "./RecurringDenomination";
+import { auditRecurringRule, type RecurringAuditRequest } from "./RecurringRuleAudit";
+import { lockAccountHousehold } from "../../repositories/AccountCreationGrant";
 
 export class RecurringCreationService extends RecurringBaseService {
   private async createRuleAndLinkForTransaction(
@@ -38,8 +46,8 @@ export class RecurringCreationService extends RecurringBaseService {
     const transactionDate = transaction.date;
     const startDate = recurring.startDate ?? transactionDate;
     const date = new Date(startDate);
-    const dayOfMonth = date.getDate();
-    const dayOfWeek = date.getDay();
+    const dayOfMonth = date.getUTCDate();
+    const dayOfWeek = date.getUTCDay();
 
     const [rule] = await tx
       .insert(recurringTransactions)
@@ -149,52 +157,26 @@ export class RecurringCreationService extends RecurringBaseService {
    * Create a transaction and recurring rule atomically, then link them
    */
   async createRecurringFromTransaction(
-    data: CreateTransactionInput,
-    recurring: CreateRecurringFromTransactionInput["recurring"],
+    input: CreateTransactionInput,
+    schedule: CreateRecurringFromTransactionInput["recurring"],
     householdId: string,
-    userId: string
+    userId: string,
+    ipAddress?: string,
   ): Promise<{
     transaction: Transaction;
-    recurringRule: RecurringTransaction;
+    recurringRule: VisibleRecurringRule;
     isDuplicate: boolean;
   }> {
+    // Preserve one submitted command through lookups, posting and rule creation.
+    const data = structuredClone(input);
+    const recurring = structuredClone(schedule);
     if (data.idempotencyKey) {
       const existing = await transactionRepository.findByIdempotencyKey(
         data.idempotencyKey,
         householdId
       );
 
-      if (existing) {
-        if (existing.recurringTransactionId) {
-          const rule = await recurringRepository.findById(
-            existing.recurringTransactionId,
-            householdId
-          );
-          if (rule) {
-            return {
-              transaction: existing,
-              recurringRule: rule,
-              isDuplicate: true,
-            };
-          }
-        }
-
-        const linked = await withTransaction((tx) =>
-          this.createRuleAndLinkForTransaction(
-            tx,
-            existing,
-            recurring,
-            householdId,
-            userId
-          )
-        );
-
-        return {
-          transaction: linked.transaction,
-          recurringRule: linked.rule,
-          isDuplicate: true,
-        };
-      }
+      if (existing) return readRecurringCreateReplay(existing, householdId, userId);
     }
 
     const account = await accountRepository.findByIdWithVisibility(
@@ -240,15 +222,11 @@ export class RecurringCreationService extends RecurringBaseService {
       ? data.name
       : merchantMatch.cleanedName || data.name;
 
-    if (merchantMatch.merchant && merchantMatch.aliasCandidate) {
-      await ensureMerchantAlias(
-        merchantMatch.merchant.id,
-        merchantMatch.aliasCandidate
-      );
-    }
-
-    const result = await withTransaction(async (tx) => {
-      const { transaction } =
+    const create = () => withTransaction(async (tx) => {
+      if (merchantMatch.merchant && merchantMatch.aliasCandidate) {
+        await ensureMerchantAlias(merchantMatch.merchant.id, merchantMatch.aliasCandidate, tx);
+      }
+      const { transaction, account } =
         await transactionRepository.createWithinTransaction(tx, {
           ...data,
           name: resolvedName,
@@ -257,16 +235,58 @@ export class RecurringCreationService extends RecurringBaseService {
           ownerUserId: userId,
           isRecurring: false,
           recurringTransactionId: null,
+        }, {
+          createActor: { householdId, userId }, validateReferences: true,
+          originalOwnerIntent: { actorUserId: userId, operation: "recurring" },
+          audit: { userId, householdId, ipAddress },
+          publishCreatedEvent: true,
         });
 
-      return this.createRuleAndLinkForTransaction(
+      const [household] = await tx.select({ currency: households.currency }).from(households)
+        .where(eq(households.id, householdId)).for("share");
+      if (data.currency !== "ZMW" || account.currency !== data.currency || household?.currency !== data.currency) {
+        throw new ValidationError(
+          "Recurring denomination must be ZMW and match the destination and household; multi-currency recurring is not yet supported.",
+          [{ field: "amount.currency", message: "Enter a ZMW amount matching the destination and household" }],
+        );
+      }
+      const created = await this.createRuleAndLinkForTransaction(
         tx,
         transaction,
         recurring,
         householdId,
         userId
       );
+      await recordRecurringDenomination(tx, created.rule, data.currency, userId, "manual_creation");
+      await businessAuditService.logCreate({
+        tx,
+        userId,
+        householdId: transaction.isPrivate || account.isPrivate ? null : householdId,
+        entityId: created.rule.id,
+        entityType: "recurring_rule",
+        newValue: {
+          name: created.rule.name,
+          amount: created.rule.amount,
+          source: "transaction",
+          transactionId: transaction.id,
+        },
+        ipAddress,
+        metadata: { operation: "createFromTransaction" },
+      });
+      return created;
     });
+
+    let result: Awaited<ReturnType<typeof create>>;
+    try {
+      result = await create();
+    } catch (error) {
+      const conflict = getPostgresError(error);
+      if (!data.idempotencyKey || conflict?.code !== "23505" ||
+        conflict.constraint !== "transactions_idempotency_key_unique") throw error;
+      const winner = await transactionRepository.findByIdempotencyKey(data.idempotencyKey, householdId);
+      if (!winner) throw error;
+      return readRecurringCreateReplay(winner, householdId, userId);
+    }
 
     try {
       await goalAccountAssignmentService.syncGoalsForAccount(
@@ -282,7 +302,7 @@ export class RecurringCreationService extends RecurringBaseService {
 
     return {
       transaction: result.transaction,
-      recurringRule: result.rule,
+      recurringRule: await attachRecurringDefinition(result.rule, householdId),
       isDuplicate: false,
     };
   }
@@ -294,10 +314,12 @@ export class RecurringCreationService extends RecurringBaseService {
     transactionId: string,
     recurring: CreateRecurringFromExistingTransactionInput,
     householdId: string,
-    userId: string
+    userId: string,
+    /** Request context for the CREATE audit row, written in the rule's transaction (FIN-13). */
+    audit?: RecurringAuditRequest,
   ): Promise<{
     transaction: Transaction;
-    recurringRule: RecurringTransaction;
+    recurringRule: VisibleRecurringRule;
     isDuplicate: boolean;
   }> {
     const transaction = await transactionRepository.findByIdWithVisibility(
@@ -326,25 +348,33 @@ export class RecurringCreationService extends RecurringBaseService {
       if (rule) {
         return {
           transaction,
-          recurringRule: rule,
+          recurringRule: await attachRecurringDefinition(rule, householdId),
           isDuplicate: true,
         };
       }
     }
 
-    const result = await withTransaction((tx) =>
-      this.createRuleAndLinkForTransaction(
-        tx,
-        transaction,
-        recurring,
-        householdId,
-        userId
-      )
-    );
+    const result = await withTransaction(async (tx) => {
+      // Household first: the audit FK lock order (FIN-13).
+      await lockAccountHousehold(tx, householdId);
+      const created = await this.createRuleAndLinkForTransaction(tx, transaction, recurring, householdId, userId);
+      if (audit) {
+        const { id, name, amount } = created.rule;
+        // A private source keeps the household off the row, as createRecurringFromTransaction does.
+        const [source] = await tx.select({ isPrivate: accounts.isPrivate }).from(accounts)
+          .where(eq(accounts.id, transaction.accountId));
+        const auditHouseholdId = transaction.isPrivate || source?.isPrivate ? null : householdId;
+        await auditRecurringRule(tx, "CREATE", id, { householdId: auditHouseholdId, userId }, audit, {
+          newValue: { name, amount, source: "transaction", transactionId },
+          metadata: { operation: "createFromTransaction" },
+        });
+      }
+      return created;
+    });
 
     return {
       transaction: result.transaction,
-      recurringRule: result.rule,
+      recurringRule: await attachRecurringDefinition(result.rule, householdId),
       isDuplicate: false,
     };
   }

@@ -35,6 +35,10 @@ export type AuditEntityType =
   | "recurring_batch"
   | "goal"
   | "holding"
+  | "pension_contribution"
+  | "pension_holding" // NEW-32: pension holding create
+  | "budget_period" // NEW-32: rollover writes to budget_periods
+  | "price_alert" // NEW-32: price-alert trigger state
   | "investment_transaction"
   | "account"
   | "goal_transfer"
@@ -43,9 +47,12 @@ export type AuditEntityType =
   | "receipt"
   | "security"
   | "fx_rate"
+  | "security_price"
+  | "transaction_attachment"
   | "rule"
   | "rule_order"
   | "merchant"
+  | "merchant_alias"
   | "tag"
   | "user"
   | "user_account"
@@ -56,14 +63,17 @@ export type AuditEntityType =
   | "display_settings"
   | "notification_preference"
   | "push_subscription"
+  | "quiet_hours"
   | "filter_preset"
+  | "saved_view" // R05.2 named household saved views
   | "ai_query" // AI assistant queries (FIX AI-AUDIT-001)
   | "ai_consent" // AI consent grant/revoke (packet R4, Zambia DPA)
   | "grz_bond" // GRZ sovereign bonds (SCP-312)
   | "grz_tbill" // GRZ treasury bills (SCP-312)
   | "grz_bond_payment" // GRZ bond coupon payments (SCP-312)
   | "grz_auction_result" // GRZ auction results (SCP-312)
-  | "data_export"; // Financial/PII data export egress (SCP-336)
+  | "data_export" // Financial/PII data export egress (SCP-336)
+  | "storage_object"; // Uploaded file moved into / out of the ObjectStore (OPS-001)
 
 export interface AuditLogEntry {
   householdId?: string | null;
@@ -71,7 +81,8 @@ export interface AuditLogEntry {
   userId: string | null;
   action: AuditAction;
   entityType: AuditEntityType;
-  entityId: string;
+  /** Null only when there is no entity row to name (an AI query with no thread). */
+  entityId: string | null;
   details?: Record<string, unknown>; // Before/after state, error details
   ipAddress?: string;
   /**

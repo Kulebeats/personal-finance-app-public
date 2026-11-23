@@ -1,9 +1,10 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
   DialogTrigger,
   DialogFooter,
 } from "@/components/ui/dialog";
@@ -17,14 +18,13 @@ import {
 import { useFormat } from "@/hooks/use-format";
 import {
   parseMoneyInputDecimal,
-  parseMoneyInputNumber,
   parseMoneyString,
 } from "@/lib/money";
 import { cn } from "@/lib/utils";
 
-import { InvestmentBuySellForm } from "./InvestmentBuySellForm";
+import { calculateTradeSettlement, InvestmentBuySellForm } from "./InvestmentBuySellForm";
 import { InvestmentHoldingSummary } from "./InvestmentHoldingSummary";
-import { InvestmentIncomeForm } from "./InvestmentIncomeForm";
+import { calculateInvestmentIncome, InvestmentIncomeForm } from "./InvestmentIncomeForm";
 import { InvestmentTransactionTypeSelector } from "./InvestmentTransactionTypeSelector";
 import { type TransactionType } from "./InvestmentTransactionTypes";
 
@@ -45,63 +45,53 @@ export function RecordInvestmentTransactionModal({
 
   const [quantity, setQuantity] = useState("");
   const [price, setPrice] = useState("");
+  const [fee, setFee] = useState("");
   const [transactionDate, setTransactionDate] = useState(
     new Date().toISOString().split("T")[0]
   );
 
   const [grossAmount, setGrossAmount] = useState("");
-  const [whtRate, setWhtRate] = useState("15");
+  const [whtRate, setWhtRate] = useState("");
   const [customWht, setCustomWht] = useState(false);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const { formatCurrency } = useFormat();
   const createInvestmentTransaction = useCreateInvestmentTransaction();
 
-  const currentQuantity = Number(holding.quantity || "0");
-  const currentPrice =
-    parseMoneyInputNumber(holding.security?.currentPrice) ?? 0;
+  const currentQuantity = parseMoneyString(holding.quantity);
+  const currency = holding.security?.currency;
+  const validCurrency = !!currency && /^[A-Z]{3}$/.test(currency);
   const securitySymbol = holding.security?.symbol || "N/A";
   const securityName = holding.security?.name || "Unknown Security";
 
-  useEffect(() => {
-    if (open) {
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (nextOpen) {
       setTransactionType("buy");
       setQuantity("");
-      setPrice(currentPrice.toString());
+      setFee("");
+      setPrice("");
       setTransactionDate(new Date().toISOString().split("T")[0]);
       setGrossAmount("");
-      setWhtRate("15");
+      setWhtRate("");
       setCustomWht(false);
     }
-  }, [open, currentPrice]);
+    setOpen(nextOpen);
+  };
 
   const qtyDecimal = parseMoneyInputDecimal(quantity) ?? parseMoneyString(0);
-  const priceDecimal = parseMoneyInputDecimal(price) ?? parseMoneyString(0);
-  const grossDecimal =
-    parseMoneyInputDecimal(grossAmount) ?? parseMoneyString(0);
-  const whtDecimal = (
-    parseMoneyInputDecimal(whtRate) ?? parseMoneyString(0)
-  ).dividedBy(100);
-
-  const qty = qtyDecimal.toNumber();
-  const prc = priceDecimal.toNumber();
-  const gross = grossDecimal.toNumber();
-  const totalValueDecimal = qtyDecimal.times(priceDecimal);
-  const whtAmountDecimal = grossDecimal.times(whtDecimal);
-  const netAmountDecimal = grossDecimal.minus(whtAmountDecimal);
-  const totalValue = totalValueDecimal.toNumber();
-  const whtAmount = whtAmountDecimal.toNumber();
-  const netAmount = netAmountDecimal.toNumber();
+  const trade = validCurrency && (transactionType === "buy" || transactionType === "sell")
+    ? calculateTradeSettlement(transactionType, quantity, price, fee) : null;
+  const income = calculateInvestmentIncome(grossAmount, whtRate);
 
   const isValidSell =
-    transactionType === "sell" ? qty <= currentQuantity : true;
-  const newQuantityAfterSell = currentQuantity - qty;
+    transactionType === "sell" ? qtyDecimal.lte(currentQuantity) : true;
+  const newQuantityAfterSell = currentQuantity.minus(qtyDecimal).toFixed();
 
   const handleSubmit = async () => {
+    if (!isFormValid() || !currency) return;
     setIsSubmitting(true);
 
     try {
-      const currency = holding.security?.currency || "ZMW";
       // P1-4 FIX: Define proper payload type instead of Record<string, any>
       const basePayload = {
         accountId: holding.accountId,
@@ -115,18 +105,17 @@ export function RecordInvestmentTransactionModal({
       // P1-4 FIX: Convert numbers to strings for API payload
       const payload =
         transactionType === "buy" || transactionType === "sell"
-          ? {
+          ? trade && {
               ...basePayload,
-              quantity: qtyDecimal.toString(),
-              price: priceDecimal.toFixed(2),
-              amount: totalValueDecimal.toFixed(2),
+              ...trade,
             }
-          : {
+          : income && {
               ...basePayload,
-              amount: netAmountDecimal.toFixed(2),
-              withholdingTax: whtAmountDecimal.toFixed(2),
+              amount: income.net.toFixed(2),
+              withholdingTax: income.withheld.toFixed(2),
             };
 
+      if (!payload) return;
       await createInvestmentTransaction.mutateAsync(payload);
 
       setOpen(false);
@@ -140,16 +129,16 @@ export function RecordInvestmentTransactionModal({
 
   const isFormValid = () => {
     if (transactionType === "buy" || transactionType === "sell") {
-      return qty > 0 && prc > 0 && isValidSell;
+      return !!trade && isValidSell;
     }
     if (transactionType === "dividend" || transactionType === "interest") {
-      return gross > 0;
+      return !!income && !!holding.security?.currency;
     }
     return false;
   };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>{children}</DialogTrigger>
       <DialogContent className="sm:max-w-[480px]">
         <DialogHeader>
@@ -157,13 +146,14 @@ export function RecordInvestmentTransactionModal({
             <DollarSign className="w-5 h-5 text-orange-500" />
             Record Transaction
           </DialogTitle>
+          <DialogDescription>Record a trade or income payment for this holding.</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
           <InvestmentHoldingSummary
             securitySymbol={securitySymbol}
             securityName={securityName}
-            currentQuantity={currentQuantity}
+            currentQuantity={currentQuantity.toFixed()}
           />
 
           <div className="space-y-2">
@@ -175,18 +165,29 @@ export function RecordInvestmentTransactionModal({
           </div>
 
           {(transactionType === "buy" || transactionType === "sell") && (
+            <div className="space-y-2 text-sm text-muted-foreground">
+              <p>Enter the actual execution price from your trade confirmation.</p>
+              {validCurrency && holding.security?.currentPrice !== null && holding.security?.currentPrice !== undefined && (
+                <p>Valuation price: {currency} {holding.security.currentPrice}</p>
+              )}
+            </div>
+          )}
+
+          {(transactionType === "buy" || transactionType === "sell") && (
             <InvestmentBuySellForm
               transactionType={transactionType}
               quantity={quantity}
               onQuantityChange={setQuantity}
               price={price}
               onPriceChange={setPrice}
+              fee={fee}
+              onFeeChange={setFee}
               transactionDate={transactionDate}
               onTransactionDateChange={setTransactionDate}
-              currentQuantity={currentQuantity}
-              pricePlaceholder={currentPrice.toString()}
+              currentQuantity={currentQuantity.toFixed()}
+              pricePlaceholder="Execution price"
               isValidSell={isValidSell}
-              totalValue={totalValue}
+              totalValue={trade ? Number(trade.amount) : null}
               newQuantityAfterSell={newQuantityAfterSell}
               formatCurrency={formatCurrency}
               currency={holding.security?.currency}
@@ -195,6 +196,7 @@ export function RecordInvestmentTransactionModal({
 
           {(transactionType === "dividend" || transactionType === "interest") && (
             <InvestmentIncomeForm
+              income={income}
               grossAmount={grossAmount}
               onGrossAmountChange={setGrossAmount}
               whtRate={whtRate}

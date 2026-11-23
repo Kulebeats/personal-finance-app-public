@@ -1,176 +1,97 @@
+import Decimal from "decimal.js";
 import { db } from "../db";
 import {
   accounts,
   accountBalanceSnapshots,
+  households,
   investmentTransactions,
 } from "@shared/schema";
-import { eq, and, inArray, gte, asc } from "drizzle-orm";
-import { subMonths, subYears, differenceInCalendarDays } from "date-fns";
-import { Money } from "../core/money";
+import { eq, and, inArray, gte, asc, sql } from "drizzle-orm";
+import { subMonths, subYears } from "date-fns";
+import { visibleAccountPredicate } from "../core/authz/transaction-visibility";
+import { visibleInvestmentTransactionPredicate } from "../core/authz/investment-visibility";
+import { CalculationError } from "../core/calculations/errors";
+import { ForbiddenError } from "../core/errors";
+import type { HouseholdContext } from "../middleware/householdGuard";
+import { resolvedFxRate } from "../repositories/reports/fxRateExpr";
+import { buildPerformanceSeries, type PerformanceDataPoint, type PerformanceFlow } from "./InvestmentPerformanceSeries";
 
 export type TimeFrame = "1M" | "3M" | "YTD" | "1Y" | "ALL";
+export type { PerformanceDataPoint } from "./InvestmentPerformanceSeries";
 
-interface PerformanceDataPoint {
-  date: string;
-  value: number;
-  benchmark?: number; // Placeholder for now
-  twrIndex?: number;
-  twrReturnPercent?: number;
+const CASH_FLOW_TYPES: ("transfer_in" | "transfer_out")[] = ["transfer_in", "transfer_out"];
+// A household with no stored currency reads as ZMW everywhere.
+const DEFAULT_CURRENCY = "ZMW";
+
+function startDateFor(timeframe: TimeFrame, now: Date): string {
+  const start = timeframe === "3M" ? subMonths(now, 3)
+    : timeframe === "1Y" ? subYears(now, 1)
+      : timeframe === "YTD" ? new Date(now.getFullYear(), 0, 1)
+        : timeframe === "ALL" ? new Date(0)
+          : subMonths(now, 1);
+  return start.toISOString().split("T")[0];
+}
+
+interface StoredFlow { date: string; type: string; amount: string; currency: string; amountZmw: string | null; rate: string | null }
+
+// A-08: account snapshots are stored in the household currency, so each flow
+// is expressed in it too: native when already in it; the dated ZMW amount
+// stored with the event when the household is ZMW; else the dated rate the
+// reports use. A flow with no rate makes the series unavailable (422).
+function flowInReportingCurrency(flow: StoredFlow, base: string): PerformanceFlow {
+  const type = flow.type === "transfer_out" ? "transfer_out" : "transfer_in";
+  if (flow.currency === base) return { date: flow.date, type, amount: flow.amount };
+  if (base === "ZMW" && flow.amountZmw !== null) return { date: flow.date, type, amount: flow.amountZmw };
+  if (flow.rate === null) {
+    throw new CalculationError("MISSING_FX_RATE", { from: flow.currency, to: base, date: flow.date },
+      `Exchange rate unavailable for ${flow.currency} -> ${base} on ${flow.date}`);
+  }
+  const converted = new Decimal(flow.amount).times(flow.rate).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+  return { date: flow.date, type, amount: converted.toString() };
 }
 
 export class InvestmentPerformanceService {
+  // C3-24: the same audience as the other investment reads. A member sees
+  // Shared investment accounts and their own private ones, never another
+  // member's private account and never a soft-deleted one. All reads share
+  // one snapshot so a concurrent privacy change cannot mix audiences.
   async gethistory(
-    householdId: string,
+    caller: HouseholdContext,
     timeframe: TimeFrame = "1M"
   ): Promise<PerformanceDataPoint[]> {
-    // 1. Get investment account IDs
-    const investmentAccounts = await db
-      .select({ id: accounts.id })
-      .from(accounts)
-      .where(
-        and(
-          eq(accounts.householdId, householdId),
-          eq(accounts.type, "investment")
-        )
-      );
+    if (!caller?.householdId || !caller.userId) throw new ForbiddenError("Financial read access required");
+    const startDate = startDateFor(timeframe, new Date());
+    return db.transaction(async tx => {
+      const visible = await tx.select({ id: accounts.id }).from(accounts)
+        .where(and(eq(accounts.type, "investment"), visibleAccountPredicate(caller)));
+      if (visible.length === 0) return [];
+      const accountIds = visible.map(account => account.id);
 
-    if (investmentAccounts.length === 0) {
-      return [];
-    }
+      const snapshots = await tx.select({ date: accountBalanceSnapshots.date, balance: accountBalanceSnapshots.balance })
+        .from(accountBalanceSnapshots)
+        .where(and(inArray(accountBalanceSnapshots.accountId, accountIds), gte(accountBalanceSnapshots.date, startDate)))
+        .orderBy(asc(accountBalanceSnapshots.date));
+      if (snapshots.length === 0) return [];
 
-    const accountIds = investmentAccounts.map((a) => a.id);
-
-    // 2. Determine start date
-    const now = new Date();
-    let startDate: Date;
-
-    switch (timeframe) {
-      case "1M":
-        startDate = subMonths(now, 1);
-        break;
-      case "3M":
-        startDate = subMonths(now, 3);
-        break;
-      case "1Y":
-        startDate = subYears(now, 1);
-        break;
-      case "YTD":
-        startDate = new Date(now.getFullYear(), 0, 1);
-        break;
-      case "ALL":
-        startDate = new Date(0);
-        break; // Or sensible default
-      default:
-        startDate = subMonths(now, 1);
-    }
-
-    const startDateStr = startDate.toISOString().split("T")[0];
-
-    // 3. Query snapshots
-    const snapshots = await db
-      .select({
-        date: accountBalanceSnapshots.date,
-        balance: accountBalanceSnapshots.balance,
-      })
-      .from(accountBalanceSnapshots)
-      .where(
-        and(
-          inArray(accountBalanceSnapshots.accountId, accountIds),
-          gte(accountBalanceSnapshots.date, startDateStr)
-        )
-      )
-      .orderBy(asc(accountBalanceSnapshots.date));
-
-    // 4. Group by date and sum
-    const grouped = snapshots.reduce((acc, curr) => {
-      const date = curr.date; // already YYYY-MM-DD usually? Schema says 'date'.
-      // If date object, convert to string. Schema date is string usually in drizzle-orm pg?
-      // Actually schema definition: date("date") which returns string.
-      const val = new Money(curr.balance).toNumber();
-      acc[date] = (acc[date] || 0) + val;
-      return acc;
-    }, {} as Record<string, number>);
-
-    const series: PerformanceDataPoint[] = Object.entries(grouped)
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([date, value]) => ({
-        date,
-        value,
-      }));
-
-    if (series.length === 0) {
-      return series;
-    }
-
-    const cashFlowTypes: ("transfer_in" | "transfer_out")[] = ["transfer_in", "transfer_out"];
-    const flows = await db
-      .select({
+      const [household] = await tx.select({ currency: households.currency }).from(households)
+        .where(eq(households.id, caller.householdId)).limit(1);
+      const base = household?.currency || DEFAULT_CURRENCY;
+      const rate = resolvedFxRate(caller.householdId, sql`${investmentTransactions.currency}`, base, sql`${investmentTransactions.transactionDate}`);
+      const flows = await tx.select({
         date: investmentTransactions.transactionDate,
         type: investmentTransactions.type,
         amount: investmentTransactions.amount,
+        currency: investmentTransactions.currency,
         amountZmw: investmentTransactions.amountZmw,
-      })
-      .from(investmentTransactions)
-      .where(
-        and(
-          inArray(investmentTransactions.accountId, accountIds),
-          inArray(investmentTransactions.type, cashFlowTypes),
-          gte(investmentTransactions.transactionDate, startDateStr)
-        )
-      );
-
-    const flowMap = new Map<string, number>();
-    for (const flow of flows) {
-      const amount =
-        flow.amountZmw !== null && flow.amountZmw !== undefined
-          ? Number(flow.amountZmw)
-          : Number(flow.amount);
-      const signedAmount =
-        flow.type === "transfer_out" ? -Math.abs(amount) : Math.abs(amount);
-      const current = flowMap.get(flow.date) || 0;
-      flowMap.set(flow.date, current + signedAmount);
-    }
-
-    let twrIndex = 100;
-    for (let i = 1; i < series.length; i++) {
-      const prev = series[i - 1];
-      const current = series[i];
-      const periodDays = Math.max(
-        1,
-        differenceInCalendarDays(new Date(current.date), new Date(prev.date))
-      );
-
-      const flowEntries = Array.from(flowMap.entries()).filter(
-        ([date]) => date > prev.date && date <= current.date
-      );
-
-      let netFlow = 0;
-      let weightedFlow = 0;
-      for (const [date, amount] of flowEntries) {
-        const daysToEnd = differenceInCalendarDays(
-          new Date(current.date),
-          new Date(date)
-        );
-        const weight = periodDays > 0 ? daysToEnd / periodDays : 0;
-        netFlow += amount;
-        weightedFlow += amount * weight;
-      }
-
-      const denominator = prev.value + weightedFlow;
-      const periodReturn =
-        denominator !== 0
-          ? (current.value - prev.value - netFlow) / denominator
-          : 0;
-
-      twrIndex *= 1 + periodReturn;
-      current.twrIndex = Number(twrIndex.toFixed(4));
-      current.twrReturnPercent = Number((twrIndex - 100).toFixed(4));
-    }
-
-    series[0].twrIndex = 100;
-    series[0].twrReturnPercent = 0;
-
-    return series;
+        rate: sql<string | null>`(${rate})::text`,
+      }).from(investmentTransactions).where(and(
+        inArray(investmentTransactions.accountId, accountIds),
+        inArray(investmentTransactions.type, CASH_FLOW_TYPES),
+        gte(investmentTransactions.transactionDate, startDate),
+        visibleInvestmentTransactionPredicate(caller),
+      ));
+      return buildPerformanceSeries(snapshots, flows.map(flow => flowInReportingCurrency(flow, base)));
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
   }
 }
 

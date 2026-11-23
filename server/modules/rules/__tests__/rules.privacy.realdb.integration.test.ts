@@ -149,6 +149,7 @@ describe("Rules Bulk Paths Privacy REAL-DB Integration (Rule 11)", () => {
     const [category] = await db
       .insert(categories)
       .values({
+        householdId,
         groupId: categoryGroupId,
         name: "Rules Privacy Category",
         icon: "coffee",

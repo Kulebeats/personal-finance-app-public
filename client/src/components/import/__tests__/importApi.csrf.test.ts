@@ -11,7 +11,7 @@
  */
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { clearCsrfToken } from "@/lib/api";
-import { parseImportCsv, executeImport } from "../importApi";
+import { parseImportCsv, executeImport, referenceDisplaysFor } from "../importApi";
 
 const mockFetch = vi.fn();
 
@@ -77,8 +77,14 @@ describe("import wizard API helpers", () => {
       targetAccountId: "acc-1",
       strategy: "prioritize_csv" as const,
       mapping: { date: "Date", amount: "Amount" },
+      dateFormat: "DD/MM/YYYY" as const,
       categoryMapping: {},
       rows: [{ Date: "2026-01-01", Amount: "5" }],
+      batchId: "00000000-0000-4000-8000-000000000001",
+      skipRowOrdinals: [],
+      reviewedRemovals: [],
+      postRows: [],
+      skipRows: [],
     };
     const result = await executeImport(payload);
 
@@ -95,5 +101,15 @@ describe("import wizard API helpers", () => {
       }),
     );
     expect(result).toEqual(outcome);
+  });
+
+  it("sends only the Excel displays of the column mapped as Reference (review r6)", () => {
+    const referenceDisplays = [
+      { row: 1, column: "Ref", text: "000123" },
+      { row: 1, column: "Amount", text: "000123" },
+    ];
+    const parsed = { headers: ["Date", "Amount", "Ref"], rows: [], referenceDisplays };
+    expect(referenceDisplaysFor(parsed, { date: "Date", amount: "Amount", reference: "Ref" })).toEqual([referenceDisplays[0]]);
+    expect(referenceDisplaysFor(parsed, { date: "Date", amount: "Amount" })).toEqual([]);
   });
 });

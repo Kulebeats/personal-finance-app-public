@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { profileSchema } from "../profileSchema";
+import { PROFILE_SOCIAL_LINK_MAX_LENGTH, SOCIAL_LINK_TOO_LONG_MESSAGE } from "@shared/profile-policy";
 
 // Valid base data for tests - includes all required fields with proper types
 const validProfileData = {
@@ -203,6 +204,12 @@ describe("profileSchema", () => {
       const result = profileSchema.safeParse(data);
       expect(result.success).toBe(true);
     });
+
+    it("refuses a country code that is not two letters", () => {
+      const result = profileSchema.safeParse({ ...validProfileData, address: { ...validProfileData.address, country: "1!" } });
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error.issues.map(issue => issue.message)).toEqual(["Country code must be 2 letters"]);
+    });
   });
 
   describe("nrc validation", () => {
@@ -221,5 +228,40 @@ describe("profileSchema", () => {
       });
       expect(result.success).toBe(false);
     });
+  });
+});
+
+describe("rules shared with the server (shared/profile-policy.ts)", () => {
+  const website = (length: number) =>
+    `https://example.test/${"a".repeat(length - "https://example.test/".length)}`;
+
+  it("caps social links at the length the server accepts", () => {
+    const ok = profileSchema.safeParse({
+      ...validProfileData,
+      socialLinks: { ...validProfileData.socialLinks, website: website(PROFILE_SOCIAL_LINK_MAX_LENGTH) },
+    });
+    expect(ok.success).toBe(true);
+
+    const tooLong = profileSchema.safeParse({
+      ...validProfileData,
+      socialLinks: { ...validProfileData.socialLinks, website: website(PROFILE_SOCIAL_LINK_MAX_LENGTH + 1) },
+    });
+    expect(tooLong.success).toBe(false);
+    if (!tooLong.success) {
+      expect(tooLong.error.issues.map(issue => issue.message)).toContain(SOCIAL_LINK_TOO_LONG_MESSAGE);
+    }
+  });
+
+  it("accepts an 18th birthday that is today and refuses one that is tomorrow (local day)", () => {
+    const today = new Date();
+    const eighteenToday = new Date(today.getFullYear() - 18, today.getMonth(), today.getDate());
+    const eighteenTomorrow = new Date(today.getFullYear() - 18, today.getMonth(), today.getDate() + 1);
+
+    expect(profileSchema.safeParse({ ...validProfileData, birthday: eighteenToday }).success).toBe(true);
+    const underage = profileSchema.safeParse({ ...validProfileData, birthday: eighteenTomorrow });
+    expect(underage.success).toBe(false);
+    if (!underage.success) {
+      expect(underage.error.issues.map(issue => issue.message)).toEqual(["You must be at least 18 years old"]);
+    }
   });
 });

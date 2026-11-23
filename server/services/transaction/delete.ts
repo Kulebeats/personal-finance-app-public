@@ -11,8 +11,7 @@ import { transactionRepository } from "../../repositories/TransactionRepository"
 import { transactionTransferRepository } from "../../repositories/TransactionTransferRepository";
 import { NotFoundError, AuthorizationError } from "../../utils/errorHandler";
 import { logger } from "../../utils/logger";
-import { invalidateOnChange } from "../CacheInvalidation";
-import { outboxEventService, EventTypes } from "../../core/events";
+import { invalidateOnChangeAfterCommit } from "../CacheInvalidation";
 
 /**
  * Delete a transaction (soft delete with balance reversal).
@@ -83,11 +82,13 @@ export async function deleteTransaction(
     logger.info("Transfer deleted", { householdId });
 
     // Invalidate analytics cache
-    await invalidateOnChange("transaction", householdId);
+    await invalidateOnChangeAfterCommit("transaction", householdId);
     return;
   }
 
   const deleted = await transactionRepository.softDelete(id, householdId, {
+    actor: { householdId, userId },
+    publishDeletedEvent: true,
     audit: {
       userId,
       oldValue: auditOldValue,
@@ -103,18 +104,6 @@ export async function deleteTransaction(
   logger.info("Transaction deleted", { householdId });
 
   // Invalidate analytics cache
-  await invalidateOnChange("transaction", householdId);
+  await invalidateOnChangeAfterCommit("transaction", householdId);
 
-  // Emit transaction deleted event (fire and forget)
-  outboxEventService
-    .publish({
-      eventType: EventTypes.TRANSACTION_DELETED,
-      aggregateType: "transaction",
-      aggregateId: id,
-      householdId,
-      payload: { id },
-    })
-    .catch((err) =>
-      logger.error("Failed to publish transaction event", { err }),
-    );
 }

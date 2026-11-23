@@ -1,34 +1,14 @@
 import { defineConfig } from "vitest/config";
 import path from "path";
-import dotenv from "dotenv";
-import {
-  resolveTestDatabaseUrl,
-  assertNotDevDatabase,
-} from "./testing/test-database";
+import { prepareTestEnvironment } from "./testing/test-target.mjs";
 
-// Load .env from parent directory
-dotenv.config({ path: path.resolve(__dirname, "../.env") });
-
-// Set NODE_ENV to test for vitest runs
-process.env.NODE_ENV = "test";
-
-// Point the suite at a DEDICATED test database before any test imports
-// `server/db.ts` (which reads DATABASE_URL at module load).
-//
-// Loading `.env` above sets DATABASE_URL to the DEV database, and the real-DB
-// integration suites DELETE users/households in cleanup — so without this, a
-// test run destroys dev data. Locally `finance_app` derives `finance_app_test`;
-// in CI, DATABASE_URL is already `pfa_test` and is used unchanged.
-const ambientDatabaseUrl = process.env.DATABASE_URL;
-const testDatabaseUrl = resolveTestDatabaseUrl({
-  TEST_DATABASE_URL: process.env.TEST_DATABASE_URL,
-  DATABASE_URL: ambientDatabaseUrl,
-});
-assertNotDevDatabase(testDatabaseUrl, ambientDatabaseUrl);
-process.env.DATABASE_URL = testDatabaseUrl;
+prepareTestEnvironment();
 
 export default defineConfig({
+  root: __dirname,
   test: {
+    globalSetup: [path.resolve(__dirname, "testing/global-setup.ts")],
+    setupFiles: [path.resolve(__dirname, "testing/test-setup.ts")],
     environment: "node",
     fileParallelism: false,
     maxConcurrency: 1,

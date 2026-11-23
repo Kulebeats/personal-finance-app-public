@@ -2,11 +2,11 @@
  * Post-import side effects for CSV import.
  *
  * Extracted from `services/ImportService.ts` during the Rule 2 LOC burn-down;
- * moved verbatim, no behaviour change.
+ * The posting transaction owns each durable creation event.
  *
  * Every step here is best-effort and individually guarded: an imported batch
  * has already been committed by the time this runs, so a failure in rule
- * application, recurring auto-link, notification, or event publication must be
+ * application, recurring auto-link, or notification must be
  * logged and swallowed rather than surfaced as an import failure. Do not
  * "improve" this by letting these throw.
  */
@@ -15,20 +15,20 @@ import { logger } from "../../utils/logger";
 import { Money } from "../../core/money";
 import { recurringService } from "../RecurringService";
 import { ruleService } from "../RuleService";
-import { invalidateOnChange } from "../CacheInvalidation";
-import { EventTypes, outboxEventService } from "../../core/events";
+import { invalidateOnChangeAfterCommit } from "../CacheInvalidation";
 import { notificationService } from "../NotificationService";
 
 export async function runPostImportSideEffects(
   transactionsToProcess: Transaction[],
   householdId: string,
   userId: string,
+  deletedCount = 0,
 ): Promise<void> {
-  if (transactionsToProcess.length === 0) {
+  if (transactionsToProcess.length === 0 && deletedCount === 0) {
     return;
   }
 
-  await invalidateOnChange("transaction", householdId);
+  await invalidateOnChangeAfterCommit("transaction", householdId);
 
   for (const transaction of transactionsToProcess) {
     let processedTransaction = transaction;
@@ -50,6 +50,7 @@ export async function runPostImportSideEffects(
       await recurringService.autoLinkNewTransaction(
         processedTransaction,
         householdId,
+        userId,
       );
     } catch (error) {
       logger.warn("Auto-linking recurring rule failed for import", {
@@ -82,23 +83,6 @@ export async function runPostImportSideEffects(
         );
     }
 
-    outboxEventService
-      .publish({
-        eventType: EventTypes.TRANSACTION_CREATED,
-        aggregateType: "transaction",
-        aggregateId: processedTransaction.id,
-        householdId,
-        payload: {
-          id: processedTransaction.id,
-          type: processedTransaction.type,
-          amount: String(processedTransaction.amount),
-          accountId: processedTransaction.accountId,
-        },
-      })
-      .catch((error) =>
-        logger.error("Failed to publish import transaction event", {
-          error,
-        }),
-      );
+
   }
 }

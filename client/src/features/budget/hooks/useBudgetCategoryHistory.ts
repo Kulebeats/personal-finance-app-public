@@ -7,29 +7,20 @@
  * fabricated 6-month chart data that used to be hardcoded in
  * BudgetDetailModal (audit v2 finding B4).
  *
- * Note: a given month only contributes real spend for a category once a
- * `budgets` row exists for that category (the progress endpoint joins
- * spend onto existing budget rows). A month before the category's budget
- * was created renders as 0 here rather than the category's true spend for
- * that month - an honest limitation of reusing the existing endpoint
- * rather than a new fabrication.
+ * Only a category's own progress row establishes that month's spend.
+ * Group and unbudgeted aggregates cannot establish a category amount.
  */
-import { useQueries } from "@tanstack/react-query";
-import { apiCall } from "@/lib/api";
-import { budgetKeys, type BudgetWithProgress } from "@/hooks/useBudgets";
+import { useQueries, useQueryClient } from "@tanstack/react-query";
+import { budgetKeys, fetchBudgetProgress } from "@/hooks/useBudgets";
 import { sumMoneyValues } from "@/lib/money";
 import { parseMoney } from "@/lib/utils";
-
-interface ApiResponse<T> {
-  success: boolean;
-  data: T;
-}
+import { commonBudgetCurrency } from "../budgetMoneyDisplay";
 
 export interface BudgetCategoryHistoryPoint {
   year: number;
   month: number;
   label: string;
-  actual: number;
+  actual: number | null;
 }
 
 export interface BudgetCategoryHistoryResult {
@@ -37,7 +28,8 @@ export interface BudgetCategoryHistoryResult {
   isLoading: boolean;
   isError: boolean;
   hasData: boolean;
-  average: number;
+  average: number | null;
+  currency?: string | null;
 }
 
 const MONTH_LABELS = [
@@ -74,16 +66,6 @@ function shiftMonth(
   return { year: nextYear, month: nextMonth };
 }
 
-async function fetchBudgetProgress(
-  year: number,
-  month: number,
-): Promise<BudgetWithProgress[]> {
-  const res = await apiCall<ApiResponse<BudgetWithProgress[]>>(
-    `/budgets/progress?year=${year}&month=${month}`,
-  );
-  return res.data;
-}
-
 /**
  * Fetches real actual-spend-per-month for `categoryId` across the
  * `monthsBack` trailing months ending at (and including) `year`/`month`.
@@ -94,6 +76,7 @@ export function useBudgetCategoryHistory(
   month: number,
   monthsBack = 6,
 ): BudgetCategoryHistoryResult {
+  const queryClient = useQueryClient();
   const periods = Array.from({ length: monthsBack }, (_, index) =>
     shiftMonth(year, month, -(monthsBack - 1 - index)),
   );
@@ -101,36 +84,40 @@ export function useBudgetCategoryHistory(
   const results = useQueries({
     queries: periods.map((period) => ({
       queryKey: budgetKeys.progress(period.year, period.month),
-      queryFn: () => fetchBudgetProgress(period.year, period.month),
+      queryFn: () => fetchBudgetProgress(queryClient, period.year, period.month),
       enabled: Boolean(categoryId),
       staleTime: 60_000,
     })),
   });
-
   const isLoading = Boolean(categoryId) && results.some((r) => r.isLoading);
   const isError = results.some((r) => r.isError);
+  const observedCurrencies = new Set<string>();
 
   const points: BudgetCategoryHistoryPoint[] = periods.map(
     (period, index) => {
-      const progress = results[index]?.data;
-      const entry = progress?.find(
-        (budget) => budget.categoryId === categoryId && !budget.isFlexBucket,
-      );
+      const result = results[index];
+      const entry = categoryId && result?.isSuccess
+        ? result.data?.find(budget => budget.categoryId === categoryId && !budget.categoryGroupId && !budget.isFlexBucket)
+        : undefined;
+      const spentCurrency = commonBudgetCurrency([entry?.spent]);
+      if (spentCurrency) observedCurrencies.add(spentCurrency);
       return {
         year: period.year,
         month: period.month,
         label: MONTH_LABELS[period.month - 1],
-        actual: entry ? parseMoney(entry.spent) : 0,
+        actual: entry && spentCurrency ? parseMoney(entry.spent) : null,
       };
     },
   );
 
-  const hasData = !isLoading && points.some((point) => point.actual > 0);
-  const average = points.length
+  const currency = observedCurrencies.size > 1 ? null : observedCurrencies.values().next().value;
+  const hasUnknown = points.some(point => point.actual === null);
+  const hasData = !isLoading && Boolean(currency);
+  const average = hasData && !hasUnknown && points.length > 0
     ? sumMoneyValues(points.map((point) => point.actual))
         .dividedBy(points.length)
         .toNumber()
-    : 0;
+    : null;
 
-  return { points, isLoading, isError, hasData, average };
+  return { points, isLoading, isError, hasData, average, currency };
 }

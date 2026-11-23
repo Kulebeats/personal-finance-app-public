@@ -13,7 +13,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import express from "express";
 import request from "supertest";
 import session from "express-session";
-import { requireStepUp, STEP_UP_TTL } from "../../../middleware/requireStepUp";
+import { requireStepUp, setStepUpVerified, STEP_UP_TTL } from "../../../middleware/requireStepUp";
 
 describe("Step-Up MFA Middleware", () => {
   let app: express.Express;
@@ -46,6 +46,8 @@ describe("Step-Up MFA Middleware", () => {
     app.post("/test/set-session", (req, res) => {
       if (req.body.stepUpVerifiedAt) {
         req.session.stepUpVerifiedAt = req.body.stepUpVerifiedAt;
+        req.session.stepUpSessionId = req.sessionID;
+        req.session.stepUpUserId = req.body.userId;
       }
       if (req.body.userId) {
         req.session.userId = req.body.userId;
@@ -117,5 +119,16 @@ describe("Step-Up MFA Middleware", () => {
 
     const resSettings = await agent.post("/test/settings");
     expect(resSettings.status).toBe(200);
+  });
+  it("rejects copied step-up state when bound to a different session", async () => {
+    app.post("/test/copied-step-up", (req, res) => {
+      req.session.userId = "123e4567-e89b-12d3-a456-426614174000";
+      setStepUpVerified(req);
+      req.session.stepUpSessionId = "different-session";
+      res.json({ success: true });
+    });
+    const agent = request.agent(app);
+    await agent.post("/test/copied-step-up");
+    await agent.post("/test/settings").expect(401);
   });
 });

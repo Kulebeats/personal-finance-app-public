@@ -32,7 +32,12 @@ export function StepUpProvider() {
       }
       return promise;
     });
-    return () => registerStepUpHandler(null);
+    return () => {
+      registerStepUpHandler(null);
+      const pending = resolversRef.current;
+      resolversRef.current = [];
+      pending.forEach(resolve => resolve(false));
+    };
   }, []);
 
   const finish = useCallback((verified: boolean) => {

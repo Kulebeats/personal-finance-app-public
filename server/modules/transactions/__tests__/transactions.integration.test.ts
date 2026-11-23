@@ -69,6 +69,12 @@ vi.mock("../../../services/TransactionGoalLinkService", () => ({
   transactionGoalLinkService: mockTransactionGoalLinkService,
 }));
 
+vi.mock("../../../services/goal/GoalViewerProgress", () => ({
+  readGoalSourceVisibility: vi.fn(async (_actor: unknown, ids: string[]) => new Map(ids.map((id) => [
+    id, { progressVisible: true, linkedAccountVisible: true, debtAccountVisible: true },
+  ]))),
+}));
+
 vi.mock("../../../services/BusinessAuditService", () => ({
   businessAuditService: mockBusinessAuditService,
 }));
@@ -76,6 +82,14 @@ vi.mock("../../../services/BusinessAuditService", () => ({
 vi.mock("../../../repositories/HouseholdRepository", () => ({
   householdRepository: mockHouseholdRepository,
 }));
+
+// Keep the response mapper real. The signed database suites exercise the
+// custody projection; this controller suite supplies the authorized reread.
+vi.mock("../transactions.helpers", async importOriginal => {
+  const actual = await importOriginal<typeof import("../transactions.helpers")>();
+  return { ...actual, mapVisibleTransactionMoney: async (id: string, actor: { householdId: string; userId: string }) =>
+    actual.mapTransactionMoney(await mockTransactionService.getTransactionById(id, actor.householdId, actor.userId)) };
+});
 
 // bulk-category validates the category via this repository (real DB otherwise).
 vi.mock("../../../repositories/CategoryRepository", () => ({
@@ -317,9 +331,10 @@ describe("Transactions Integration Tests", () => {
   describe("GET /api/transactions/summary - Transaction Summary", () => {
     it("should return income/expense summary", async () => {
       const mockSummary = {
-        totalIncome: 5000,
-        totalExpenses: 2000,
-        netFlow: 3000,
+        currency: "ZMW", largestIncome: "5000.00", largestExpense: "2000.00",
+        totalIncome: "5000.00",
+        totalExpenses: "2000.00",
+        netFlow: "3000.00",
         transactionCount: 25,
       };
 
@@ -414,6 +429,7 @@ describe("Transactions Integration Tests", () => {
         categoryId: "00000000-0000-4000-8000-000000000014",
       };
 
+      mockTransactionService.getTransactionById.mockResolvedValue(mockTransaction);
       mockTransactionService.createTransaction.mockResolvedValue({
         transaction: mockTransaction,
         isDuplicate: false,
@@ -462,6 +478,7 @@ describe("Transactions Integration Tests", () => {
         categoryId: "00000000-0000-4000-8000-000000000005",
       };
 
+      mockTransactionService.getTransactionById.mockResolvedValue(mockTransaction);
       mockTransactionService.createTransaction.mockResolvedValue({
         transaction: mockTransaction,
         isDuplicate: false,
@@ -493,6 +510,7 @@ describe("Transactions Integration Tests", () => {
         date: "2026-01-15",
       };
 
+      mockTransactionService.getTransactionById.mockResolvedValue(mockTransaction);
       mockTransactionService.createTransaction.mockResolvedValue({
         transaction: mockTransaction,
         isDuplicate: true,
@@ -572,6 +590,7 @@ describe("Transactions Integration Tests", () => {
         ],
       };
 
+      mockTransactionService.getTransactionById.mockResolvedValue(mockTransaction);
       mockTransactionService.createTransaction.mockResolvedValue({
         transaction: mockTransaction,
         isDuplicate: false,
@@ -924,7 +943,11 @@ describe("Transactions Integration Tests", () => {
           transactionId: "00000000-0000-4000-8000-000000000018",
           goalId: "00000000-0000-4000-8000-000000000010",
           amount: "50.00",
+          sourceAmount: "50.00",
+          sourceCurrency: "ZMW",
+          appliedDelta: "50.00",
           linkType: "contribution",
+          goal: { id: "00000000-0000-4000-8000-000000000010", name: "Synthetic goal", currency: "ZMW" },
         },
       ];
 
@@ -935,7 +958,13 @@ describe("Transactions Integration Tests", () => {
         .expect(200);
 
       expect(res.body.success).toBe(true);
-      expect(Array.isArray(res.body.data)).toBe(true);
+      expect(res.body.data[0]).toMatchObject({
+        amount: { amount: "50.00", currency: "ZMW" }, appliedDelta: { amount: "50.00", currency: "ZMW" },
+      });
+      expect(mockTransactionGoalLinkService.getLinksForTransaction).toHaveBeenCalledWith(
+        "00000000-0000-4000-8000-000000000018",
+        { householdId: "house-123", userId: "user-123", role: "admin" },
+      );
     });
 
     it("should return empty array when no goals linked", async () => {
@@ -947,6 +976,10 @@ describe("Transactions Integration Tests", () => {
 
       expect(res.body.success).toBe(true);
       expect(res.body.data).toEqual([]);
+      expect(mockTransactionGoalLinkService.getLinksForTransaction).toHaveBeenCalledWith(
+        "00000000-0000-4000-8000-000000000018",
+        { householdId: "house-123", userId: "user-123", role: "admin" },
+      );
     });
   });
 
@@ -956,21 +989,27 @@ describe("Transactions Integration Tests", () => {
 
   describe("PUT /api/transactions/bulk-owner - Bulk Update Owner", () => {
     it("should update owner for multiple transactions", async () => {
-      // The controller maps the returned transactions (array), not a summary.
-      mockTransactionService.bulkUpdateOwner.mockResolvedValue([
+      const visibleRows = [
         { id: "00000000-0000-4000-8000-000000000018", name: "T", amount: "100.00", currency: "ZMW", type: "expense", date: "2026-01-15" },
         { id: "00000000-0000-4000-8000-000000000019", name: "T", amount: "100.00", currency: "ZMW", type: "expense", date: "2026-01-15" },
-      ]);
+      ];
+      mockTransactionService.bulkUpdateOwner.mockResolvedValue(visibleRows.map(({ id }) => ({ id })));
+      mockTransactionService.getTransactionById.mockImplementation(async (id: string) => visibleRows.find(row => row.id === id));
 
       const res = await request(app)
         .put("/api/transactions/bulk-owner")
         .send({
-          transactionIds: ["00000000-0000-4000-8000-000000000018", "00000000-0000-4000-8000-000000000019", "00000000-0000-4000-8000-00000000001a", "00000000-0000-4000-8000-00000000001b", "00000000-0000-4000-8000-00000000001c"],
+          transactionIds: visibleRows.map(row => row.id),
           ownerUserId: "00000000-0000-4000-8000-0000000000a1",
         })
         .expect(200);
 
       expect(res.body.success).toBe(true);
+      expect(res.body.data).toEqual(visibleRows.map(row => ({
+        ...row, amount: { amount: row.amount, currency: row.currency },
+      })));
+      for (const row of visibleRows) expect(mockTransactionService.getTransactionById)
+        .toHaveBeenCalledWith(row.id, "house-123", "user-123");
     });
   });
 
@@ -1061,6 +1100,7 @@ describe("Transactions Integration Tests", () => {
         amount: "100.00",
         type: "expense",
       };
+      mockTransactionService.getTransactionById.mockResolvedValue(mockTransaction);
       mockTransactionService.createTransaction.mockResolvedValue({
         transaction: mockTransaction,
         isDuplicate: false,
@@ -1197,6 +1237,7 @@ describe("Transactions Integration Tests", () => {
         type: "income",
       };
 
+      mockTransactionService.getTransactionById.mockResolvedValue(mockTransaction);
       mockTransactionService.createTransaction.mockResolvedValue({
         transaction: mockTransaction,
         isDuplicate: false,
@@ -1225,6 +1266,7 @@ describe("Transactions Integration Tests", () => {
         type: "expense",
       };
 
+      mockTransactionService.getTransactionById.mockResolvedValue(mockTransaction);
       mockTransactionService.createTransaction.mockResolvedValue({
         transaction: mockTransaction,
         isDuplicate: false,
@@ -1268,6 +1310,7 @@ describe("Transactions Integration Tests", () => {
         type: "expense",
       };
 
+      mockTransactionService.getTransactionById.mockResolvedValue(mockTransaction);
       mockTransactionService.createTransaction.mockResolvedValue({
         transaction: mockTransaction,
         isDuplicate: false,
@@ -1296,6 +1339,7 @@ describe("Transactions Integration Tests", () => {
         type: "expense",
       };
 
+      mockTransactionService.getTransactionById.mockResolvedValue(mockTransaction);
       mockTransactionService.createTransaction.mockResolvedValue({
         transaction: mockTransaction,
         isDuplicate: false,
@@ -1324,6 +1368,7 @@ describe("Transactions Integration Tests", () => {
         date: "2024-02-29",
       };
 
+      mockTransactionService.getTransactionById.mockResolvedValue(mockTransaction);
       mockTransactionService.createTransaction.mockResolvedValue({
         transaction: mockTransaction,
         isDuplicate: false,

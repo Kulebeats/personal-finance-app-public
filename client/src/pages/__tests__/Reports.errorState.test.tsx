@@ -14,6 +14,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Router } from "wouter";
 import Reports from "@/pages/Reports";
+import { useWidgetOnboarding } from "@/hooks/use-report-widget-preferences";
 
 const refetchIncome = vi.fn();
 
@@ -80,7 +81,7 @@ vi.mock("@/components/reports/WidgetGalleryModal", () => ({
 }));
 
 vi.mock("@/components/reports/WidgetOnboardingModal", () => ({
-  WidgetOnboardingModal: () => null,
+  WidgetOnboardingModal: ({ open }: { open: boolean }) => open ? <div>Onboarding open</div> : null,
 }));
 
 const renderReports = () => {
@@ -99,6 +100,17 @@ describe("Reports top-level query error state", () => {
 
   beforeEach(() => {
     refetchIncome.mockClear();
+    vi.mocked(useWidgetOnboarding).mockReturnValue({ hasCompletedSetup: true, completeOnboarding: vi.fn(), isLoading: false } as unknown as ReturnType<typeof useWidgetOnboarding>);
+  });
+
+  it.each([new Error("Preferences unavailable"), null])("does not open onboarding for unknown preferences and provides a retry (%s)", async error => {
+    const retry = vi.fn();
+    vi.mocked(useWidgetOnboarding).mockReturnValue({ hasCompletedSetup: undefined, completeOnboarding: vi.fn(), isLoading: false, error, refetch: retry } as unknown as ReturnType<typeof useWidgetOnboarding>);
+    renderReports();
+    expect(screen.queryByText("Onboarding open")).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(error?.message ?? "Setup status is unavailable");
+    await user.click(screen.getByRole("button", { name: "Retry Loading Preferences" }));
+    expect(retry).toHaveBeenCalledTimes(1);
   });
 
   it("shows an announced error state with a retry button instead of a blank chart when a report query fails", async () => {

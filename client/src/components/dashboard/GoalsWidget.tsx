@@ -2,6 +2,7 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { ArrowRight, Target } from "lucide-react";
 import { useFormatters } from "@/contexts/SettingsContext";
 import { useGoalsSummary } from "@/hooks/useGoals";
+import { toMoneyNumber } from "@/lib/money";
 import { Link } from "wouter";
 import { cn } from "@/lib/utils";
 import { WidgetErrorState } from "./WidgetErrorState";
@@ -142,14 +143,9 @@ export default function GoalsWidget() {
   const payDown = summary?.payDown;
   const recentActivity = summary?.recentActivity?.slice(0, 4) ?? [];
 
-  const payDownTotal =
-    payDown && payDown.totalPaid + payDown.totalDebt > 0
-      ? payDown.totalPaid + payDown.totalDebt
-      : 0;
-  const payDownProgress =
-    payDownTotal > 0
-      ? Math.round((payDown!.totalPaid / payDownTotal) * 100)
-      : 0;
+  const payDownPaid = toMoneyNumber(payDown?.totalPaid ?? 0);
+  const payDownTotal = payDownPaid + toMoneyNumber(payDown?.totalDebt ?? 0);
+  const payDownProgress = payDownTotal > 0 ? Math.round((payDownPaid / payDownTotal) * 100) : 0;
 
   const totalGoals = (saveUp?.total ?? 0) + (payDown?.total ?? 0);
 
@@ -165,7 +161,7 @@ export default function GoalsWidget() {
           </h3>
           <Link
             href="/goals"
-            className="group flex items-center gap-1 font-body text-xs text-muted-foreground hover:text-foreground transition-colors"
+            className="group flex items-center gap-1 font-body text-xs text-muted-foreground hover:text-foreground transition-colors max-md:min-h-11"
           >
             View all
             <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
@@ -194,7 +190,7 @@ export default function GoalsWidget() {
             </p>
             <Link
               href="/goals"
-              className="font-body text-sm text-[hsl(var(--widget-income))] hover:underline"
+              className="font-body text-sm text-[hsl(var(--widget-income))] hover:underline inline-flex items-center max-md:min-h-11"
             >
               Create your first goal
             </Link>
@@ -255,10 +251,10 @@ export default function GoalsWidget() {
                     Saved
                   </p>
                   <p className="font-display text-base font-semibold text-[hsl(var(--widget-income))]">
-                    {formatCurrency(saveUp?.totalSaved ?? 0)}
+                    {formatCurrency(toMoneyNumber(saveUp?.totalSaved ?? 0))}
                   </p>
                   <p className="font-body text-[10px] text-muted-foreground">
-                    of {formatCurrency(saveUp?.totalTarget ?? 0)}
+                    of {formatCurrency(toMoneyNumber(saveUp?.totalTarget ?? 0))}
                   </p>
                 </div>
               )}
@@ -275,10 +271,10 @@ export default function GoalsWidget() {
                     Paid
                   </p>
                   <p className="font-display text-base font-semibold text-[hsl(var(--widget-savings))]">
-                    {formatCurrency(payDown?.totalPaid ?? 0)}
+                    {formatCurrency(payDownPaid)}
                   </p>
                   <p className="font-body text-[10px] text-muted-foreground">
-                    {formatCurrency(payDown?.totalDebt ?? 0)} remaining
+                    {formatCurrency(toMoneyNumber(payDown?.totalDebt ?? 0))} remaining
                   </p>
                 </div>
               )}
@@ -346,9 +342,9 @@ export default function GoalsWidget() {
                           </span>
                         </div>
                         <div className="flex items-center gap-2 flex-shrink-0">
-                          {activity.amount > 0 && (
+                          {activity.amount && toMoneyNumber(activity.amount) > 0 && (
                             <span className="font-display text-xs font-medium text-[hsl(var(--widget-income))]">
-                              +{formatCurrency(activity.amount)}
+                              +{formatCurrency(toMoneyNumber(activity.amount))}
                             </span>
                           )}
                           <span className="font-body text-[10px] text-muted-foreground/70">

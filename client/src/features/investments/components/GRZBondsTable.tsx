@@ -11,6 +11,8 @@ import { Button } from "@/components/ui/button";
 import { Calendar } from "lucide-react";
 import type { GrzBond } from "@/hooks/useGrzSecurities";
 import { toMoneyNumber } from "@/lib/money";
+import { formatDisplayDate } from "@/lib/dates";
+import { GrzEvidenceActions } from "./GrzEvidenceActions";
 
 interface GRZBondsTableProps {
   bonds: GrzBond[] | undefined;
@@ -39,8 +41,8 @@ export function GRZBondsTable({
               <TableHead>Tenor</TableHead>
               <TableHead>Coupon</TableHead>
               <TableHead>Maturity</TableHead>
-              <TableHead className="text-right">Face Value</TableHead>
-              <TableHead className="text-right">Purchase Price</TableHead>
+              <TableHead className="text-right">Face Value (ZMW)</TableHead>
+              <TableHead className="text-right">Purchase Price (ZMW)</TableHead>
               <TableHead>Status</TableHead>
               <TableHead className="text-right">Actions</TableHead>
             </TableRow>
@@ -66,13 +68,13 @@ export function GRZBondsTable({
                     {(Number(bond.couponRate) * 100).toFixed(2)}%
                   </TableCell>
                   <TableCell>
-                    {new Date(bond.maturityDate).toLocaleDateString()}
+                    {formatDisplayDate(bond.maturityDate)}
                   </TableCell>
                   <TableCell className="text-right">
-                    {formatCurrency(toMoneyNumber(bond.faceValue))}
+                    {formatCurrency(toMoneyNumber(bond.faceValue), "ZMW")}
                   </TableCell>
                   <TableCell className="text-right">
-                    {formatCurrency(toMoneyNumber(bond.purchasePrice))}
+                    {formatCurrency(toMoneyNumber(bond.purchasePrice), "ZMW")}
                   </TableCell>
                   <TableCell>
                     <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-emerald-100 text-emerald-800">
@@ -88,6 +90,7 @@ export function GRZBondsTable({
                       <Calendar className="h-4 w-4 mr-2" />
                       Schedule
                     </Button>
+                    <GrzEvidenceActions bond={bond} />
                   </TableCell>
                 </TableRow>
               ))

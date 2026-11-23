@@ -19,7 +19,7 @@ export function AnimatedSegmentedControl({
   disabled,
 }: AnimatedSegmentedControlProps) {
   return (
-    <div className="relative inline-flex h-11 bg-muted/50 p-1 rounded-lg w-full">
+    <div className="relative inline-flex h-11 max-md:h-auto bg-muted/50 p-1 rounded-lg w-full">
       {options.map((option, index) => {
         const isActive = value === option.value;
         return (
@@ -29,7 +29,7 @@ export function AnimatedSegmentedControl({
             disabled={disabled || option.disabled}
             onClick={() => !option.disabled && onChange(option.value)}
             className={cn(
-              "relative flex-1 rounded-md px-3 py-2 text-sm font-medium transition-all duration-200",
+              "relative flex-1 rounded-md px-3 py-2 max-md:min-h-11 text-sm font-medium transition-all duration-200",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-ring",
               "disabled:cursor-not-allowed disabled:opacity-50",
               isActive

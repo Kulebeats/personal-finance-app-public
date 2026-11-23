@@ -8,12 +8,17 @@
  */
 
 import { Request, Response } from "express";
-import { goalAccountAssignmentService } from "./goals.service";
+import { goalAccountAssignmentService, goalService } from "./goals.service";
 import { success, created } from "../../core/http";
 import { ValidationError } from "../../core/errors";
 import { assignAccountSchema } from "./goals.validation";
 import { businessAuditService } from "../../services/BusinessAuditService";
-import { mapAssignmentMoney, mapAvailableFundsMoney } from "./goals.helpers";
+import { mapAssignmentMoney, mapAvailableFundsMoney, mapGoalMoney } from "./goals.helpers";
+
+/** The write's own goal row is never returned: the caller gets the redacted read model (#235 M1). */
+async function withViewerGoal<T extends { goal: unknown }>(req: Request, goalId: string, result: T) {
+  return { ...result, goal: mapGoalMoney(await goalService.getViewerGoal(goalId, req.householdContext!)) };
+}
 
 /**
  * Get available funds for assignment
@@ -41,14 +46,9 @@ export async function getAllAssignments(
   req: Request,
   res: Response
 ): Promise<void> {
-  // FIX AUTH-GOAL-ASSIGN-001: Pass userId for privacy filtering
-  const { householdId, userId } = req.householdContext!;
-
-  const assignments =
-    await goalAccountAssignmentService.getAssignmentsForHousehold(
-      householdId,
-      userId
-    );
+  const assignments = await goalAccountAssignmentService.getAssignmentsForHousehold(
+    req.householdContext!,
+  );
 
   success(res, assignments.map(mapAssignmentMoney));
 }
@@ -56,19 +56,17 @@ export async function getAllAssignments(
 /**
  * Get assignments for a specific goal
  * GET /api/goals/:id/assignments
- * FIX AUTH-GOAL-ASSIGN-001: Pass userId for privacy filtering
+ * Enforce current actor and account visibility in the assignment query.
  */
 export async function getAssignments(
   req: Request,
   res: Response
 ): Promise<void> {
-  const { householdId, userId } = req.householdContext!;
   const { id } = req.params;
 
-  const assignments = await goalAccountAssignmentService.getAssignments(
+  const assignments = await goalAccountAssignmentService.getVisibleAssignments(
     id,
-    householdId,
-    userId
+    req.householdContext!,
   );
 
   success(res, assignments.map(mapAssignmentMoney));
@@ -93,29 +91,16 @@ export async function assignAccount(
     );
   }
 
+  // The goal's UPDATE audit row is written inside the assignment's transaction (FIN-13).
   const result = await goalAccountAssignmentService.assignAccount(
     id,
     householdId,
     userId,
-    parseResult.data
+    parseResult.data,
+    { ipAddress: businessAuditService.getIpAddress(req) },
   );
 
-  await businessAuditService.logUpdate({
-    userId,
-    householdId,
-    entityId: id,
-    entityType: "goal",
-    newValue: {
-      accountId: result.assignment.accountId,
-      assignmentType: result.assignment.assignmentType,
-      partialAmount: result.assignment.partialAmount,
-      autoUpdate: result.assignment.autoUpdate,
-    },
-    ipAddress: businessAuditService.getIpAddress(req),
-    metadata: { operation: "assignAccount" },
-  });
-
-  created(res, result);
+  created(res, await withViewerGoal(req, id, result));
 }
 
 /**
@@ -137,48 +122,18 @@ export async function updateAssignment(
     );
   }
 
-  // FIX AUTH-GOAL-ASSIGN-001: Pass userId for privacy filtering
-  const existingAssignments = await goalAccountAssignmentService.getAssignments(
-    id,
-    householdId,
-    userId
-  );
-  const existingAssignment = existingAssignments.find(
-    (assignment) => assignment.accountId === accountId
-  );
-
+  // The goal's UPDATE audit row, with the old and new assignment, is written
+  // inside the update's transaction (FIN-13).
   const result = await goalAccountAssignmentService.updateAssignment(
     id,
     accountId,
     householdId,
     userId,
-    parseResult.data
+    parseResult.data,
+    { ipAddress: businessAuditService.getIpAddress(req) },
   );
 
-  await businessAuditService.logUpdate({
-    userId,
-    householdId,
-    entityId: id,
-    entityType: "goal",
-    oldValue: existingAssignment
-      ? {
-          accountId: existingAssignment.accountId,
-          assignmentType: existingAssignment.assignmentType,
-          partialAmount: existingAssignment.partialAmount,
-          autoUpdate: existingAssignment.autoUpdate,
-        }
-      : undefined,
-    newValue: {
-      accountId: result.assignment.accountId,
-      assignmentType: result.assignment.assignmentType,
-      partialAmount: result.assignment.partialAmount,
-      autoUpdate: result.assignment.autoUpdate,
-    },
-    ipAddress: businessAuditService.getIpAddress(req),
-    metadata: { operation: "updateAssignment", accountId },
-  });
-
-  success(res, result);
+  success(res, await withViewerGoal(req, id, result));
 }
 
 /**
@@ -192,42 +147,17 @@ export async function removeAssignment(
   const { householdId, userId } = req.householdContext!;
   const { id, accountId } = req.params;
 
-  // FIX AUTH-GOAL-ASSIGN-001: Pass userId for privacy filtering
-  const existingAssignments = await goalAccountAssignmentService.getAssignments(
-    id,
-    householdId,
-    userId
-  );
-  const existingAssignment = existingAssignments.find(
-    (assignment) => assignment.accountId === accountId
-  );
-
+  // The goal's UPDATE audit row, with the removed assignment, is written
+  // inside the removal's transaction (FIN-13).
   const result = await goalAccountAssignmentService.removeAssignment(
     id,
     accountId,
     householdId,
-    userId
+    userId,
+    { ipAddress: businessAuditService.getIpAddress(req) },
   );
 
-  await businessAuditService.logUpdate({
-    userId,
-    householdId,
-    entityId: id,
-    entityType: "goal",
-    oldValue: existingAssignment
-      ? {
-          accountId: existingAssignment.accountId,
-          assignmentType: existingAssignment.assignmentType,
-          partialAmount: existingAssignment.partialAmount,
-          autoUpdate: existingAssignment.autoUpdate,
-        }
-      : undefined,
-    newValue: undefined,
-    ipAddress: businessAuditService.getIpAddress(req),
-    metadata: { operation: "removeAssignment", accountId },
-  });
-
-  success(res, result);
+  success(res, await withViewerGoal(req, id, result));
 }
 
 // Export all assignment controller methods

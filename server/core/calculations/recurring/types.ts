@@ -13,9 +13,9 @@ export type Frequency =
 
 export type IntervalUnit = "days" | "weeks" | "months" | "years";
 
-export interface RecurringRuleInfo {
+export interface RecurringRuleInfo<A = Money> {
   id?: string;
-  amount: Money;
+  amount: A;
   frequency: Frequency;
   intervalValue?: number | null;
   intervalUnit?: IntervalUnit | null;

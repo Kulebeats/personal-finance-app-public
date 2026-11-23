@@ -33,6 +33,16 @@ vi.mock("../repositories/NotificationRepository", () => ({
 vi.mock("../services/notification/push", () => ({
   pushNotificationService: {},
 }));
+// The resend path issues its token inside a locked transaction here; this
+// test only checks the emailed link, so the issuer is stubbed.
+vi.mock("../services/security-email", () => ({
+  issueInitialEmailVerification: vi.fn().mockResolvedValue({
+    userId: "u1",
+    email: "a@example.com",
+    token: "tok",
+  }),
+  consumeEmailVerificationToken: vi.fn(),
+}));
 
 import { authEmailService } from "../modules/auth/auth.email.service";
 import { notificationService } from "../services/notification/service";

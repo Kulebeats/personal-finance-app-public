@@ -35,6 +35,7 @@ import {
   createTestHousehold,
 } from "../../../__tests__/fixtures";
 import { hashPassword } from "../../../auth";
+import { isStored, removeStoredUnder, storedNamesUnder } from "../../../__tests__/stored-upload-fixture";
 
 const UPLOADS_ROOT = path.resolve(process.cwd(), "uploads");
 const PASSWORD = "TestPassword123!";
@@ -44,20 +45,6 @@ const PNG_BUFFER = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
   "base64",
 );
-
-/** Resolve a stored pictureUrl ("/uploads/profile-pictures/{hh}/{file}") to its disk path. */
-function diskPathFor(pictureUrl: string): string {
-  return path.join(UPLOADS_ROOT, pictureUrl.replace(/^\/uploads\//, ""));
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 describe("Profile Picture — Real DB Integration", () => {
   let app: Express;
@@ -141,6 +128,7 @@ describe("Profile Picture — Real DB Integration", () => {
   });
 
   afterAll(async () => {
+    await removeStoredUnder(`profile-pictures/${householdId}/`);
     // Files/dirs created by uploads
     await fs.rm(path.join(UPLOADS_ROOT, "profile-pictures", householdId), {
       recursive: true,
@@ -263,7 +251,7 @@ describe("Profile Picture — Real DB Integration", () => {
     expect(user.profilePictureUrl).toBe(pictureUrl);
 
     // File really on disk
-    expect(await fileExists(diskPathFor(pictureUrl))).toBe(true);
+    expect(await isStored(pictureUrl)).toBe(true);
 
     // DPA audit row (Rule 9)
     const auditRows = await fetchPictureAuditRows();
@@ -306,8 +294,8 @@ describe("Profile Picture — Real DB Integration", () => {
     const newUrl: string = res.body.data.pictureUrl;
     expect(newUrl).not.toBe(oldUrl);
 
-    expect(await fileExists(diskPathFor(newUrl))).toBe(true);
-    expect(await fileExists(diskPathFor(oldUrl))).toBe(false);
+    expect(await isStored(newUrl)).toBe(true);
+    expect(await isStored(oldUrl)).toBe(false);
   });
 
   it("deletes the picture: clears users.profilePictureUrl, removes the file, writes an audit row", async () => {
@@ -326,7 +314,7 @@ describe("Profile Picture — Real DB Integration", () => {
     const user = await fetchUser();
     expect(user.profilePictureUrl).toBeNull();
 
-    expect(await fileExists(diskPathFor(pictureUrl))).toBe(false);
+    expect(await isStored(pictureUrl)).toBe(false);
 
     const deleteRows = (await fetchPictureAuditRows()).filter((row) => {
       const details = row.details as Record<string, unknown>;
@@ -383,10 +371,10 @@ describe("Profile Picture — Real DB Integration", () => {
     const user = await fetchUser();
     expect(user.profilePictureUrl).toBeTruthy();
 
-    const dir = path.join(UPLOADS_ROOT, "profile-pictures", householdId);
-    const filesOnDisk = await fs.readdir(dir);
+    // OPS-001: files are stored objects; the manifest lists what is stored.
+    const filesOnDisk = (await storedNamesUnder(`profile-pictures/${householdId}/`)).map((name) => path.basename(name));
     expect(filesOnDisk.length).toBe(1);
     expect(path.basename(user.profilePictureUrl!)).toBe(filesOnDisk[0]);
-    expect(await fileExists(diskPathFor(user.profilePictureUrl!))).toBe(true);
+    expect(await isStored(user.profilePictureUrl!)).toBe(true);
   });
 });

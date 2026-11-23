@@ -454,4 +454,68 @@ describe("useCashFlowData", () => {
       expect(result.current.tableError).toBeNull();
     });
   });
+
+  // NEW-34: a year view to 31 December must not average over months that have not started.
+  it("averages over the periods that have started, not the whole range", () => {
+    // Months that have not started can already hold rows (a salary recorded ahead).
+    const future = (periodStart: string) => ({
+      periodStart, income: money(1000), expenses: money(0), savings: money(1000), debt: money(0), savingsRate: 100,
+    });
+    vi.mocked(useReportsCashflow).mockReturnValue({
+      data: {
+        ...mockCashflowData,
+        range: { from: "2024-01-01", to: "2024-04-30", interval: "month", baseCurrency: "USD", elapsedPeriods: 2 },
+        series: [...mockCashflowData.series, future("2024-03-01"), future("2024-04-01")],
+        totals: { ...mockCashflowData.totals, savings: money(6000) },
+        elapsedTotals: { income: money(10500), expenses: money(6500), savings: money(4000) },
+      },
+      isLoading: false, error: null, refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useReportsCashflow>);
+    vi.mocked(useReportsSankey).mockReturnValue({ data: undefined, isLoading: false } as unknown as ReturnType<typeof useReportsSankey>);
+
+    const { result } = renderHook(() => useCashFlowData(mockFilters, "bar"));
+
+    expect(result.current.actualPeriods).toBe(2);
+    // The started months' 4000 over 2 months, not the whole range's 6000.
+    expect(result.current.averageSavings).toBe(2000);
+  });
+
+  it("shows no average when the response counts elapsed periods but carries no elapsed totals", () => {
+    // Two started months saved 4000 and two future ones 2000: dividing the 6000 total by 2 would show 3000.
+    const future = (periodStart: string) => ({
+      periodStart, income: money(1000), expenses: money(0), savings: money(1000), debt: money(0), savingsRate: 100,
+    });
+    vi.mocked(useReportsCashflow).mockReturnValue({
+      data: {
+        ...mockCashflowData,
+        range: { from: "2024-01-01", to: "2024-04-30", interval: "month", baseCurrency: "USD", elapsedPeriods: 2 },
+        series: [...mockCashflowData.series, future("2024-03-01"), future("2024-04-01")],
+        totals: { ...mockCashflowData.totals, savings: money(6000) },
+      },
+      isLoading: false, error: null, refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useReportsCashflow>);
+    vi.mocked(useReportsSankey).mockReturnValue({ data: undefined, isLoading: false } as unknown as ReturnType<typeof useReportsSankey>);
+
+    const { result } = renderHook(() => useCashFlowData(mockFilters, "bar"));
+
+    expect(result.current.averageSavings).toBeNull();
+  });
+
+  it("divides the savings average in decimal and rounds half up to the cent", () => {
+    // 1.15 / 10 is 0.115 in decimal; as a JS float it is 0.11499..., which shows 0.11.
+    vi.mocked(useReportsCashflow).mockReturnValue({
+      data: {
+        ...mockCashflowData,
+        range: { from: "2024-01-01", to: "2024-10-31", interval: "month", baseCurrency: "USD", elapsedPeriods: 10 },
+        elapsedTotals: { income: { amount: "1.15", currency: "USD" }, expenses: { amount: "0.00", currency: "USD" },
+          savings: { amount: "1.15", currency: "USD" } },
+      },
+      isLoading: false, error: null, refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useReportsCashflow>);
+    vi.mocked(useReportsSankey).mockReturnValue({ data: undefined, isLoading: false } as unknown as ReturnType<typeof useReportsSankey>);
+
+    const { result } = renderHook(() => useCashFlowData(mockFilters, "bar"));
+
+    expect(result.current.averageSavings).toBe(0.12);
+  });
 });

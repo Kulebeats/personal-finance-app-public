@@ -19,13 +19,8 @@ import {
 } from "@shared/schema";
 import { eq, and, isNull, sql, gte, lte } from "drizzle-orm";
 import { Money } from "../core/money";
-import {
-  calculateCategorySpentNonSplit,
-  calculateCategorySpentSplit,
-  calculateGroupSpentNonSplit,
-  calculateGroupSpentSplit,
-  aggregateSpentResults,
-} from "./BudgetSpendBatchQueries";
+import { calculateBudgetSpentBatch } from "./BudgetSpendBatchQueries";
+import type { BudgetReadContext } from "./BudgetReadContext";
 
 export class BudgetSpendRepository {
   /**
@@ -52,6 +47,8 @@ export class BudgetSpendRepository {
           eq(transactions.categoryId, categoryId),
           eq(transactions.type, transactionType),
           eq(transactions.isExcludedFromBudget, false),
+          eq(transactions.isPending, false),
+          sql`${transactions.status} IS DISTINCT FROM 'pending'`,
           eq(categories.includeInBudget, true),
           eq(categories.isArchived, false),
           isNull(transactions.deletedAt),
@@ -91,6 +88,8 @@ export class BudgetSpendRepository {
           eq(categories.groupId, categoryGroupId),
           eq(transactions.type, transactionType),
           eq(transactions.isExcludedFromBudget, false),
+          eq(transactions.isPending, false),
+          sql`${transactions.status} IS DISTINCT FROM 'pending'`,
           eq(categories.includeInBudget, true),
           eq(categories.isArchived, false),
           isNull(transactions.deletedAt),
@@ -128,6 +127,8 @@ export class BudgetSpendRepository {
           eq(transactions.householdId, householdId),
           eq(transactions.type, "expense"),
           eq(transactions.isExcludedFromBudget, false),
+          eq(transactions.isPending, false),
+          sql`${transactions.status} IS DISTINCT FROM 'pending'`,
           eq(categories.includeInBudget, true),
           eq(categories.isArchived, false),
           eq(categoryGroups.isArchived, false),
@@ -176,6 +177,8 @@ export class BudgetSpendRepository {
           eq(transactions.type, transactionType),
           // Count ordinary split parents, but preserve explicit hide/exclude.
           eq(transactions.isExcludedFromBudget, false),
+          eq(transactions.isPending, false),
+          sql`${transactions.status} IS DISTINCT FROM 'pending'`,
           isNull(transactions.deletedAt),
           gte(transactions.date, startDate),
           lte(transactions.date, endDate),
@@ -195,6 +198,8 @@ export class BudgetSpendRepository {
           eq(categories.groupId, categoryGroupId),
           eq(transactions.type, transactionType),
           eq(transactions.isExcludedFromBudget, false),
+          eq(transactions.isPending, false),
+          sql`${transactions.status} IS DISTINCT FROM 'pending'`,
           eq(categories.includeInBudget, true),
           eq(categories.isArchived, false),
           isNull(transactions.deletedAt),
@@ -243,6 +248,8 @@ export class BudgetSpendRepository {
           eq(transactions.type, "expense"),
           // Count ordinary split parents, but preserve explicit hide/exclude.
           eq(transactions.isExcludedFromBudget, false),
+          eq(transactions.isPending, false),
+          sql`${transactions.status} IS DISTINCT FROM 'pending'`,
           eq(categories.includeInBudget, true),
           eq(categories.isArchived, false),
           eq(categoryGroups.isArchived, false),
@@ -265,6 +272,8 @@ export class BudgetSpendRepository {
           eq(transactions.householdId, householdId),
           eq(transactions.type, "expense"),
           eq(transactions.isExcludedFromBudget, false),
+          eq(transactions.isPending, false),
+          sql`${transactions.status} IS DISTINCT FROM 'pending'`,
           eq(categories.includeInBudget, true),
           eq(categories.isArchived, false),
           eq(categoryGroups.isArchived, false),
@@ -315,6 +324,8 @@ export class BudgetSpendRepository {
           eq(transactions.type, transactionType),
           // Count ordinary split parents, but preserve explicit hide/exclude.
           eq(transactions.isExcludedFromBudget, false),
+          eq(transactions.isPending, false),
+          sql`${transactions.status} IS DISTINCT FROM 'pending'`,
           isNull(transactions.deletedAt),
           gte(transactions.date, startDate),
           lte(transactions.date, endDate),
@@ -334,6 +345,8 @@ export class BudgetSpendRepository {
           eq(transactions.categoryId, categoryId),
           eq(transactions.type, transactionType),
           eq(transactions.isExcludedFromBudget, false),
+          eq(transactions.isPending, false),
+          sql`${transactions.status} IS DISTINCT FROM 'pending'`,
           eq(categories.includeInBudget, true),
           eq(categories.isArchived, false),
           isNull(transactions.deletedAt),
@@ -365,40 +378,15 @@ export class BudgetSpendRepository {
     currency: string = "ZMW",
     categoryTypeMap: Map<string, "income" | "expense">,
     groupTypeMap: Map<string, "income" | "expense">,
+    context: BudgetReadContext,
+    includeFlex = true,
   ): Promise<{
     byCategoryId: Map<string, Money>;
     byCategoryGroupId: Map<string, Money>;
     flexTotal: Money;
   }> {
-    // Run category and group queries in parallel
-    const [catNonSplit, catSplit, grpNonSplit, grpSplit] = await Promise.all([
-      calculateCategorySpentNonSplit(householdId, categoryIds, startDate, endDate),
-      calculateCategorySpentSplit(householdId, categoryIds, startDate, endDate),
-      calculateGroupSpentNonSplit(householdId, categoryGroupIds, startDate, endDate),
-      calculateGroupSpentSplit(householdId, categoryGroupIds, startDate, endDate),
-    ]);
-
-    // Aggregate category results
-    const categoryResults = [...catNonSplit, ...catSplit];
-    const groupResults = [...grpNonSplit, ...grpSplit];
-
-    const { byCategoryId, byCategoryGroupId } = aggregateSpentResults(
-      categoryResults,
-      groupResults,
-      categoryTypeMap,
-      groupTypeMap,
-      currency,
-    );
-
-    // Calculate flex budget total
-    const flexTotal = await this.calculateFlexSpentWithSplits(
-      householdId,
-      startDate,
-      endDate,
-      currency,
-    );
-
-    return { byCategoryId, byCategoryGroupId, flexTotal };
+    return calculateBudgetSpentBatch(householdId, categoryIds, categoryGroupIds, startDate, endDate,
+      currency, categoryTypeMap, groupTypeMap, context, includeFlex);
   }
 }
 

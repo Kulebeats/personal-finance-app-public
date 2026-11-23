@@ -11,6 +11,39 @@ vi.mock("../../utils/withTransaction", () => ({
   withTransaction: (operation: (tx: unknown) => unknown) => operation(undefined),
 }));
 
+// The apply-time owner/member/goal re-check reads the database (ORG-003). These
+// unit tests use placeholder ids and mocked repositories, so it is stubbed here;
+// it is exercised against real Postgres in rules.references.realdb.integration.test.ts.
+// Rule-apply audit rows are written through the apply transaction (FIN-16); with
+// no real transaction here, stub the writer. It is covered against real Postgres in
+// rules.apply.audit.realdb.integration.test.ts.
+vi.mock("../rule/apply-audit", () => ({
+  writeRuleApplyAudit: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../rule/entity-references", () => ({
+  assertRuleActionReferencesCurrent: vi.fn().mockResolvedValue(undefined),
+}));
+
+// The apply-time category/tag household check also reads the database (ORG-003).
+// Here every placeholder id the actions name counts as the household's own; the
+// foreign/missing cases run against real Postgres in
+// rules.apply-household-scope.realdb.integration.test.ts.
+vi.mock("../rule/action-references", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../rule/action-references")>();
+  type Action = Parameters<typeof actual.actionTagIds>[0];
+  return {
+    ...actual,
+    resolveOwnedActionReferences: vi.fn(async (actions: readonly Action[]) => ({
+      categoryIds: new Set(actions.flatMap((action) =>
+        action.type === "categorize" ? [String(action.value).toLowerCase()]
+          : action.type === "split_transaction" ? actual.splitCategoryIds(action).map((id) => id.toLowerCase()) : [])),
+      tagIds: new Set(actions.flatMap((action) =>
+        action.type === "add_tags" ? actual.actionTagIds(action).map((id) => id.toLowerCase()) : [])),
+    })),
+  };
+});
+
 // Mock repositories
 vi.mock("../../repositories/RuleRepository", () => ({
   ruleRepository: {
@@ -31,8 +64,13 @@ vi.mock("../../repositories/MerchantRepository", () => ({
   merchantRepository: {
     findByIdAndHousehold: vi.fn(),
     getAliases: vi.fn(),
-    addAlias: vi.fn(),
   },
+}));
+
+// The alias write goes through the household name/alias guard (real-DB
+// coverage: merchants.name-writers.realdb.integration.test.ts).
+vi.mock("../../modules/merchants/merchants.name-guard", () => ({
+  addMerchantAliasIfFree: vi.fn().mockResolvedValue("added"),
 }));
 
 // Mock logger
@@ -105,7 +143,8 @@ describe("RuleService", () => {
         testHouseholdId,
         expect.objectContaining({ ownerUserId: "user-123" }),
         undefined,
-        undefined
+        undefined,
+        expect.objectContaining({ onWrite: expect.any(Function) })
       );
       expect(result.ownerUserId).toBe("user-123");
     });
@@ -159,7 +198,8 @@ describe("RuleService", () => {
         testHouseholdId,
         expect.objectContaining({ ownerUserId: null }),
         undefined,
-        undefined
+        undefined,
+        expect.objectContaining({ onWrite: expect.any(Function) })
       );
     });
 
@@ -219,7 +259,8 @@ describe("RuleService", () => {
           isExcludedFromBudget: true,
         }),
         undefined,
-        undefined
+        undefined,
+        expect.objectContaining({ onWrite: expect.any(Function) })
       );
     });
 
@@ -337,7 +378,8 @@ describe("RuleService", () => {
           categoryId: "cat-1",
         }),
         undefined,
-        undefined
+        undefined,
+        expect.objectContaining({ onWrite: expect.any(Function) })
       );
       expect(result.merchantId).toBe("merchant-1");
       expect(result.categoryId).toBe("cat-1");
@@ -401,7 +443,8 @@ describe("RuleService", () => {
           reviewedAt: expect.any(Date),
         }),
         undefined,
-        undefined
+        undefined,
+        expect.objectContaining({ onWrite: expect.any(Function) })
       );
     });
 
@@ -453,10 +496,14 @@ describe("RuleService", () => {
 
       await ruleService.applyRules(transaction as any, testHouseholdId);
 
-      expect(merchantRepository.addAlias).toHaveBeenCalledWith(
+      const { addMerchantAliasIfFree } = await import(
+        "../../modules/merchants/merchants.name-guard"
+      );
+      expect(addMerchantAliasIfFree).toHaveBeenCalledWith(
+        undefined,
+        testHouseholdId,
         "merchant-3",
-        "Shoprite Lusaka",
-        undefined
+        "Shoprite Lusaka"
       );
       expect(transactionRepository.update).not.toHaveBeenCalled();
     });
@@ -552,7 +599,7 @@ describe("RuleService", () => {
         transaction: { ...visibleTxn, categoryId: "cat-1" },
       });
 
-      const results = await ruleService.applyRulesToTransactions(
+      const { transactions: results } = await ruleService.applyRulesToTransactions(
         [visibleTxn, privateTxn] as unknown as Transaction[],
         testHouseholdId,
         { userId: "user-a" }
@@ -565,7 +612,8 @@ describe("RuleService", () => {
         testHouseholdId,
         expect.objectContaining({ categoryId: "cat-1" }),
         undefined,
-        undefined
+        undefined,
+        expect.objectContaining({ onWrite: expect.any(Function) })
       );
       // The foreign private transaction is returned untouched.
       expect(results[1]).toEqual(privateTxn);
@@ -618,7 +666,8 @@ describe("RuleService", () => {
         testHouseholdId,
         expect.objectContaining({ categoryId: "cat-1" }),
         undefined,
-        undefined
+        undefined,
+        expect.objectContaining({ onWrite: expect.any(Function) })
       );
     });
   });

@@ -8,7 +8,7 @@ import React, { useMemo, Suspense } from "react";
 import {
   useReportWidgetPreferences,
   useWidgetToggle,
-  useWidgetOnboarding,
+  useResetReportWidgetPreferences,
   useUpdateReportWidgetPreferences,
   useCustomCharts,
 } from "@/hooks/use-report-widget-preferences";
@@ -26,6 +26,7 @@ import { CustomChartConfig } from "@shared/reports";
 import { AggregationLevel } from "./AggregationFilter";
 import { CORE_WIDGETS, OPTIONAL_WIDGETS } from "./AnnualDashboardRegistry";
 import { ReportEmptyState } from "@/features/reports/components/ReportEmptyState";
+import { useReportPreferenceAction } from "@/hooks/use-report-preference-action";
 
 // ============================================================================
 // ANNUAL DASHBOARD
@@ -41,31 +42,33 @@ export function AnnualDashboard({
   className,
   aggregation = "monthly",
 }: AnnualDashboardProps & { aggregation?: AggregationLevel }) {
-  const { data: preferences, isLoading: prefsLoading } =
+  const { data: preferences, isLoading: prefsLoading, error: prefsError, refetch: refetchPreferences } =
     useReportWidgetPreferences();
   const { toggleWidget } = useWidgetToggle();
-  const { resetOnboarding } = useWidgetOnboarding();
+  const { mutateAsync: resetPreferences } = useResetReportWidgetPreferences();
   const yearRange = useCurrentYearRange();
 
   const { customCharts, addCustomChart, updateCustomChart, deleteCustomChart } =
     useCustomCharts();
-  const { mutate: updatePreferences } = useUpdateReportWidgetPreferences();
+  const { mutateAsync: updatePreferences } = useUpdateReportWidgetPreferences();
 
   const [editingChart, setEditingChart] = React.useState<
     CustomChartConfig | undefined
   >(undefined);
   const [isBuilderOpen, setIsBuilderOpen] = React.useState(false);
   const [isCustomizeOpen, setIsCustomizeOpen] = React.useState(false);
+  const { run, pending, error } = useReportPreferenceAction();
+  const retryAction = React.useRef<() => Promise<unknown>>(() => Promise.resolve());
+  const runAction = (action: () => Promise<unknown>) => { if (pending) return; retryAction.current = action; void run(action); };
 
   const handleSaveChart = (
     config: Omit<CustomChartConfig, "id" | "createdAt" | "order">,
   ) => {
     if (editingChart) {
-      updateCustomChart(editingChart.id, config);
+      return updateCustomChart(editingChart.id, config);
     } else {
-      addCustomChart(config);
+      return addCustomChart(config);
     }
-    setEditingChart(undefined);
   };
 
   // Compute which widgets to show, sorted by order
@@ -111,8 +114,19 @@ export function AnnualDashboard({
     );
   }
 
+  if (!preferences && prefsError) {
+    return (
+      <div className={cn("space-y-4", className)}>
+        <p role="alert">Dashboard preferences could not be loaded. {prefsError.message}</p>
+        <Button variant="outline" onClick={() => { void refetchPreferences(); }}>Retry Loading Preferences</Button>
+        <Button variant="ghost" disabled>Customize Layout</Button>
+      </div>
+    );
+  }
+
   return (
     <div className={cn("space-y-6", className)}>
+      {error && <div><p role="alert">{error}</p><Button disabled={pending} onClick={() => { void run(retryAction.current); }}>Retry Change</Button></div>}
       {/* Core Widgets Section */}
       <section>
         <div className="flex justify-between items-center mb-4">
@@ -123,6 +137,7 @@ export function AnnualDashboard({
               size="sm"
               className="h-8 gap-2 text-muted-foreground"
               onClick={() => setIsCustomizeOpen(true)}
+              disabled={!preferences}
             >
               <Settings2 className="h-4 w-4" />
               Customize Layout
@@ -149,7 +164,7 @@ export function AnnualDashboard({
               return (
                 <WidgetErrorBoundary key={widgetId} widgetId={widgetId}>
                   <Widget
-                    onHide={() => toggleWidget("coreWidgets", widgetId, false)}
+                    onHide={() => runAction(() => toggleWidget("coreWidgets", widgetId, false))}
                     aggregation={aggregation}
                   />
                 </WidgetErrorBoundary>
@@ -171,7 +186,7 @@ export function AnnualDashboard({
                   <WidgetErrorBoundary key={widgetId} widgetId={widgetId}>
                     <Widget
                       onHide={() =>
-                        toggleWidget("optionalWidgets", widgetId, false)
+                        runAction(() => toggleWidget("optionalWidgets", widgetId, false))
                       }
                       aggregation={aggregation}
                     />
@@ -205,7 +220,7 @@ export function AnnualDashboard({
                   setEditingChart(chart);
                   setIsBuilderOpen(true);
                 }}
-                onDelete={() => deleteCustomChart(chart.id)}
+                onDelete={() => runAction(() => deleteCustomChart(chart.id))}
               />
             </WidgetErrorBoundary>
           ))}
@@ -238,10 +253,7 @@ export function AnnualDashboard({
           onOpenChange={setIsCustomizeOpen}
           preferences={preferences}
           onSave={(newPrefs) => updatePreferences(newPrefs)}
-          onReset={() => {
-            resetOnboarding();
-            setIsCustomizeOpen(false);
-          }}
+          onReset={resetPreferences}
           customCharts={customCharts}
           onEditCustomChart={(chart) => {
             setEditingChart(chart);

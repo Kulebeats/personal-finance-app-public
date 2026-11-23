@@ -22,7 +22,7 @@ Tender No: 11/2025/BA
 - Effective January 2024, bonds are issued at **Par Value**.
 - Purchase Price = Face Value (typically).
 - Coupon Rate matches the Cut-off Yield Rate at issuance.
-- Day Count Convention: **Actual/365**.
+- Day Count Convention: **Actual/365**. The app applies this as a policy default, pending OI-03; see [grz-policy-defaults.md](grz-policy-defaults.md).
 
 ## Treasury Bills (November/December 2025)
 
@@ -36,4 +36,4 @@ Tender No: 11/2025/BA
 **Notes:**
 
 - Issued at discount.
-- Day Count Convention: **Actual/365**.
+- Day Count Convention: **Actual/365**. The app applies this as a policy default, pending OI-03; see [grz-policy-defaults.md](grz-policy-defaults.md).

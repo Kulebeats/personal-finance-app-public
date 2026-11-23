@@ -1,3 +1,4 @@
+import { useSearch } from "wouter";
 import Layout from "@/components/Layout";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card } from "@/components/ui/card";
@@ -17,16 +18,41 @@ import {
   TaxReport,
   PensionDashboard,
   RecurringInvestmentSetup,
-  AddHoldingModal,
 } from "@/features/investments";
+import { HoldingOpeningProvider, useOpenHolding } from "@/features/investments/components/HoldingOpeningProvider";
+import { DeleteHoldingProvider, HoldingDeleteRecovery } from "@/features/investments/components/DeleteHoldingDialog";
+import { HouseholdPriceRecovery, HouseholdPriceTrigger, HouseholdSecurityPriceProvider } from "@/features/investments/components/HouseholdSecurityPriceDialog";
+
+const INVESTMENT_TABS = ["holdings", "performance", "allocation", "grz", "fx-impact", "tax", "pension", "recurring"] as const;
+type InvestmentTab = (typeof INVESTMENT_TABS)[number];
+
+/** `?tab=tax` (etc.) opens that tab; anything else falls back to Holdings. */
+function initialTab(search: string): InvestmentTab {
+  const requested = new URLSearchParams(search).get("tab");
+  return INVESTMENT_TABS.find(tab => tab === requested) ?? "holdings";
+}
 
 export default function Investments() {
+  return <HoldingOpeningProvider>
+    <DeleteHoldingProvider>
+      <HouseholdSecurityPriceProvider><InvestmentsContent /></HouseholdSecurityPriceProvider>
+    </DeleteHoldingProvider>
+  </HoldingOpeningProvider>;
+}
+
+function InvestmentsContent() {
+  const openHolding = useOpenHolding();
+  const tab = initialTab(useSearch());
   const {
     displayCurrency,
     setDisplayCurrency,
     timeframe,
     setTimeframe,
     isLoading,
+    holdingsLoading = isLoading,
+    holdingsCurrency = displayCurrency,
+    summaryCurrency = displayCurrency,
+    summaryState = "ready",
     holdings,
     portfolioSummary,
     performanceHistory,
@@ -34,7 +60,6 @@ export default function Investments() {
     totalValue,
     totalGainLoss,
     totalGainLossPercent,
-    refreshMarketData,
     formatCurrency,
   } = useInvestmentsData();
 
@@ -45,82 +70,33 @@ export default function Investments() {
     baseCurrency: displayCurrency,
   });
 
-  // Error state - must be checked BEFORE the empty state so a failed query is
-  // not mistaken for "no holdings".
-  if (!isLoading && holdingsError) {
-    return (
-      <Layout>
-        <div className="space-y-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-2xl font-bold text-foreground tracking-tight">
-                Investments
-              </h1>
-              <p className="text-muted-foreground">
-                Track your portfolio and holdings
-              </p>
-            </div>
-          </div>
-          <WidgetErrorState
-            title="Couldn't load your investments"
-            message="We hit a problem loading your portfolio. Please try again."
-            onRetry={() => {
-              void refetchHoldings();
-            }}
-          />
-        </div>
-      </Layout>
-    );
-  }
-
-  // Empty state
-  if (!isLoading && holdings.length === 0) {
-    return (
-      <Layout>
-        <div className="space-y-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-2xl font-bold text-foreground tracking-tight">
-                Investments
-              </h1>
-              <p className="text-muted-foreground">
-                Track your portfolio and holdings
-              </p>
-            </div>
-          </div>
-          <Card className="p-12 text-center">
-            <AlertCircle className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
-            <h2 className="text-lg font-semibold mb-2">No Holdings Yet</h2>
-            <p className="text-muted-foreground mb-6">
-              Start tracking your investments by adding your first holding.
-            </p>
-            <AddHoldingModal>
-              <Button type="button">
-                <Plus className="w-4 h-4" /> Add Your First Holding
-              </Button>
-            </AddHoldingModal>
-          </Card>
-        </div>
-      </Layout>
-    );
-  }
+  const showHoldingsError = !holdingsLoading && holdingsError;
+  const noHoldings = !holdingsLoading && holdings.length === 0;
 
   return (
     <Layout>
       <div className="space-y-6">
+        <HoldingDeleteRecovery />
+        <HouseholdPriceRecovery />
+        <div className="flex justify-end"><HouseholdPriceTrigger /></div>
         {/* Header Summary */}
-        <PortfolioSummary
+        {showHoldingsError ? <div>
+          <h1 className="text-2xl font-bold text-foreground tracking-tight">Investments</h1>
+          <p className="text-muted-foreground">Track your portfolio and holdings</p>
+        </div> : <PortfolioSummary
           totalValue={totalValue}
           totalGainLoss={totalGainLoss}
           totalGainLossPercent={totalGainLossPercent}
           displayCurrency={displayCurrency}
+          summaryCurrency={summaryCurrency}
+          summaryState={summaryState}
           onCurrencyChange={setDisplayCurrency}
           formatCurrency={formatCurrency}
-          refreshMarketData={refreshMarketData}
-        />
+          onAddHolding={openHolding}
+        />}
 
         {/* Tabs */}
-        <Tabs defaultValue="holdings" className="w-full">
+        <Tabs key={tab} defaultValue={tab} className="w-full">
           <TabsList className="bg-muted/50 border border-border/50 p-1">
             <TabsTrigger
               value="holdings"
@@ -174,20 +150,29 @@ export default function Investments() {
 
           {/* Holdings Tab */}
           <TabsContent value="holdings" className="mt-6">
-            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            {showHoldingsError ? <WidgetErrorState
+              title="Couldn't load your investments"
+              message="We hit a problem loading your portfolio. Please try again."
+              onRetry={() => { void refetchHoldings(); }}
+            /> : noHoldings ? <Card className="p-12 text-center">
+              <AlertCircle className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
+              <h2 className="text-lg font-semibold mb-2">No Holdings Yet</h2>
+              <p className="text-muted-foreground mb-6">Start tracking your investments by adding your first holding.</p>
+              <Button type="button" onClick={openHolding} data-holding-opening-trigger><Plus className="w-4 h-4" /> Add Your First Holding</Button>
+            </Card> : <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
               <HoldingsList
                 holdings={holdings}
-                displayCurrency={displayCurrency}
+                displayCurrency={holdingsCurrency}
                 formatCurrency={formatCurrency}
               />
               <div className="space-y-6">
                 <TopMovers
                   holdings={holdings}
-                  displayCurrency={displayCurrency}
+                  displayCurrency={holdingsCurrency}
                   formatCurrency={formatCurrency}
                 />
               </div>
-            </div>
+            </div>}
           </TabsContent>
 
           {/* Performance Tab */}
@@ -204,12 +189,14 @@ export default function Investments() {
 
           {/* Allocation Tab */}
           <TabsContent value="allocation" className="mt-6">
-            <InvestmentAllocation
+            {summaryState === "ready" && !holdingsLoading && !holdingsError && summaryCurrency === holdingsCurrency ? <InvestmentAllocation
               data={allocationData}
               totalValue={totalValue}
-              displayCurrency={displayCurrency}
+              displayCurrency={holdingsCurrency}
               formatCurrency={formatCurrency}
-            />
+            /> : <p role={summaryState === "loading" || holdingsLoading ? "status" : "alert"} className="text-muted-foreground">
+              {summaryState === "loading" || holdingsLoading ? "Loading portfolio valuation…" : "Portfolio valuation unavailable."}
+            </p>}
           </TabsContent>
 
           {/* GRZ Tab */}

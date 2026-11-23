@@ -109,6 +109,8 @@ export type ReportsCashflowResponse = {
     to: string;
     interval: ReportsInterval;
     baseCurrency: string;
+    /** Periods that have started on the household calendar; averages divide by this (NEW-34). */
+    elapsedPeriods?: number;
   };
   series: Array<{
     periodStart: string;
@@ -128,6 +130,8 @@ export type ReportsCashflowResponse = {
     savingsRate: number;
     debt: MoneyDto;
   };
+  /** Totals of the started periods only: the numerator for averages over elapsedPeriods (NEW-34). */
+  elapsedTotals?: { income: MoneyDto; expenses: MoneyDto; savings: MoneyDto };
   metadata?: {
     currencyMode: "household" | "mixed";
     baseCurrency: string;
@@ -236,8 +240,22 @@ export type ReportsNetWorthResponse = {
     assetsByType: Array<{ type: string; value: MoneyDto }>;
     liabilitiesByType: Array<{ type: string; value: MoneyDto }>;
   };
+  /**
+   * Set on the current-balance fallback only (FIN-14). True when a valuation
+   * class (holdings, tbills, pensions, bonds) could not be valued and was left
+   * out of the totals; `omittedValuations` names them.
+   */
+  incomplete?: boolean;
+  omittedValuations?: Array<"holdings" | "tbills" | "pensions" | "bonds">;
+  /**
+   * NEW-34 (RC-14): "snapshots" when the series is recorded snapshots;
+   * "current_only" when it is one point valued from today's balances.
+   */
+  historyCoverage?: NetWorthHistoryCoverage;
   generatedAt?: string;
 };
+
+export type NetWorthHistoryCoverage = "snapshots" | "current_only";
 
 export type ReportsSavingsRateResponse = {
   range: {
@@ -261,7 +279,10 @@ export type ReportsSavingsRateResponse = {
 export type ReportsTransactionsResponse = {
   page: { limit: number; nextCursor?: string | null };
   items: Array<{
+    /** The transaction id; a split transaction appears once per split (NEW-14). */
     id: string;
+    /** The split this row is, or null when the transaction is not split. */
+    splitId?: string | null;
     date: string;
     name: string;
     merchant?: { id: string; name: string } | null;
@@ -367,14 +388,24 @@ export type ReportsDebtResponse = {
 export type ReportsNetWorthChangesResponse = {
   range: { from: string; to: string; currency: string };
   totalChange: MoneyDto;
-  avgMonthlyChange: MoneyDto;
+  /** Endpoint change divided by elapsed calendar months, or null without a comparable pair. */
+  avgMonthlyChange: MoneyDto | null;
   periods: Array<{
     period: string;
     startNetWorth: MoneyDto;
     endNetWorth: MoneyDto;
     change: MoneyDto;
     changePct: number;
+    /** The recorded point this change is measured from. */
+    startPeriod?: string;
+    /** True when a month with no snapshot lies between the two points (NEW-34). */
+    spansGap?: boolean;
   }>;
+  historyCoverage?: NetWorthHistoryCoverage;
+  /** Started months ("YYYY-MM") in the range with no snapshot (NEW-34). */
+  missingMonths?: string[];
+  /** No comparable endpoints in different recorded months. */
+  insufficientHistory?: boolean;
   generatedAt?: string;
 };
 
@@ -409,12 +440,16 @@ export type ReportsGoalsProgressResponse = {
     id: string;
     name: string;
     type: "save_up" | "pay_down" | "investment";
-    targetAmount: MoneyDto;
-    currentAmount: MoneyDto;
-    progress: number;
+    /** Null for a debt goal whose progress is unavailable (it is the debt's balance). */
+    targetAmount: MoneyDto | null;
+    /** Null, like progress, onTrack and monthlyRequired, when progress is unavailable. */
+    currentAmount: MoneyDto | null;
+    progress: number | null;
     projectedCompletion?: string | null;
-    onTrack: boolean;
+    onTrack: boolean | null;
     monthlyRequired?: MoneyDto | null;
+    /** "unavailable" when some of the goal's progress sources are hidden from the viewer. */
+    progressAvailability: "available" | "unavailable";
   }>;
   summary: {
     totalGoals: number;
@@ -461,16 +496,52 @@ export type ReportsForecastResponse = {
 };
 
 // Custom Chart (Section 9.9)
+export const CUSTOM_CHART_PERIODS = ["monthly", "quarterly", "biannual", "annual"] as const;
+export type CustomChartPeriod = (typeof CUSTOM_CHART_PERIODS)[number];
+export const DEFAULT_CUSTOM_CHART_PERIOD: CustomChartPeriod = "monthly";
+
+export const CUSTOM_CHART_AGGREGATIONS = ["sum", "avg", "count", "min", "max"] as const;
+export type CustomChartAggregation = (typeof CUSTOM_CHART_AGGREGATIONS)[number];
+
+export const CUSTOM_CHART_PRIMARY_METRICS = ["income", "expenses", "netSavings", "savings", "netWorth", "savingsRate"] as const;
+export const CUSTOM_CHART_SECONDARY_METRICS = ["income", "expenses", "savings"] as const;
+export const CUSTOM_CHART_GROUPS = ["categoryGroup", "category", "merchant", "merchantCategory", "tag"] as const;
+
+export function canUseCustomChartMetric(metric: string): boolean {
+  return CUSTOM_CHART_PRIMARY_METRICS.some(option => option === metric);
+}
+
+export function canGroupCustomChartMetric(metric: string): boolean {
+  return metric === "income" || metric === "expenses";
+}
+
+export function customChartGroup(metric: string, groupBy?: string): ReportsBreakdownGroupBy | undefined {
+  return canGroupCustomChartMetric(metric) ? CUSTOM_CHART_GROUPS.find(option => option === groupBy) : undefined;
+}
+
+export function canCompareCustomChartMetrics(metric: string, groupBy?: string): boolean {
+  return canUseCustomChartMetric(metric) && !groupBy && metric !== "savingsRate" && metric !== "netWorth";
+}
+
+export function customChartComparison(metric: string, groupBy?: string, secondaryMetric?: string): string | undefined {
+  return canCompareCustomChartMetrics(metric, groupBy)
+    ? CUSTOM_CHART_SECONDARY_METRICS.find(option => option === secondaryMetric)
+    : undefined;
+}
+
+export type CustomChartQueryConfig = {
+  name: string;
+  chartType: string;
+  primaryMetric: string;
+  secondaryMetric?: string;
+  groupBy?: string;
+  period?: CustomChartPeriod;
+  aggregation?: CustomChartAggregation;
+};
+
 export type ReportsCustomResponse = {
   chartId?: string;
-  config: {
-    name: string;
-    chartType: string;
-    primaryMetric: string;
-    secondaryMetric?: string;
-    groupBy?: string;
-    aggregation?: string;
-  };
+  config: CustomChartQueryConfig;
   data: Array<{
     label: string;
     primary: number;
@@ -487,12 +558,15 @@ export type ReportsCustomResponse = {
 
 // Widget Preferences (Section 8)
 export type WidgetPreference = {
-  id: string;
+  id?: string;
   enabled: boolean;
   order: number;
   chartType?: string;
   expanded?: boolean;
 };
+
+/** Widget identity derived for UI entries from the persisted map key. */
+export type IdentifiedWidgetPreference = WidgetPreference & { id: string };
 
 export type CustomChartConfig = {
   id: string;
@@ -501,23 +575,24 @@ export type CustomChartConfig = {
   primaryMetric: string;
   secondaryMetric?: string;
   groupBy?: string;
+  period?: CustomChartPeriod;
+  /** Previously saved charts may store a period here. */
   aggregation?: string;
   showAverage?: boolean;
   showComparison?: boolean;
-  createdAt: string;
+  createdAt?: string;
   order: number;
 };
 
-export type ReportsCustomParams = {
-  chartType: string;
-  primaryMetric: string;
-  secondaryMetric?: string;
-  groupBy?: string;
-  aggregation?: string;
+export type ReportsCustomParams = Omit<CustomChartQueryConfig, "name"> & {
   from?: string;
   to?: string;
   limit?: number;
 };
+
+export function customChartPeriod(config: Pick<CustomChartConfig, "period" | "aggregation">): CustomChartPeriod {
+  return config.period ?? CUSTOM_CHART_PERIODS.find(period => period === config.aggregation) ?? DEFAULT_CUSTOM_CHART_PERIOD;
+}
 
 export type ReportWidgetPreferences = {
   coreWidgets: Record<string, WidgetPreference>;
@@ -525,3 +600,30 @@ export type ReportWidgetPreferences = {
   customCharts: CustomChartConfig[];
   hasCompletedWidgetSetup?: boolean;
 };
+
+export type ReportWidgetPreferencesPatch = Omit<
+  Partial<ReportWidgetPreferences>,
+  "coreWidgets" | "optionalWidgets"
+> & {
+  coreWidgets?: Record<string, Partial<WidgetPreference>>;
+  optionalWidgets?: Record<string, Partial<WidgetPreference>>;
+};
+
+/** Layout reset values shared with the server writer and response validator. */
+export const REPORT_WIDGET_DEFAULT_LAYOUT = {
+  coreWidgets: {
+    summaryCards: { enabled: true, order: 0, chartType: "cards" },
+    goalProgress: { enabled: true, order: 1, chartType: "progressBars" },
+    fixedVariableExpenses: { enabled: true, order: 2, chartType: "donut" },
+  },
+  optionalWidgets: {
+    monthlyTrends: { enabled: true, order: 0, chartType: "bar" },
+    netWorthTimeline: { enabled: true, order: 1, chartType: "area" },
+    savingsRate: { enabled: true, order: 2, chartType: "line" },
+    incomeBreakdown: { enabled: false, order: 3, chartType: "bar" },
+    topMerchants: { enabled: false, order: 4, chartType: "bar" },
+    categoryTrends: { enabled: false, order: 5, chartType: "line" },
+    debtPaydown: { enabled: false, order: 6, chartType: "area" },
+    sankeyFlow: { enabled: false, order: 7, chartType: "sankey" },
+  },
+} satisfies Pick<ReportWidgetPreferences, "coreWidgets" | "optionalWidgets">;

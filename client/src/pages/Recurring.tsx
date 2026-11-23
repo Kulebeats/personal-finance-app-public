@@ -97,6 +97,7 @@ export default function Recurring() {
         <RecurringPageHeader
           upcomingCount={data.upcomingCount}
           upcomingTotal={data.upcomingTotal}
+          upcomingExcluded={data.upcomingExcluded}
           currency={currency}
           viewMode={data.viewMode}
           setViewMode={data.setViewMode}
@@ -126,14 +127,26 @@ export default function Recurring() {
           <div className="md:col-span-2">
             <Card className="p-6 shadow-sm border-border h-full">
               {data.viewMode === "calendar" ? (
-                <RecurringCalendar
-                  calendarItems={data.calendarItems}
-                  daysInMonth={data.daysInMonth}
-                  firstDayOfMonth={data.firstDayOfMonth}
-                  today={data.today}
-                  isCurrentMonth={data.isCurrentMonth}
-                  onItemClick={data.handleEdit}
-                />
+                data.calendarUnavailable ? (
+                  <div>
+                    <p role="status">Calendar status is unavailable.</p>
+                    <button type="button" className="text-primary underline" onClick={() => void data.retryCalendar()}>
+                      Retry calendar
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    {data.calendarLoading && <p role="status">Loading calendar status…</p>}
+                    <RecurringCalendar
+                      calendarItems={data.calendarItems}
+                      daysInMonth={data.daysInMonth}
+                      firstDayOfMonth={data.firstDayOfMonth}
+                      today={data.today}
+                      isCurrentMonth={data.isCurrentMonth}
+                      onItemClick={data.handleEdit}
+                    />
+                  </>
+                )
               ) : (
                 <RecurringList
                   items={data.recurringData || []}
@@ -150,6 +163,7 @@ export default function Recurring() {
           {/* Sidebar */}
           <RecurringSummary
             totalRecurring={data.totalRecurring}
+            excludedCount={data.excludedFromTotals}
             billsTotal={data.billsTotal}
             incomeTotal={data.incomeTotal}
             monthName={data.monthName}
@@ -221,6 +235,7 @@ export default function Recurring() {
         onSave={data.handleSaveEdit}
         isSaving={data.updateRecurring.isPending}
         currency={data.editItem?.amount.currency}
+        verifiedCurrency={data.editItem?.verifiedCurrency}
       />
 
       {/* Delete Confirmation */}

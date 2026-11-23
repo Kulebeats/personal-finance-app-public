@@ -1,6 +1,6 @@
 ﻿# AI Module (`server/modules/ai`)
 
-Server module for Thandiso AI assistant.
+Server module for the Thandi AI assistant.
 
 ## Current API Surface
 
@@ -17,7 +17,7 @@ Conversation endpoints exist as placeholders but are not part of MVP UX.
 - Consent required for chat.
 - Household quota: 50/day.
 - Input max length: 1000 chars.
-- Token budget cap per request (default: 2000 via `AI_REQUEST_TOKEN_BUDGET`).
+- Token budget cap per request (default: 8000 via `AI_REQUEST_TOKEN_BUDGET`).
 - Max 2 tool calls per query.
 - Prompt-injection guardrails (input hardening + blocked intent handling).
 - Tool allowlist enforcement before execution.

@@ -42,7 +42,6 @@ const PRIVATE_FIELDS = [
   "lastFailedLoginAt",
   "nrc",
   "annualIncome",
-  "salaryRangeEncrypted",
 ];
 
 function expectPublicUser(user: Record<string, unknown>, email: string) {

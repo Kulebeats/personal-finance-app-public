@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { downloadProtectedResource, reportProtectedMediaError } from "@/lib/protected-media";
+import { ProtectedImage } from "@/components/session/ProtectedImage";
 import { Paperclip, Upload, Trash2, Download, File, FileText, ImageIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -53,12 +55,7 @@ export function AttachmentsSection({ transactionId }: AttachmentsSectionProps) {
 
   const handleDownload = (attachmentId: string, filename: string) => {
     const url = `/api/transactions/${transactionId}/attachments/${attachmentId}`;
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    void downloadProtectedResource(url, filename).catch(reportProtectedMediaError);
   };
 
   const handlePreview = (index: number) => {
@@ -112,7 +109,7 @@ export function AttachmentsSection({ transactionId }: AttachmentsSectionProps) {
                   {/* Thumbnail for images */}
                   {isImage ? (
                     <div className="w-12 h-12 rounded overflow-hidden shrink-0 bg-muted border">
-                      <img
+                      <ProtectedImage
                         src={`/api/transactions/${transactionId}/attachments/${attachment.id}/download`}
                         alt={attachment.originalFilename}
                         className="w-full h-full object-cover"

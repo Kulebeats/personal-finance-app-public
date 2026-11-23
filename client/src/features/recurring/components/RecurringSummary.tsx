@@ -12,6 +12,8 @@ import type { MoneyDto } from "@shared/money";
 
 interface RecurringSummaryProps {
   totalRecurring: MoneyDto;
+  /** Rules left out of the totals because their amount is not in `currency` (FIN-05). */
+  excludedCount?: number;
   billsTotal: MoneyDto;
   incomeTotal: MoneyDto;
   monthName: string;
@@ -23,6 +25,7 @@ interface RecurringSummaryProps {
 
 export function RecurringSummary({
   totalRecurring,
+  excludedCount = 0,
   billsTotal,
   incomeTotal,
   monthName,
@@ -44,6 +47,13 @@ export function RecurringSummary({
         <div className="text-sm text-muted-foreground">
           Estimated for {monthName}
         </div>
+        {excludedCount > 0 && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            {excludedCount === 1
+              ? `1 rule is not included because its amount is not confirmed in ${currency}.`
+              : `${excludedCount} rules are not included because their amounts are not confirmed in ${currency}.`}
+          </p>
+        )}
         <div className="mt-4 pt-4 border-t border-primary/10 flex justify-between text-sm">
           <span className="text-muted-foreground">Bills</span>
           <span className="font-medium">{formatCurrency(billsTotal)}</span>

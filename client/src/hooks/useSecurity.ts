@@ -1,8 +1,12 @@
+import { toastActionError } from "@/lib/actionErrorToast";
+import { protectedFetch } from "@/lib/protected-fetch";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 // apiCall attaches the x-csrf-token header (raw fetch 403s under CSRF
 // enforcement) and self-heals on a stale token.
 import { apiCall, securityApi } from "@/lib/api";
+import { throwIfResNotOk } from "@/lib/queryClient";
+import { invalidateSession } from "@/lib/session";
 
 // Types
 export interface SecurityStatus {
@@ -14,10 +18,16 @@ export interface SecurityStatus {
   createdAt: string;
 }
 
+/** AH-11: MFA is required for every member; `state` says where this one stands. */
+export type MfaPolicy =
+  | { required: true; state: "compliant" }
+  | { required: true; state: "grace" | "enrolment_required"; graceEndsAt: string; daysRemaining: number };
+
 export interface MfaStatus {
   mfaEnabled: boolean;
   backupCodesRemaining: number;
   lowCodesWarning: boolean;
+  policy?: MfaPolicy | null;
 }
 
 export interface Session {
@@ -45,14 +55,11 @@ export interface LoginHistoryEntry {
 
 // Fetch security status
 async function fetchSecurityStatus(): Promise<SecurityStatus> {
-  const response = await fetch("/api/settings/security", {
+  const response = await protectedFetch("/api/settings/security", {
     credentials: "include",
   });
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Failed to fetch security status");
-  }
+  await throwIfResNotOk(response);
 
   const data = await response.json();
   return data.data;
@@ -73,14 +80,11 @@ export function useSecurityStatus() {
 // who never enabled MFA), so a non-2xx response here is a genuine failure
 // and must surface as an error rather than default to "MFA disabled".
 async function fetchMfaStatus(): Promise<MfaStatus> {
-  const response = await fetch("/api/settings/security/mfa/status", {
+  const response = await protectedFetch("/api/settings/security/mfa/status", {
     credentials: "include",
   });
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Failed to fetch MFA status");
-  }
+  await throwIfResNotOk(response);
 
   const data = await response.json();
   return data.data;
@@ -134,7 +138,7 @@ export function useChangeEmail() {
       queryClient.invalidateQueries({ queryKey: ["security-status"] });
     },
     onError: (error: Error) => {
-      toast.error(error.message);
+      toastActionError("The email address could not be changed.", error);
     },
   });
 }
@@ -155,9 +159,10 @@ export function useVerifyEmail() {
     onSuccess: () => {
       toast.success("Email verified successfully!");
       queryClient.invalidateQueries({ queryKey: ["security-status"] });
+      invalidateSession();
     },
     onError: (error: Error) => {
-      toast.error(error.message);
+      toastActionError("The email address could not be verified.", error);
     },
   });
 }
@@ -174,7 +179,7 @@ export function useResendVerification() {
       toast.success("Verification email sent");
     },
     onError: (error: Error) => {
-      toast.error(error.message);
+      toastActionError("The verification email could not be sent.", error);
     },
   });
 }
@@ -194,21 +199,18 @@ export function useCancelEmailChange() {
       queryClient.invalidateQueries({ queryKey: ["security-status"] });
     },
     onError: (error: Error) => {
-      toast.error(error.message);
+      toastActionError("The email change could not be cancelled.", error);
     },
   });
 }
 
 // Fetch sessions
 async function fetchSessions(): Promise<Session[]> {
-  const response = await fetch("/api/settings/security/sessions", {
+  const response = await protectedFetch("/api/settings/security/sessions", {
     credentials: "include",
   });
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Failed to fetch sessions");
-  }
+  await throwIfResNotOk(response);
 
   const data = await response.json();
   return data.data.sessions;
@@ -235,9 +237,10 @@ export function useRevokeSession() {
     onSuccess: () => {
       toast.success("Session revoked");
       queryClient.invalidateQueries({ queryKey: ["security-sessions"] });
+      invalidateSession();
     },
     onError: (error: Error) => {
-      toast.error(error.message);
+      toastActionError("The session could not be signed out.", error);
     },
   });
 }
@@ -255,23 +258,21 @@ export function useRevokeAllOtherSessions() {
     onSuccess: () => {
       toast.success("All other sessions revoked");
       queryClient.invalidateQueries({ queryKey: ["security-sessions"] });
+      invalidateSession();
     },
     onError: (error: Error) => {
-      toast.error(error.message);
+      toastActionError("The other sessions could not be signed out.", error);
     },
   });
 }
 
 // Fetch login history
 async function fetchLoginHistory(): Promise<LoginHistoryEntry[]> {
-  const response = await fetch("/api/settings/security/login-history", {
+  const response = await protectedFetch("/api/settings/security/login-history", {
     credentials: "include",
   });
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Failed to fetch login history");
-  }
+  await throwIfResNotOk(response);
 
   const data = await response.json();
   return data.data.history;

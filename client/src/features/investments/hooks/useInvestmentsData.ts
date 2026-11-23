@@ -3,9 +3,10 @@ import {
   useHoldings,
   usePortfolioSummary,
   useInvestmentPerformance,
-  useRefreshMarketData,
 } from "@/hooks/useInvestments";
 import { useFormat } from "@/hooks/use-format";
+import Decimal from "decimal.js";
+import { parseMoneyString, toMoneyNumber } from "@/lib/money";
 
 export type Currency = "ZMW" | "USD";
 export type Timeframe = "1M" | "3M" | "YTD" | "1Y" | "ALL";
@@ -33,32 +34,31 @@ export function useInvestmentsData() {
     error: holdingsError,
   } = useHoldings({ baseCurrency: displayCurrency });
 
-  const { data: portfolioSummary, isLoading: summaryLoading } =
+  const { data: portfolioSummary, isLoading: summaryLoading, isError: summaryError } =
     usePortfolioSummary(displayCurrency);
 
   const { data: performanceHistory = [] } = useInvestmentPerformance(timeframe);
 
-  const refreshMarketData = useRefreshMarketData();
-
   const isLoading = holdingsLoading || summaryLoading;
-  const totalValue = portfolioSummary?.totalValue ?? 0;
-  const totalGainLoss = portfolioSummary?.totalGainLoss ?? 0;
-  const totalGainLossPercent = portfolioSummary?.totalGainLossPercent ?? 0;
+  const holdingsCurrency = holdings.find(holding => holding.baseCurrency)?.baseCurrency ?? displayCurrency;
+  const summaryCurrency = portfolioSummary?.baseCurrency ?? displayCurrency;
+  const summaryState: "loading" | "unavailable" | "ready" = summaryLoading ? "loading"
+    : summaryError || !portfolioSummary ? "unavailable" : "ready";
+  // MoneyDto from the server; the summary components receive display numbers.
+  const totalValue = portfolioSummary ? toMoneyNumber(portfolioSummary.totalValue) : 0;
+  const totalGainLoss = portfolioSummary?.totalGainLoss ? toMoneyNumber(portfolioSummary.totalGainLoss) : null;
+  const totalGainLossPercent = portfolioSummary?.totalGainLossPercent ?? null;
 
   // Compute allocation from real holdings
   const allocationData = useMemo(() => {
     if (holdings.length === 0) return [];
 
-    // Group holdings by security type
-    const byType: Record<string, number> = {};
-    let total = 0;
-
-    for (const h of holdings) {
+    // Group holdings by security type, summed exactly from the MoneyDto strings
+    const byType = holdings.reduce<Record<string, Decimal>>((acc, h) => {
       const type = h.security?.type || "other";
-      const value = h.currentValue ?? 0;
-      byType[type] = (byType[type] || 0) + value;
-      total += value;
-    }
+      return { ...acc, [type]: (acc[type] ?? new Decimal(0)).plus(parseMoneyString(h.currentValue?.amount)) };
+    }, {});
+    const total = Object.values(byType).reduce((sum, value) => sum.plus(value), new Decimal(0));
 
     // Convert to allocation data format
     const typeLabels: Record<string, string> = {
@@ -74,8 +74,10 @@ export function useInvestmentsData() {
     return Object.entries(byType)
       .map(([type, value]) => ({
         name: typeLabels[type] || type,
-        value: total > 0 ? Math.round((value / total) * 100) : 0,
-        amount: value,
+        value: total.greaterThan(0)
+          ? value.div(total).times(100).toDecimalPlaces(0, Decimal.ROUND_HALF_CEIL).toNumber()
+          : 0,
+        amount: value.toNumber(),
         color: ALLOCATION_COLORS[type] || ALLOCATION_COLORS.other,
       }))
       .sort((a, b) => b.value - a.value);
@@ -88,6 +90,10 @@ export function useInvestmentsData() {
     timeframe,
     setTimeframe,
     isLoading,
+    holdingsLoading,
+    holdingsCurrency,
+    summaryCurrency,
+    summaryState,
 
     // Data
     holdings,
@@ -99,7 +105,6 @@ export function useInvestmentsData() {
     totalGainLossPercent,
 
     // Actions
-    refreshMarketData,
     formatCurrency,
   };
 }

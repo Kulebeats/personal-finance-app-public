@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { downloadProtectedResource, reportProtectedMediaError } from "@/lib/protected-media";
 import {
   Card,
   CardContent,
@@ -6,8 +7,9 @@ import {
   CardTitle,
   CardDescription,
 } from "@/components/ui/card";
-import { useTaxSummary } from "@/hooks/useInvestments";
-import { useFormat } from "@/hooks/use-format";
+import { useTaxSummary, useTaxYear } from "@/hooks/useInvestments";
+import { useDisplaySettings } from "@/hooks/use-settings";
+import { getCurrencySymbol } from "@/lib/format";
 import {
   Download,
   Calendar,
@@ -28,19 +30,18 @@ import {
 } from "@/components/ui/tooltip";
 
 export function TaxReport() {
-  const [year, setYear] = useState(new Date().getFullYear());
-  const { data: summary, isLoading } = useTaxSummary(year);
-  const { formatCurrency } = useFormat();
-  // Server returns decimal strings (MoneyDto convention) for exact
-  // regulatory precision; convert to a number only here, at the display
-  // boundary, purely for formatting - no arithmetic is performed on it.
-  const money = (value: string) => formatCurrency(Number(value));
-
+  // NEW-22: the default and latest year are the household's, not the browser's.
+  const currentYear = useTaxYear();
+  const [pickedYear, setPickedYear] = useState<number | null>(null);
+  const year = pickedYear ?? currentYear.data;
+  const summary = useTaxSummary(year);
+  const { data: taxYearSummary, refetch } = summary;
+  const isLoading = currentYear.isLoading || summary.isLoading;
+  const isError = currentYear.isError || summary.isError;
+  const latestYear = currentYear.data;
+  const { data: displaySettings } = useDisplaySettings();
   const handleExport = () => {
-    window.open(
-      `/api/investments/tax/zra-export?year=${year}&format=csv`,
-      "_blank"
-    );
+    void downloadProtectedResource(`/api/investments/tax/zra-export?year=${year}&format=csv`).catch(reportProtectedMediaError);
   };
 
   if (isLoading) {
@@ -57,73 +58,86 @@ export function TaxReport() {
     );
   }
 
-  const taxYearSummary = summary ?? {
-    year,
-    realizedGains: "0.00",
-    interestIncome: "0.00",
-    dividendIncome: "0.00",
-    grossIncome: "0.00",
-    totalWht: "0.00",
-    netIncome: "0.00",
-    currency: "ZMW",
-  };
+  const header = (
+    <div className="relative overflow-hidden rounded-2xl bg-slate-900 text-white p-6 shadow-lg mb-4">
+      <div className="absolute top-0 right-0 w-64 h-64 bg-primary/20 rounded-full -mr-32 -mt-32 blur-3xl animate-pulse" />
+      <div className="relative z-10 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <div>
+          <h2 className="text-2xl font-black flex items-center gap-3 tracking-tight">
+            <FileText className="h-6 w-6 text-primary" /> Investment Tax
+            Report
+          </h2>
+          <p className="text-slate-400 text-sm mt-1">
+            Recorded investment income and withholding for the selected year.
+          </p>
+        </div>
 
-  return (
-    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700">
-      {/* Header & Controls */}
-      <div className="relative overflow-hidden rounded-2xl bg-slate-900 text-white p-6 shadow-lg mb-4">
-        <div className="absolute top-0 right-0 w-64 h-64 bg-primary/20 rounded-full -mr-32 -mt-32 blur-3xl animate-pulse" />
-        <div className="relative z-10 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-          <div>
-            <h2 className="text-2xl font-black flex items-center gap-3 tracking-tight">
-              <FileText className="h-6 w-6 text-primary" /> Investment Tax
-              Report
-            </h2>
-            <p className="text-slate-400 text-sm mt-1">
-              Consolidated summary of income and withholding tax for legal
-              compliance.
-            </p>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <div className="flex items-center bg-white/10 rounded-xl p-1 border border-white/20 backdrop-blur-sm">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 text-white hover:bg-white/10"
-                onClick={() => setYear((prev) => prev - 1)}
-                aria-label="Previous year"
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-              <div className="px-4 font-bold text-sm min-w-[70px] text-center flex items-center justify-center gap-2">
-                <Calendar className="h-4 w-4 text-primary" />
-                {year}
-              </div>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 text-white hover:bg-white/10"
-                disabled={year >= new Date().getFullYear()}
-                onClick={() => setYear((prev) => prev + 1)}
-                aria-label="Next year"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </Button>
-            </div>
-
+        <div className="flex items-center gap-3">
+          <div className="flex items-center bg-white/10 rounded-xl p-1 border border-white/20 backdrop-blur-sm">
             <Button
-              variant="default"
-              size="sm"
-              className="gap-2 bg-primary hover:bg-primary/90 shadow-xl"
-              onClick={handleExport}
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-white hover:bg-white/10"
+              disabled={year === undefined}
+              onClick={() => year !== undefined && setPickedYear(year - 1)}
+              aria-label="Previous year"
             >
-              <Download className="h-4 w-4" /> Export CSV
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            <div className="px-4 font-bold text-sm min-w-[70px] text-center flex items-center justify-center gap-2">
+              <Calendar className="h-4 w-4 text-primary" />
+              {year}
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-white hover:bg-white/10"
+              disabled={year === undefined || latestYear === undefined || year >= latestYear}
+              onClick={() => year !== undefined && setPickedYear(year + 1)}
+              aria-label="Next year"
+            >
+              <ChevronRight className="h-4 w-4" />
             </Button>
           </div>
+
+          <Button
+            variant="default"
+            size="sm"
+            className="gap-2 bg-primary hover:bg-primary/90 shadow-xl"
+            disabled={isError || !taxYearSummary}
+            onClick={handleExport}
+          >
+            <Download className="h-4 w-4" /> Export CSV
+          </Button>
         </div>
       </div>
+    </div>
+  );
 
+  if (isError || !taxYearSummary) {
+    return (
+      <div className="space-y-6">
+        {header}
+        <div role="alert" className="flex items-center justify-between gap-4 rounded-lg border p-4">
+          <p>{year === undefined ? "Tax figures are unavailable." : `Tax figures for ${year} are unavailable.`}</p>
+          <Button variant="outline" onClick={() => void (currentYear.isError ? currentYear.refetch() : refetch())}>Retry</Button>
+        </div>
+      </div>
+    );
+  }
+
+  // Report amounts are fixed-point strings. Keep every cent even when the
+  // annual total exceeds the range that Number can represent exactly.
+  const money = (amount: string) => {
+    const negative = amount.startsWith("-");
+    const [whole, cents] = (negative ? amount.slice(1) : amount).split(".");
+    const european = displaySettings?.numberFormat === "EU";
+    const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, european ? "." : ",");
+    return `${negative ? "-" : ""}${getCurrencySymbol(taxYearSummary.currency)}${grouped}${european ? "," : "."}${cents}`;
+  };
+  return (
+    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700">
+      {header}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <Card className="glass-card border-l-4 border-l-primary overflow-hidden">
           <CardHeader className="pb-2">
@@ -153,7 +167,7 @@ export function TaxReport() {
               {money(taxYearSummary.totalWht)}
             </div>
             <p className="text-[10px] text-muted-foreground mt-2 px-2 py-1 bg-rose-50 rounded-full w-fit">
-              Standard 15% rate
+              Recorded withholding
             </p>
           </CardContent>
         </Card>
@@ -169,7 +183,7 @@ export function TaxReport() {
               {money(taxYearSummary.netIncome)}
             </div>
             <p className="text-[10px] text-muted-foreground mt-2 px-2 py-1 bg-emerald-50 rounded-full w-fit">
-              Available liquidity
+              After recorded withholding
             </p>
           </CardContent>
         </Card>
@@ -273,12 +287,9 @@ export function TaxReport() {
           <Info className="h-5 w-5 text-blue-500" />
         </div>
         <div className="space-y-1">
-          <h4 className="text-sm font-bold">ZRA Compliance Note</h4>
+          <h4 className="text-sm font-bold">About this report</h4>
           <p className="text-xs text-muted-foreground leading-relaxed">
-            In Zambia, Withholding Tax (WHT) of 15% is typically deducted at
-            source for dividends and interest. The amounts shown above include
-            the grossed-up income. Use the CSV export for your annual tax
-            returns or to reconcile with the Zambia Revenue Authority.
+            Gross income includes the withholding recorded for the year. The CSV lists the individual income entries.
           </p>
         </div>
       </div>

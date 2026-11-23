@@ -7,7 +7,6 @@
  */
 
 import { randomUUID } from "crypto";
-import * as fs from "fs/promises";
 import * as path from "path";
 import { desc, eq } from "drizzle-orm";
 import { Request, Response } from "express";
@@ -19,6 +18,7 @@ import {
   assertAllowedImageContent,
   sanitizeUploadExtension,
 } from "../../core/uploads";
+import { discardUnlessCommitted, putUploadObject } from "../../core/storage/upload-objects";
 
 const MIME_EXTENSION_MAP: Record<string, string> = {
   "image/jpeg": ".jpg",
@@ -78,21 +78,27 @@ export async function uploadImage(req: Request, res: Response): Promise<void> {
     throw new ValidationError("Invalid file path");
   }
 
-  await fs.mkdir(directory, { recursive: true });
-  await fs.writeFile(filePath, file.buffer);
+  // Store the bytes (OPS-001); filePath stays the logical name the row records.
+  await putUploadObject({ stored: filePath, householdId, purpose: "goal-image", bytes: file.buffer, mediaType: file.mimetype, userId });
 
-  const [image] = await db
-    .insert(goalImageUploads)
-    .values({
-      householdId,
-      originalFilename: file.originalname,
-      storedFilename,
-      filePath,
-      fileSize: file.size,
-      mimeType: file.mimetype,
-      uploadedBy: userId,
-    })
-    .returning();
+  let image: ImageUploadRow;
+  try {
+    [image] = await db
+      .insert(goalImageUploads)
+      .values({
+        householdId,
+        originalFilename: file.originalname,
+        storedFilename,
+        filePath,
+        fileSize: file.size,
+        mimeType: file.mimetype,
+        uploadedBy: userId,
+      })
+      .returning();
+  } catch (error) {
+    await discardUnlessCommitted(filePath, "goal-image", error);
+    throw error;
+  }
 
   created(res, { image: mapImage(image) });
 }

@@ -13,6 +13,7 @@ import {
   useCreateHousehold,
   useUpdateHousehold,
 } from "../use-settings";
+import type { HouseholdMember } from "../use-settings";
 import { ReactNode } from "react";
 
 // Mock fetch globally.
@@ -97,39 +98,10 @@ describe("Household Hooks", () => {
 
   describe("useHouseholdMembers", () => {
     it("should fetch household members successfully", async () => {
-      const mockMembers = [
-        {
-          id: "member-1",
-          householdId: "household-1",
-          userId: "user-1",
-          role: "owner",
-          joinedAt: "2024-01-01",
-          lastActiveAt: null,
-          user: {
-            id: "user-1",
-            username: "owner",
-            email: "owner@example.com",
-            fullName: "Owner User",
-            profilePictureUrl: null,
-            lastLoginAt: null,
-          },
-        },
-        {
-          id: "member-2",
-          householdId: "household-1",
-          userId: "user-2",
-          role: "member",
-          joinedAt: "2024-01-02",
-          lastActiveAt: null,
-          user: {
-            id: "user-2",
-            username: "member",
-            email: "member@example.com",
-            fullName: "Member User",
-            profilePictureUrl: null,
-            lastLoginAt: null,
-          },
-        },
+      // The flat members DTO (shared/household-members.ts).
+      const mockMembers: HouseholdMember[] = [
+        { userId: "user-1", name: "Owner User", email: "owner@example.com", role: "owner", joinedAt: "2024-01-01T00:00:00.000Z" },
+        { userId: "user-2", name: "Member User", email: "member@example.com", role: "member", joinedAt: "2024-01-02T00:00:00.000Z" },
       ];
 
       mockFetch.mockResolvedValueOnce({
@@ -178,23 +150,9 @@ describe("Household Hooks", () => {
     });
 
     it("should not expose emails to non-admin members (PRIV-001)", async () => {
-      const mockMembers = [
-        {
-          id: "member-1",
-          householdId: "household-1",
-          userId: "user-1",
-          role: "member",
-          joinedAt: "2024-01-01",
-          lastActiveAt: null,
-          user: {
-            id: "user-1",
-            username: "member",
-            email: undefined, // Email filtered out by backend
-            fullName: "Member User",
-            profilePictureUrl: null,
-            lastLoginAt: null,
-          },
-        },
+      // The backend omits email for non-admin viewers.
+      const mockMembers: HouseholdMember[] = [
+        { userId: "user-1", name: "Member User", role: "member", joinedAt: "2024-01-01T00:00:00.000Z" },
       ];
 
       mockFetch.mockResolvedValueOnce({
@@ -208,7 +166,7 @@ describe("Household Hooks", () => {
 
       await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-      expect(result.current.data?.[0]?.user?.email).toBeUndefined();
+      expect(result.current.data?.[0]?.email).toBeUndefined();
     });
   });
 

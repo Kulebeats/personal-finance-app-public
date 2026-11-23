@@ -1,14 +1,24 @@
 import type { MoneyDto } from "@shared/money";
-import { moneyFromDto } from "./moneyUtils";
+import {
+  DEFAULT_CUSTOM_CHART_PERIOD, canUseCustomChartMetric, customChartComparison, customChartGroup,
+  type CustomChartPeriod, type CustomChartQueryConfig, type ReportsCashflowResponse, type ReportsCustomResponse,
+} from "@shared/reports";
+import { ValidationError } from "../../core/errors";
+import { Money } from "../../core/money";
+import { moneyFromDto, percentOf } from "./moneyUtils";
 import type { SpendingReportRepository } from "./SpendingReportRepository";
 import type { CashflowReportRepository } from "./CashflowReportRepository";
 import type { NetWorthReportRepository } from "./NetWorthReportRepository";
+import type Decimal from "decimal.js";
+import { chartAmount, chartPercent, chartPoints, chartTotals, type ChartRow } from "./customChartMoney";
+
+const MAX_CHART_GROUPS = 25;
 
 export type AnalyticsForecastContext = {
   getHouseholdCurrency: (householdId: string) => Promise<string>;
-  spending: SpendingReportRepository;
-  cashflow: CashflowReportRepository;
-  netWorth: NetWorthReportRepository;
+  spending: Pick<SpendingReportRepository, "getSpendingBreakdown">;
+  cashflow: Pick<CashflowReportRepository, "getCashflow">;
+  netWorth: Pick<NetWorthReportRepository, "getNetWorth">;
 };
 
 export async function getForecast(
@@ -107,87 +117,91 @@ export async function getForecast(
   };
 }
 
+function chartPeriodLabel(date: string, period: CustomChartPeriod, monthlyLabel: string): string {
+  if (period === "monthly") return monthlyLabel;
+  const year = date.slice(0, 4);
+  if (period === "annual") return year;
+  const monthIndex = Number(date.slice(5, 7)) - 1;
+  return period === "biannual" ? `H${Math.floor(monthIndex / 6) + 1} ${year}` : `Q${Math.floor(monthIndex / 3) + 1} ${year}`;
+}
+
+function bucketChartCashflow(series: ReportsCashflowResponse["series"], period: CustomChartPeriod, currency: string) {
+  const buckets = new Map<string, { label: string; income: Money; expenses: Money; savings: Money }>();
+  const money = (value: MoneyDto) => new Money(chartAmount(value, currency), currency);
+  for (const entry of series) {
+    const label = chartPeriodLabel(entry.periodStart, period, entry.label);
+    const previous = buckets.get(label);
+    const income = money(entry.income);
+    const expenses = money(entry.expenses);
+    const savings = money(entry.savings);
+    buckets.set(label, {
+      label,
+      income: previous ? previous.income.add(income) : income,
+      expenses: previous ? previous.expenses.add(expenses) : expenses,
+      savings: previous ? previous.savings.add(savings) : savings,
+    });
+  }
+  return [...buckets.values()];
+}
+
 export async function executeCustomChart(
   ctx: AnalyticsForecastContext,
   householdId: string,
   body: {
-    config: {
-      name: string;
-      chartType: string;
-      primaryMetric: string;
-      secondaryMetric?: string;
-      groupBy?: string;
-      aggregation?: string;
-    };
+    config: CustomChartQueryConfig;
     from: string;
     to: string;
     scope?: string;
     userId?: string;
   }
-) {
+): Promise<ReportsCustomResponse> {
   const { config, from, to, scope = "household", userId } = body;
+  if (!canUseCustomChartMetric(config.primaryMetric)) throw new ValidationError("Unsupported custom chart metric");
+  const groupBy = customChartGroup(config.primaryMetric, config.groupBy);
+  if (config.groupBy && config.groupBy !== "none" && !groupBy) {
+    throw new ValidationError("Only income and expenses can be grouped");
+  }
+  const secondaryMetric = customChartComparison(config.primaryMetric, groupBy, config.secondaryMetric);
+  const period = config.period ?? DEFAULT_CUSTOM_CHART_PERIOD;
   const currency = await ctx.getHouseholdCurrency(householdId);
-  const toNumber = (value?: MoneyDto) =>
-    value ? moneyFromDto(value, currency).toNumber() : 0;
+  // Every value is summed in Money; one in another currency is a missing rate.
+  const amount = (value?: MoneyDto | null) => chartAmount(value, currency);
 
   // Validate time window (max 36 months)
   const fromDate = new Date(from);
   const toDate = new Date(to);
   const monthsDiff =
-    (toDate.getFullYear() - fromDate.getFullYear()) * 12 +
-    (toDate.getMonth() - fromDate.getMonth());
+    (toDate.getUTCFullYear() - fromDate.getUTCFullYear()) * 12 +
+    (toDate.getUTCMonth() - fromDate.getUTCMonth());
   if (monthsDiff > 36) {
     throw new Error("Custom chart time window cannot exceed 36 months");
   }
 
-  let data: Array<{
-    label: string;
-    primary: number;
-    secondary?: number;
-    groupKey?: string;
-  }> = [];
-  let totals = {
-    primary: 0,
-    secondary: undefined as number | undefined,
-    average: undefined as number | undefined,
-  };
+  let rows: ChartRow[] = [];
+  let breakdownTotal: Decimal | undefined;
+  let savingsRateTotal: number | undefined;
 
-  if (config.groupBy && config.groupBy !== "none") {
+  if (groupBy) {
     const type = config.primaryMetric === "income" ? "income" : "expense";
 
     const breakdown = await ctx.spending.getSpendingBreakdown(householdId, {
       from,
       to,
-      groupBy: config.groupBy as
-        | "categoryGroup"
-        | "category"
-        | "merchant"
-        | "merchantCategory"
-        | "tag",
+      groupBy,
       type,
       scope: scope as "household" | "mine",
       userId,
     });
 
     // Max 25 buckets
-    if (breakdown.items.length > 25) {
-      data = breakdown.items.slice(0, 25).map((item) => ({
-        label: item.label,
-        primary: toNumber(item.value),
-        groupKey: item.entityId,
-      }));
-    } else {
-      data = breakdown.items.map((item) => ({
-        label: item.label,
-        primary: toNumber(item.value),
-        groupKey: item.entityId,
-      }));
-    }
-
-    totals.primary = toNumber(breakdown.total);
-    totals.average = data.length > 0 ? totals.primary / data.length : 0;
+    rows = breakdown.items.slice(0, MAX_CHART_GROUPS).map((item) => ({
+      label: item.label,
+      primary: amount(item.value),
+      groupKey: item.entityId,
+    }));
+    breakdownTotal = amount(breakdown.total);
   } else {
-    let seriesData: typeof data = [];
+    let seriesData: ChartRow[] = [];
 
     if (config.primaryMetric === "netWorth") {
       const result = await ctx.netWorth.getNetWorth(householdId, {
@@ -197,23 +211,15 @@ export async function executeCustomChart(
         scope: scope as "household" | "mine",
         userId,
       });
-      seriesData =
-        result.series[0]?.data.map((d) => ({
-          label: d.x,
-          primary: toNumber(d.y),
-        })) || [];
-    } else if (config.primaryMetric === "savingsRate") {
-      const result = await ctx.cashflow.getSavingsRate(householdId, {
-        from,
-        to,
-        interval: "month",
-        scope: scope as "household" | "mine",
-        userId,
-      });
-      seriesData = result.series.map((d) => ({
-        label: d.label,
-        primary: d.savingsRate,
-      }));
+      // Net worth is a balance. The source is ordered by date, so keep the
+      // last observation in each period and skip periods without an observation.
+      const balances = new Map<string, ChartRow>();
+      for (const point of result.series[0]?.data ?? []) {
+        const label = chartPeriodLabel(point.x, period, point.x);
+        const key = period === "monthly" ? point.x.slice(0, 7) : label;
+        balances.set(key, { label, primary: amount(point.y) });
+      }
+      seriesData = [...balances.values()];
     } else {
       const cashflowData = await ctx.cashflow.getCashflow(householdId, {
         from,
@@ -222,63 +228,56 @@ export async function executeCustomChart(
         scope: scope as "household" | "mine",
         userId,
       });
+      if (config.primaryMetric === "savingsRate") {
+        savingsRateTotal = cashflowData.totals.savingsRate;
+      }
 
-      seriesData = cashflowData.series.map((s) => {
-        let primary = 0;
+      seriesData = bucketChartCashflow(cashflowData.series, period, currency).map((s) => {
+        let primary: Decimal;
         switch (config.primaryMetric) {
           case "income":
-            primary = toNumber(s.income);
+            primary = s.income.amount;
             break;
           case "expenses":
-            primary = toNumber(s.expenses);
+            primary = s.expenses.amount;
             break;
           case "netSavings":
           case "savings":
-          case "savingsContributions":
-            primary = toNumber(s.savings);
+            primary = s.savings.amount;
+            break;
+          case "savingsRate":
+            primary = chartPercent(percentOf(s.savings, s.income));
             break;
           default:
-            primary = toNumber(s.expenses);
+            throw new ValidationError("Unsupported custom chart metric");
         }
 
-        let secondary = undefined;
-        if (config.secondaryMetric) {
-          switch (config.secondaryMetric) {
-            case "income":
-              secondary = toNumber(s.income);
-              break;
-            case "expenses":
-              secondary = toNumber(s.expenses);
-              break;
-            case "savings":
-              secondary = toNumber(s.savings);
-              break;
-          }
+        let secondary: Decimal | undefined;
+        switch (secondaryMetric) {
+          case "income":
+            secondary = s.income.amount;
+            break;
+          case "expenses":
+            secondary = s.expenses.amount;
+            break;
+          case "savings":
+            secondary = s.savings.amount;
+            break;
         }
 
         return { label: s.label, primary, secondary };
       });
     }
 
-    data = seriesData;
-    totals.primary = data.reduce((sum, d) => sum + d.primary, 0);
-    if (config.secondaryMetric) {
-      totals.secondary = data.reduce((sum, d) => sum + (d.secondary || 0), 0);
-    }
-    totals.average = data.length > 0 ? totals.primary / data.length : 0;
+    rows = seriesData;
   }
 
   return {
     chartId: config.name ? undefined : undefined,
-    config: {
-      name: config.name,
-      chartType: config.chartType,
-      primaryMetric: config.primaryMetric,
-      secondaryMetric: config.secondaryMetric,
-      groupBy: config.groupBy,
-      aggregation: config.aggregation,
-    },
-    data,
-    totals,
+    config: { ...config, secondaryMetric },
+    data: chartPoints(rows),
+    totals: savingsRateTotal === undefined
+      ? chartTotals(rows, !!secondaryMetric, breakdownTotal)
+      : { primary: savingsRateTotal },
   };
 }

@@ -8,6 +8,22 @@ vi.mock("../../services/ImportService", () => ({
   },
 }));
 
+const limiters = vi.hoisted(() => {
+  const passThrough = () => Object.assign((_req: unknown, _res: unknown, next: () => unknown) => next(), {});
+  return { uploadLimiter: passThrough(), analyticsLimiter: passThrough() };
+});
+vi.mock("../../middleware/rateLimit", () => limiters);
+// These unit tests call the route handlers with plain request objects; the body is already an object.
+vi.mock("../../middleware/importBody", () => ({ importJson: (_req: unknown, _res: unknown, next: () => unknown) => next() }));
+
+// Execute needs a visible target account (IMP-01 review r4): every request below names one.
+const TARGET = "11111111-1111-4111-8111-111111111113";
+vi.mock("../../repositories/AccountRepository", () => ({
+  accountRepository: {
+    findByIdWithVisibility: vi.fn(async (id: string) => ({ id, currency: "USD" })),
+  },
+}));
+
 vi.mock("../../repositories/HouseholdRepository", () => ({
   householdRepository: {
     findByUserId: vi.fn(),
@@ -82,12 +98,89 @@ describe("import routes", () => {
     vi.clearAllMocks();
   });
 
+  it("refuses execute without a target account before any service call (review r4 P1)", async () => {
+    // Household and write access are checked first (R02), so a writer reaches the target check.
+    vi.mocked(householdRepository.findByUserId).mockResolvedValueOnce({ id: "house-1" } as Awaited<ReturnType<typeof householdRepository.findByUserId>>);
+    vi.mocked(householdRepository.findMember).mockResolvedValueOnce({ role: "member" } as Awaited<ReturnType<typeof householdRepository.findMember>>);
+    const res = await runRoute("post", "/execute", { session: { userId: "user-1" } as Request["session"],
+      body: { rows: [{ Date: "2026-02-01", Amount: "1", Currency: "ZMW" }],
+        mapping: { date: "Date", amount: "Amount", currency: "Currency" }, strategy: "prioritize_coppercoin" } });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error).toMatchObject({ code: "VALIDATION_ERROR", message: "Target account is required" });
+    expect(importService.executeImport).not.toHaveBeenCalled();
+  });
+
+  it("spends the hourly upload budget only on parse and execute; preview is limited per minute", () => {
+    const handlersFor = (path: string) => router.stack.find((entry: any) => entry.route?.path === path)!.route!.stack
+      .map((entry: any) => entry.handle);
+    expect(handlersFor("/parse")).toContain(limiters.uploadLimiter);
+    expect(handlersFor("/execute")).toContain(limiters.uploadLimiter);
+    expect(handlersFor("/preview")).toContain(limiters.analyticsLimiter);
+    expect(handlersFor("/preview")).not.toContain(limiters.uploadLimiter);
+    expect(router.stack.some((entry: any) => !entry.route && entry.handle === limiters.uploadLimiter)).toBe(false);
+  });
+
+  it("does not expose unexpected import errors", async () => {
+    vi.mocked(householdRepository.findByUserId).mockResolvedValueOnce({ id: "house-1" } as Awaited<ReturnType<typeof householdRepository.findByUserId>>);
+    vi.mocked(householdRepository.findMember).mockResolvedValueOnce({ role: "member" } as Awaited<ReturnType<typeof householdRepository.findMember>>);
+    vi.mocked(importService.executeImport).mockRejectedValueOnce(new Error("private SQL connection detail"));
+    const res = await runRoute("post", "/execute", { session: { userId: "user-1" } as Request["session"],
+      body: { targetAccountId: TARGET, rows: [{ Date: "2026-02-01", Amount: "1" }], mapping: { date: "Date", amount: "Amount" }, strategy: "prioritize_csv" } });
+    expect(res.statusCode).toBe(500);
+    expect(JSON.stringify(res.body)).not.toContain("private SQL");
+  });
+
+  it.each([
+    ["owner", 200], ["admin", 200], ["member", 200],
+    ["view_only", 403], ["professional", 403], ["unknown", 403],
+  ])("requires financial.write for %s import execution (UNIT handler)", async (role, status) => {
+    vi.mocked(householdRepository.findByUserId).mockResolvedValueOnce({ id: "house-1" } as Awaited<ReturnType<typeof householdRepository.findByUserId>>);
+    vi.mocked(householdRepository.findMember).mockResolvedValueOnce({ role } as Awaited<ReturnType<typeof householdRepository.findMember>>);
+    vi.mocked(importService.executeImport).mockResolvedValueOnce({ importId: "import-1", replayed: false, imported: 1, duplicate: 0, skipped: 0, failed: 0, deleted: 0, errors: [] });
+    const res = await runRoute("post", "/execute", {
+      session: { userId: "user-1" } as Request["session"],
+      body: { targetAccountId: TARGET, rows: [{ Date: "2026-02-01", Amount: "1" }],
+        mapping: { date: "Date", amount: "Amount" }, strategy: "prioritize_coppercoin" },
+    });
+    expect(res.statusCode).toBe(status);
+    expect(importService.executeImport).toHaveBeenCalledTimes(status === 200 ? 1 : 0);
+    if (status === 403) expect(res.body.error.code).toBe("FORBIDDEN");
+  });
+
+  it("rejects unsupported date format before calling the import service", async () => {
+    const res = await runRoute("post", "/execute", { body: {
+      targetAccountId: TARGET,
+      rows: [{ Date: "01/02/2026", Amount: "1" }],
+      mapping: { date: "Date", amount: "Amount" },
+      strategy: "prioritize_coppercoin", dateFormat: "locale-default",
+    } });
+    expect(res.statusCode).toBe(400);
+    expect(res.body.error.details).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: ["dateFormat"] }),
+    ]));
+    expect(importService.executeImport).not.toHaveBeenCalled();
+  });
+
+  it.each(["auto", "DD/MM/YYYY", "MM/DD/YYYY"])("forwards %s unchanged (UNIT route handler)", async dateFormat => {
+    vi.mocked(householdRepository.findByUserId).mockResolvedValueOnce({ id: "house-1" } as any);
+    vi.mocked(householdRepository.findMember).mockResolvedValueOnce({ role: "member" } as any);
+    vi.mocked(importService.executeImport).mockResolvedValueOnce({ importId: "import-1", replayed: false, imported: 1, duplicate: 0, skipped: 0, failed: 0, deleted: 0, errors: [] });
+    const res = await runRoute("post", "/execute", {
+      session: { userId: "user-1" } as any,
+      body: { targetAccountId: TARGET, rows: [{ Date: "2026-02-01", Amount: "1" }],
+        mapping: { date: "Date", amount: "Amount" }, strategy: "prioritize_coppercoin", dateFormat },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(importService.executeImport).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ dateFormat }));
+  });
+
   it("returns 404 when household is missing", async () => {
     (householdRepository.findByUserId as any).mockResolvedValueOnce(undefined);
 
     const res = await runRoute("post", "/execute", {
       session: { userId: "user-1" } as any,
       body: {
+        targetAccountId: TARGET,
         rows: [{ id: "1" }],
         mapping: { date: "Date", amount: "Amount" },
         strategy: "prioritize_csv",
@@ -108,6 +201,7 @@ describe("import routes", () => {
     const res = await runRoute("post", "/execute", {
       session: { userId: "user-1" } as any,
       body: {
+        targetAccountId: TARGET,
         householdId: "11111111-1111-4111-8111-111111111112",
         rows: [{ id: "1" }],
         mapping: { date: "Date", amount: "Amount" },
@@ -135,6 +229,7 @@ describe("import routes", () => {
     const res = await runRoute("post", "/execute", {
       session: { userId: "user-1" } as any,
       body: {
+        targetAccountId: TARGET,
         rows: [{ id: "1" }],
         mapping: { date: "Date", amount: "Amount" },
         strategy: "prioritize_csv",
@@ -163,6 +258,7 @@ describe("import routes", () => {
     const res = await runRoute("post", "/execute", {
       session: { userId: "user-1" } as any,
       body: {
+        targetAccountId: TARGET,
         householdId: "11111111-1111-4111-8111-111111111112",
         rows: [{ id: "1" }],
         mapping: { date: "Date", amount: "Amount" },

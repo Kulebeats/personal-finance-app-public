@@ -15,8 +15,9 @@ import { z } from "zod";
 import { success } from "../../core/http";
 import { ValidationError, NotFoundError } from "../../core/errors";
 import { businessAuditService } from "../../services/BusinessAuditService";
-import { householdRepository } from "../../repositories/HouseholdRepository";
+import { resolveRequestHousehold } from "../../core/authz/session-preconditions";
 import { pushNotificationService } from "../../services/notification/push";
+import { pushSubscribeBodySchema, pushUnsubscribeBodySchema } from "./notifications.validation";
 
 const listQuerySchema = z.object({
   limit: z.coerce.number().min(1).max(100).optional().default(20),
@@ -99,7 +100,7 @@ export const notificationsController = {
 
       // Audit logging (non-blocking)
       try {
-        const household = await householdRepository.findByUserId(userId);
+        const household = await resolveRequestHousehold(req, userId);
         if (household) {
           await businessAuditService.logUpdate({
             householdId: household.id,
@@ -128,7 +129,7 @@ export const notificationsController = {
 
       // Audit logging (non-blocking)
       try {
-        const household = await householdRepository.findByUserId(userId);
+        const household = await resolveRequestHousehold(req, userId);
         if (household) {
           await businessAuditService.log({
             householdId: household.id,
@@ -168,7 +169,7 @@ export const notificationsController = {
 
       // Audit logging (non-blocking)
       try {
-        const household = await householdRepository.findByUserId(userId);
+        const household = await resolveRequestHousehold(req, userId);
         if (household) {
           await businessAuditService.logDelete({
             householdId: household.id,
@@ -244,7 +245,7 @@ export const notificationsController = {
 
       // Audit logging (non-blocking)
       try {
-        const household = await householdRepository.findByUserId(userId);
+        const household = await resolveRequestHousehold(req, userId);
         if (household) {
           await businessAuditService.log({
             householdId: household.id,
@@ -297,7 +298,7 @@ export const notificationsController = {
 
       // Audit logging (non-blocking)
       try {
-        const household = await householdRepository.findByUserId(userId);
+        const household = await resolveRequestHousehold(req, userId);
         if (household) {
           await businessAuditService.log({
             householdId: household.id,
@@ -326,17 +327,18 @@ export const notificationsController = {
   async subscribePush(req: Request, res: Response, next: NextFunction) {
     try {
       const userId = req.session.userId!;
-      const { subscription } = req.body;
-
-      if (!subscription || !subscription.endpoint || !subscription.keys) {
-        throw new ValidationError("Invalid push subscription");
+      // OPS-008: https, default port, no credentials, no IP literal, known push service.
+      const parsed = pushSubscribeBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new ValidationError("Invalid push subscription", parsed.error.errors);
       }
+      const { subscription } = parsed.data;
 
-      await pushNotificationService.saveSubscription(userId, subscription);
+      await pushNotificationService.saveSubscription(userId, req.sessionID, subscription);
 
       // Audit logging (non-blocking). Store a hash, not the raw browser push endpoint.
       try {
-        const household = await householdRepository.findByUserId(userId);
+        const household = await resolveRequestHousehold(req, userId);
         if (household) {
           const endpointHash = hashPushEndpoint(subscription.endpoint);
           await businessAuditService.logCreate({
@@ -366,19 +368,19 @@ export const notificationsController = {
    */
   async unsubscribePush(req: Request, res: Response, next: NextFunction) {
     try {
-      const { endpoint } = req.body;
-      const userId = req.session.userId!;
-
-      if (!endpoint) {
-        throw new ValidationError("Endpoint is required");
+      const parsed = pushUnsubscribeBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new ValidationError("Endpoint is required", parsed.error.errors);
       }
+      const { endpoint } = parsed.data;
+      const userId = req.session.userId!;
 
       // FIX AUTH-NOTIF-PUSH-001: Pass userId to verify ownership
       await pushNotificationService.removeSubscription(endpoint, userId);
 
       // Audit logging (non-blocking). Store a hash, not the raw browser push endpoint.
       try {
-        const household = await householdRepository.findByUserId(userId);
+        const household = await resolveRequestHousehold(req, userId);
         if (household) {
           const endpointHash = hashPushEndpoint(endpoint);
           await businessAuditService.logDelete({
@@ -409,11 +411,13 @@ export const notificationsController = {
     try {
       const vapidPublicKey = process.env.VAPID_PUBLIC_KEY;
 
+      // Feature off, not an error: push is simply not configured on this server.
       if (!vapidPublicKey) {
-        throw new Error("Push notifications not configured");
+        success(res, { configured: false, publicKey: null });
+        return;
       }
 
-      success(res, { publicKey: vapidPublicKey });
+      success(res, { configured: true, publicKey: vapidPublicKey });
     } catch (error) {
       next(error);
     }

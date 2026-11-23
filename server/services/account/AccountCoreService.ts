@@ -1,4 +1,5 @@
-﻿import {
+﻿import { isAssetAccountType } from "../../repositories/AccountBasisUpdate";
+import {
   type Account,
   type InsertAccount,
   accountTypeEnum,
@@ -14,8 +15,11 @@ import {
   ValidationError,
 } from "../../utils/errorHandler";
 import { logger } from "../../utils/logger";
-import { type TransactionType } from "../../utils/withTransaction";
+import { withTransaction, type TransactionType } from "../../utils/withTransaction";
+import { lockAccountCreationGrant } from "../../repositories/AccountCreationGrant";
 import { businessAuditService } from "../BusinessAuditService";
+import { db } from "../../db";
+import { householdToday } from "../householdCalendarToday";
 import {
   archiveAccount as archiveAccountFn,
   unarchiveAccount as unarchiveAccountFn,
@@ -75,17 +79,20 @@ export class AccountCoreService {
    * Create a new account
    *
    * TODO-004: ownerUserId can now be specified in input.
-   * - Defaults to creator (userId) if not provided
+   * - Defaults to creator (userId) only if omitted; null means Shared
    * - Admin/owner can assign to other household members
-   * - Members can only assign to themselves
+   * - Members can create Shared accounts or assign to themselves
    */
   async createAccount(
-    data: Omit<InsertAccount, "householdId" | "ownerUserId"> & {
+    input: Omit<InsertAccount, "householdId" | "ownerUserId"> & {
       ownerUserId?: string | null;
     },
     householdId: string,
     userId: string,
+    auditContext?: { ipAddress?: string },
   ): Promise<Account> {
+    const data = structuredClone(input);
+    const ipAddress = auditContext?.ipAddress;
     // Get next display order
     const displayOrder =
       await accountRepository.getNextDisplayOrder(householdId);
@@ -98,8 +105,8 @@ export class AccountCoreService {
       ]);
     }
 
-    // Determine owner: use provided or default to creator
-    const ownerUserId = data.ownerUserId ?? userId;
+    // Preserve explicit Shared ownership; only omission defaults to the creator.
+    const ownerUserId = data.ownerUserId === undefined ? userId : data.ownerUserId;
 
     // TODO-004: Validate owner assignment
     if (data.ownerUserId && data.ownerUserId !== userId) {
@@ -132,31 +139,36 @@ export class AccountCoreService {
     }
 
     // Determine if asset based on type (includes mortgage and other_liability)
-    const liabilityTypes = ["credit", "loan", "mortgage", "other_liability"];
-    const isAsset = !liabilityTypes.includes(data.type);
+    const isAsset = isAssetAccountType(data.type);
 
-    const account = await accountRepository.create({
-      ...data,
-      householdId,
-      ownerUserId,
-      displayOrder,
-      isAsset,
-      balance: data.initialBalance || "0",
-    });
-
-    // TODO-004: Audit log with ownership details
-    await businessAuditService.logCreate({
-      householdId,
-      userId,
-      entityType: "account",
-      entityId: account.id,
-      newValue: {
-        name: account.name,
-        type: account.type,
+    const account = await withTransaction(async tx => {
+      await lockAccountCreationGrant(tx, householdId, userId, ownerUserId);
+      const saved = await accountRepository.create({
+        ...data,
+        householdId,
         ownerUserId,
-        createdBy: userId,
-        assignedToOther: ownerUserId !== userId,
-      },
+        displayOrder,
+        isAsset,
+        balance: data.initialBalance || "0",
+      }, tx);
+      await businessAuditService.logCreate({
+        tx,
+        householdId: saved.isPrivate ? null : householdId,
+        userId,
+        entityType: "account",
+        entityId: saved.id,
+        newValue: {
+          name: saved.name,
+          type: saved.type,
+          balance: saved.balance,
+          currency: saved.currency,
+          ownerUserId,
+          createdBy: userId,
+          assignedToOther: ownerUserId !== null && ownerUserId !== userId,
+        },
+        ipAddress,
+      });
+      return saved;
     });
 
     logger.info("Account created", {
@@ -262,6 +274,7 @@ export class AccountCoreService {
     id: string,
     householdId: string,
     userId: string,
+    tx?: TransactionType,
   ): Promise<void> {
     // Initial visibility check (for user-friendly error messages)
     const existing = await accountRepository.findByIdWithVisibility(
@@ -281,6 +294,7 @@ export class AccountCoreService {
       id,
       householdId,
       { userId }, // Ownership check: must be public OR owned by this user
+      tx,
     );
 
     if (unauthorized) {
@@ -308,6 +322,7 @@ export class AccountCoreService {
     householdId: string,
     userId: string,
     notes?: string,
+    ipAddress?: string,
   ): Promise<{ account: Account; transactionId: string }> {
     // Verify account access
     const existingAccount = await accountRepository.findByIdWithVisibility(
@@ -331,12 +346,15 @@ export class AccountCoreService {
     // Route through the locked transaction-create path: it takes the account
     // FOR UPDATE, applies the overdraft guard (balance-reducing deltas only),
     // and writes the balance atomically — this path previously did its own
-    // unlocked, unguarded balance write.
+    // unlocked, unguarded balance write. NEW-32 / FIN-13: the ledger row's one
+    // CREATE audit commits in that same transaction, and the row is dated on
+    // the household's own calendar, not UTC.
+    const date = await householdToday(db, householdId);
     const { transaction, account } = await transactionRepository.create({
       householdId,
       accountId,
       ownerUserId: userId,
-      date: new Date().toISOString().split("T")[0],
+      date,
       name: isIncrease
         ? "Balance Adjustment (Increase)"
         : "Balance Adjustment (Decrease)",
@@ -346,6 +364,8 @@ export class AccountCoreService {
       isBalanceAdjustmentIncrease: isIncrease,
       source: "manual" as const,
       notes,
+    }, {
+      audit: { userId, householdId, ipAddress, metadata: { operation: "adjustBalance", isIncrease } },
     });
 
     logger.info("Balance adjusted", {
@@ -363,8 +383,9 @@ export class AccountCoreService {
     id: string,
     householdId: string,
     userId: string,
+    ipAddress?: string,
   ): Promise<Account> {
-    return archiveAccountFn(id, householdId, userId);
+    return archiveAccountFn(id, householdId, userId, ipAddress);
   }
 
   /**
@@ -375,8 +396,9 @@ export class AccountCoreService {
     id: string,
     householdId: string,
     userId: string,
+    ipAddress?: string,
   ): Promise<Account> {
-    return unarchiveAccountFn(id, householdId, userId);
+    return unarchiveAccountFn(id, householdId, userId, ipAddress);
   }
 
   /**
@@ -391,6 +413,7 @@ export class AccountCoreService {
     },
     householdId: string,
     userId: string,
+    tx?: TransactionType,
   ): Promise<Account> {
     // Verify access
     const existing = await accountRepository.findByIdWithVisibility(
@@ -416,6 +439,9 @@ export class AccountCoreService {
       id,
       householdId,
       updateData,
+      undefined,
+      undefined,
+      tx,
     );
 
     if (!account) {

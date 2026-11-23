@@ -4,10 +4,7 @@ import {
   displaySchema,
   DisplayFormData,
 } from "@/features/settings/schemas/displaySchema";
-import {
-  useDisplaySettings,
-  useUpdateDisplaySettings,
-} from "@/hooks/use-settings";
+import { useDisplaySettings, useUpdateDisplaySettings } from "@/hooks/use-settings";
 import { SettingsCard } from "@/features/settings/components/SettingsCard";
 import { FormField } from "@/features/settings/components/FormField";
 import { Button } from "@/components/ui/button";
@@ -22,6 +19,7 @@ import { Loader2 } from "lucide-react";
 import React, { useEffect } from "react";
 import { TIMEZONES } from "@/data/timezones";
 import { toast } from "sonner";
+import { notifyInvalidSubmit } from "@/lib/forms/notifyInvalidSubmit";
 
 export function DisplayForm() {
   const { data: displaySettings, isLoading } = useDisplaySettings();
@@ -91,7 +89,7 @@ export function DisplayForm() {
       title="Display Settings"
       description="Customize how information is displayed in the app"
     >
-      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+      <form onSubmit={form.handleSubmit(onSubmit, notifyInvalidSubmit())} className="space-y-6">
         <div className="space-y-4 max-w-xl">
           {/* Theme */}
           <Controller

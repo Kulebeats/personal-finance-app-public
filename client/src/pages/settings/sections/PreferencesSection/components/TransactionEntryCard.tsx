@@ -15,14 +15,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { UserPreferences } from "@/hooks/use-settings";
+import type { UserPreferences, UpdatePersonalPreference } from "@/hooks/use-settings";
 
 interface TransactionEntryCardProps {
-  preferences?: UserPreferences;
-  onUpdate: (
-    key: keyof UserPreferences,
-    value: UserPreferences[keyof UserPreferences]
-  ) => void;
+  preferences: UserPreferences;
+  onUpdate: UpdatePersonalPreference;
 }
 
 export function TransactionEntryCard({
@@ -97,7 +94,7 @@ export function TransactionEntryCard({
           </div>
           <Select
             value={preferences?.defaultTransactionType}
-            onValueChange={(value) => onUpdate("defaultTransactionType", value)}
+            onValueChange={(value) => { if (value === "expense" || value === "income" || value === "transfer") onUpdate("defaultTransactionType", value); }}
           >
             <SelectTrigger className="w-[180px]" id="default-type">
               <SelectValue placeholder="Select type" />

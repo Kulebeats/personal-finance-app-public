@@ -4,6 +4,7 @@
  * TanStack Query hooks for goals.
  */
 
+import { userErrorMessage } from "@/lib/errorCopy";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import type { MoneyDto } from "@shared/money";
@@ -63,6 +64,8 @@ export interface Goal {
   type: GoalType;
   goalType?: string | null;
   status: GoalStatus;
+  /** "unavailable" when a progress source is another member's private item; the server then withholds progress. */
+  progressAvailability?: "available" | "unavailable";
   spendingReducesProgress?: boolean | null;
   debtAccountId?: string | null;
   originalBalance?: string | null;
@@ -125,7 +128,8 @@ export interface GoalTransfer {
   householdId: string;
   fromGoalId: string;
   toGoalId: string;
-  amount: string;
+  /** Null when the transfer touches a goal whose progress you cannot see. */
+  amount: MoneyDto | string | null;
   reason?: string | null;
   createdBy?: string | null;
   createdAt: string;
@@ -182,9 +186,11 @@ export interface GoalActivityLogEntry {
 }
 
 export interface GoalProjection {
-  monthlyProjection: number | null;
+  /** "unavailable" when the goal's sources are hidden or a price or rate is missing; every field is then null. */
+  availability: "available" | "unavailable";
+  monthlyProjection: MoneyDto | null;
   projectedCompletionDate: string | null;
-  status: GoalStatus;
+  status: GoalStatus | null;
   monthsRemaining: number | null;
 }
 
@@ -195,23 +201,32 @@ export interface GoalsSummaryResponse {
     behind: number;
     atRisk: number;
     completed: number;
-    totalSaved: number;
-    totalTarget: number;
+    totalSaved: MoneyDto;
+    totalTarget: MoneyDto;
     overallProgress: number;
+    /** Goals left out of the totals: no rate to the household currency (A-09). */
+    excludedCount?: number;
   };
   payDown: {
     total: number;
-    totalDebt: number;
-    totalPaid: number;
-    projectedInterest: number;
+    totalDebt: MoneyDto;
+    totalPaid: MoneyDto;
+    projectedInterest: MoneyDto;
     onTrack: number;
     behind: number;
+    excludedCount?: number;
+  };
+  investment?: {
+    total: number;
+    totalSaved: MoneyDto;
+    totalTarget: MoneyDto;
+    excludedCount?: number;
   };
   recentActivity: Array<{
     goalId: string;
     goalName: string;
     activityType: string;
-    amount: number;
+    amount: MoneyDto | null;
     createdAt: string | null;
   }>;
   upcomingMilestones: Array<{
@@ -330,6 +345,8 @@ export interface AddContributionInput {
   date?: string;
   notes?: string;
   transactionId?: string;
+  /** NEW-29: required to take the goal past its target. */
+  confirmOverfund?: boolean;
 }
 
 export interface AssignAccountInput {
@@ -344,12 +361,17 @@ export interface GoalTransferInput {
   toGoalId: string;
   amount: MoneyDto;
   reason?: string | null;
+  /** NEW-29 / goals QA F5: required to take the receiving goal past its target. */
+  confirmOverfund?: boolean;
 }
 
 export interface LinkTransactionInput {
   transactionId: string;
   linkType: TransactionLinkType;
+  /** Must be in the transaction's own currency. */
   amount?: MoneyDto;
+  /** Needed when an explicit contribution would take the goal past its target. */
+  confirmOverfund?: boolean;
 }
 
 export interface DebtStrategyInput {
@@ -552,7 +574,7 @@ export function useUploadGoalImage() {
     onError: (error: Error) => {
       toast({
         title: "Failed to upload image",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -656,7 +678,7 @@ export function useCreateGoal() {
     onError: (error: Error) => {
       toast({
         title: "Failed to create goal",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -687,7 +709,7 @@ export function useUpdateGoal() {
     onError: (error: Error) => {
       toast({
         title: "Failed to update goal",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -721,7 +743,7 @@ export function useBulkUpdateGoalPriority() {
     onError: (error: Error) => {
       toast({
         title: "Failed to update priorities",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -762,7 +784,7 @@ export function useAddContribution() {
     onError: (error: Error) => {
       toast({
         title: "Failed to add contribution",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -798,7 +820,7 @@ export function useAssignAccount(goalId: string) {
     onError: (error: Error) => {
       toast({
         title: "Failed to assign account",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -834,7 +856,7 @@ export function useUpdateAssignment(goalId: string, accountId: string) {
     onError: (error: Error) => {
       toast({
         title: "Failed to update assignment",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -868,7 +890,7 @@ export function useRemoveAssignment(goalId: string, accountId: string) {
     onError: (error: Error) => {
       toast({
         title: "Failed to remove assignment",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -914,7 +936,7 @@ export function useAssignAccountForGoal() {
     onError: (error: Error) => {
       toast({
         title: "Failed to assign account",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -962,7 +984,7 @@ export function useUpdateAssignmentForGoal() {
     onError: (error: Error) => {
       toast({
         title: "Failed to update assignment",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -1006,7 +1028,7 @@ export function useRemoveAssignmentForGoal() {
     onError: (error: Error) => {
       toast({
         title: "Failed to remove assignment",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -1054,7 +1076,7 @@ export function useTransferBetweenGoals() {
     onError: (error: Error) => {
       toast({
         title: "Failed to transfer",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -1098,7 +1120,7 @@ export function useLinkTransaction(goalId: string) {
     onError: (error: Error) => {
       toast({
         title: "Failed to link transaction",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -1138,7 +1160,7 @@ export function useUnlinkTransaction(goalId: string) {
     onError: (error: Error) => {
       toast({
         title: "Failed to unlink transaction",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -1186,7 +1208,7 @@ export function useUnlinkTransactionFromGoal() {
     onError: (error: Error) => {
       toast({
         title: "Failed to unlink transaction",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -1215,7 +1237,7 @@ export function useCompleteGoal() {
     onError: (error: Error) => {
       toast({
         title: "Failed to complete goal",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -1245,7 +1267,7 @@ export function useArchiveGoal() {
     onError: (error: Error) => {
       toast({
         title: "Operation failed",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -1269,7 +1291,7 @@ export function useDeleteGoal() {
     onError: (error: Error) => {
       toast({
         title: "Failed to delete goal",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },

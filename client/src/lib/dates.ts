@@ -27,6 +27,7 @@ import {
   differenceInDays,
   addDays,
 } from "date-fns";
+import { calendarTodayAsLocalDate } from "@/lib/calendarZone";
 
 // ============================================
 // PARSING
@@ -164,7 +165,8 @@ export type DateRangeName =
  * Get predefined date range
  */
 export function getDateRange(range: DateRangeName): DateRange {
-  const now = new Date();
+  // NEW-15: ranges count from today in the calendar zone.
+  const now = calendarTodayAsLocalDate();
 
   switch (range) {
     case "today":

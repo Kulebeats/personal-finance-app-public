@@ -4,9 +4,9 @@
  * Displays a 12-month budget forecast grid with editable cells.
  */
 
-import { cn, parseMoney } from "@/lib/utils";
-import { useFormatters } from "@/contexts/SettingsContext";
+import { cn } from "@/lib/utils";
 import type { BudgetForecastData } from "@/hooks/useBudgets";
+import { formatPreviewMoney } from "../previewContract";
 
 type ForecastBudget = BudgetForecastData["budgets"][number];
 type ForecastPeriod = ForecastBudget["periods"][number];
@@ -30,8 +30,6 @@ export function BudgetForecastTable({
   showUnbudgeted,
   onToggleShowUnbudgeted,
 }: BudgetForecastTableProps) {
-  const { formatCurrency } = useFormatters();
-
   if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-[240px] bg-card border border-border rounded-lg">
@@ -51,7 +49,7 @@ export function BudgetForecastTable({
   }
 
   const isBudgetUnbudgeted = (budget: ForecastBudget) =>
-    budget.periods.every((period) => parseMoney(period.amount) === 0);
+    budget.periods.every((period) => period.amount === null);
 
   const unbudgetedCount = forecast.budgets.filter(isBudgetUnbudgeted).length;
   const visibleBudgets = showUnbudgeted
@@ -111,7 +109,6 @@ export function BudgetForecastTable({
                   period.year < currentYear ||
                   (period.year === currentYear && period.month < currentMonth);
                 const isEditable = Boolean(onEdit) && !isPast;
-                const amount = parseMoney(period.amount);
 
                 return (
                   <button
@@ -130,7 +127,7 @@ export function BudgetForecastTable({
                         : "text-muted-foreground"
                     )}
                   >
-                    {formatCurrency(amount)}
+                    {period.amount === null ? "Unbudgeted" : formatPreviewMoney(period.amount)}
                   </button>
                 );
               })}

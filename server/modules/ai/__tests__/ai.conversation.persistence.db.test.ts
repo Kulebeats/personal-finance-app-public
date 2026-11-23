@@ -15,7 +15,8 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { randomUUID } from "crypto";
 import { sql, eq } from "drizzle-orm";
 import { db } from "../../../db";
-import { aiConversations, users, households } from "@shared/schema";
+import { aiConversations, householdMembers, users, households } from "@shared/schema";
+import { CURRENT_AI_CONSENT_VERSION } from "../ai.consent-policy";
 import { aiConversationRepository } from "../ai.conversation.repository";
 import {
   createTestUser,
@@ -68,6 +69,8 @@ describe("AI conversation persistence (SCP-338)", () => {
     for (const h of [ha, hb]) {
       await db.insert(households).values({
         id: h.id, name: h.name, currency: h.currency,
+        // The exchange fence refuses a household without AI consent.
+        aiConsentGiven: true, aiConsentVersion: CURRENT_AI_CONSENT_VERSION, aiConsentDate: new Date(),
       });
     }
     for (const u of [ua, ub]) {
@@ -78,6 +81,11 @@ describe("AI conversation persistence (SCP-338)", () => {
         failedLoginAttempts: u.failedLoginAttempts, lockedUntil: u.lockedUntil,
       });
     }
+    // A chat exchange is written only for a current member (Astra #255 r3 fence).
+    await db.insert(householdMembers).values([
+      { householdId: ha.id, userId: ua.id, role: "owner" },
+      { householdId: hb.id, userId: ub.id, role: "owner" },
+    ]);
   });
 
   afterAll(async () => {
@@ -85,6 +93,8 @@ describe("AI conversation persistence (SCP-338)", () => {
       // Conversations cascade-delete their messages; remove this test's rows.
       await db.delete(aiConversations).where(eq(aiConversations.householdId, hhA));
       await db.delete(aiConversations).where(eq(aiConversations.householdId, hhB));
+      await db.delete(householdMembers).where(eq(householdMembers.householdId, hhA));
+      await db.delete(householdMembers).where(eq(householdMembers.householdId, hhB));
       await db.delete(users).where(eq(users.id, userA));
       await db.delete(users).where(eq(users.id, userB));
       await db.delete(households).where(eq(households.id, hhA));

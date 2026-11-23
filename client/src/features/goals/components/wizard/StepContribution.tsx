@@ -1,3 +1,4 @@
+import { ProtectedImage } from "@/components/session/ProtectedImage";
 import { useAccounts } from "@/hooks/useAccounts";
 import { useFormatters } from "@/contexts/SettingsContext";
 import { Card } from "@/components/ui/card";
@@ -144,7 +145,7 @@ export function StepContribution({
               <div className="flex items-center gap-3">
                 <div className="w-12 h-12 rounded-lg bg-muted overflow-hidden">
                   {goal.imageUrl ? (
-                    <img
+                    <ProtectedImage
                       src={goal.imageUrl}
                       alt=""
                       className="w-full h-full object-cover"

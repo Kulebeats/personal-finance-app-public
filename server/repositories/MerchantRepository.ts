@@ -15,6 +15,10 @@ export type InsertMerchantAlias = typeof merchantAliases.$inferInsert;
  * Provides typed query builders for merchant operations.
  * Uses parameterized queries with ILIKE for safe searching.
  * Prevents SQL injection through proper query parameterization.
+ *
+ * It creates no merchants and adds no aliases: every name or alias write goes
+ * through modules/merchants/merchants.name-guard, which serialises the
+ * household's shared name/alias namespace.
  */
 export class MerchantRepository {
   /**
@@ -109,35 +113,6 @@ export class MerchantRepository {
   }
 
   /**
-   * Create a new merchant
-   */
-  async create(data: InsertMerchant): Promise<Merchant> {
-    const result = await db
-      .insert(merchants)
-      .values({
-        ...data,
-        transactionCount: data.transactionCount ?? 0,
-      })
-      .returning();
-    return result[0];
-  }
-
-  /**
-   * Update an existing merchant
-   */
-  async update(
-    id: string,
-    data: Partial<Merchant>
-  ): Promise<Merchant | undefined> {
-    const result = await db
-      .update(merchants)
-      .set({ ...data, updatedAt: new Date() })
-      .where(eq(merchants.id, id))
-      .returning();
-    return result[0];
-  }
-
-  /**
    * Delete a merchant
    */
   async delete(id: string): Promise<void> {
@@ -217,26 +192,11 @@ export class MerchantRepository {
   /**
    * Get merchant aliases
    */
-  async getAliases(merchantId: string): Promise<MerchantAlias[]> {
-    return await db
+  async getAliases(merchantId: string, tx?: TransactionType): Promise<MerchantAlias[]> {
+    return await (tx ?? db)
       .select()
       .from(merchantAliases)
       .where(eq(merchantAliases.merchantId, merchantId));
-  }
-
-  /**
-   * Add an alias to a merchant
-   */
-  async addAlias(
-    merchantId: string,
-    aliasName: string,
-    tx?: TransactionType
-  ): Promise<MerchantAlias> {
-    const result = await (tx ?? db)
-      .insert(merchantAliases)
-      .values({ merchantId, aliasName })
-      .returning();
-    return result[0];
   }
 
   /**

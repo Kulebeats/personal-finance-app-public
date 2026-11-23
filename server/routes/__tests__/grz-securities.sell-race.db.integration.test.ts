@@ -47,7 +47,9 @@ import type { Express } from "express";
 import { randomUUID } from "crypto";
 import { eq, inArray, sql } from "drizzle-orm";
 
-import { db } from "../../db";
+import { db, pool } from "../../db";
+import { grzCouponPaymentKey } from "../../services/grz/couponPaymentKey";
+import { grzBondSaleKey } from "../../services/grz/bondSale";
 import {
   grzBonds,
   grzBondPayments,
@@ -146,31 +148,28 @@ describe("GRZ concurrency — real HTTP double-write races", () => {
 
   afterAll(async () => {
     try {
-      await db.delete(auditLogs).where(eq(auditLogs.householdId, householdId));
-      const bonds = await db
-        .select({ id: grzBonds.id })
-        .from(grzBonds)
-        .where(eq(grzBonds.householdId, householdId));
-      if (bonds.length > 0) {
-        await db.delete(grzBondPayments).where(
-          inArray(
-            grzBondPayments.bondId,
-            bonds.map((b) => b.id),
-          ),
-        );
-      }
-      await db.delete(grzBonds).where(eq(grzBonds.householdId, householdId));
-      await db
-        .delete(investmentTransactions)
-        .where(eq(investmentTransactions.householdId, householdId));
-      await db
-        .delete(transactions)
-        .where(eq(transactions.householdId, householdId));
-      await db.delete(accounts).where(eq(accounts.householdId, householdId));
-      await db
-        .delete(householdMembers)
-        .where(eq(householdMembers.householdId, householdId));
-      await db.delete(households).where(eq(households.id, householdId));
+      // A settled sale's bond and cash can only be deleted with their household,
+      // in one transaction, as account erasure does (migration 0039).
+      await db.transaction(async (tx) => {
+        await tx.delete(auditLogs).where(eq(auditLogs.householdId, householdId));
+        const bonds = tx
+          .select({ id: grzBonds.id })
+          .from(grzBonds)
+          .where(eq(grzBonds.householdId, householdId));
+        await tx.delete(grzBondPayments).where(inArray(grzBondPayments.bondId, bonds));
+        await tx.delete(grzBonds).where(eq(grzBonds.householdId, householdId));
+        await tx
+          .delete(investmentTransactions)
+          .where(eq(investmentTransactions.householdId, householdId));
+        await tx
+          .delete(transactions)
+          .where(eq(transactions.householdId, householdId));
+        await tx.delete(accounts).where(eq(accounts.householdId, householdId));
+        await tx
+          .delete(householdMembers)
+          .where(eq(householdMembers.householdId, householdId));
+        await tx.delete(households).where(eq(households.id, householdId));
+      });
       await db.delete(users).where(eq(users.email, `grz-race-${householdId}`));
     } catch (error) {
       // eslint-disable-next-line no-console
@@ -196,6 +195,27 @@ describe("GRZ concurrency — real HTTP double-write races", () => {
       .returning();
     return bond;
   }
+
+  it.each([
+    ["active", "2025-12-31", "2029-01-01", 400],
+    ["active", "2026-02-30", "2029-01-01", 400],
+    ["active", "2099-01-01", "2100-01-01", 400],
+    ["active", "2026-06-02", "2026-06-01", 400],
+    ["matured", "2026-06-01", "2029-01-01", 409],
+    ["rolled_over", "2026-06-01", "2029-01-01", 409],
+  ] as const)("rejects a %s bond sale dated %s without recording disposal", async (status, soldDate, maturityDate, expected) => {
+    const bond = await seedActiveBond();
+    await db.update(grzBonds).set({ status, maturityDate }).where(eq(grzBonds.id, bond.id));
+    const result = await authRequest(request(app).put(`/api/grz/bonds/${bond.id}/sell`))
+      .send({ soldPrice: "9500.00", soldDate, accountId });
+    expect(result.status).toBe(expected);
+    const [stored] = await db.select().from(grzBonds).where(eq(grzBonds.id, bond.id));
+    expect([stored.status, stored.soldDate, stored.soldPrice]).toEqual([status, null, null]);
+    const sales = await db.select().from(investmentTransactions)
+      .where(eq(investmentTransactions.notes, `GRZ Bond Sale: ${bond.bondName}`));
+    expect(sales).toHaveLength(0);
+    expect(await db.select().from(auditLogs).where(eq(auditLogs.entityId, bond.id))).toHaveLength(0);
+  });
 
   it("books sale proceeds exactly once when two sells race", async () => {
     const bond = await seedActiveBond();
@@ -237,6 +257,9 @@ describe("GRZ concurrency — real HTTP double-write races", () => {
       .where(eq(grzBonds.id, bond.id));
     expect(finalBond.status).toBe("sold");
     expect(finalBond.soldPrice).toBe("9500.00");
+    // The sale cash is posted once too, and it is the row the holding points at.
+    const saleCash = await db.select().from(transactions).where(eq(transactions.idempotencyKey, grzBondSaleKey(bond.id)));
+    expect(saleCash.map(row => [row.id, row.type, row.amount])).toEqual([[finalBond.saleCashTransactionId, "asset_settlement", "9500.00"]]);
 
     await db
       .delete(investmentTransactions)
@@ -276,11 +299,12 @@ describe("GRZ concurrency — real HTTP double-write races", () => {
     expect(loser.body.error.message).toBe("Payment is already marked as paid");
 
     // THE ASSERTION THAT MATTERS: the net coupon is booked to the ledger ONCE.
-    // On the old code this is 2 rows of 531.25 — phantom income.
+    // On the old code this is 2 rows of 531.25 — phantom income. (Scoped to
+    // the coupon's key: an earlier sale in this file posts its own cash.)
     const incomeRows = await db
       .select()
       .from(transactions)
-      .where(eq(transactions.householdId, householdId));
+      .where(eq(transactions.idempotencyKey, grzCouponPaymentKey(payment.id)));
 
     expect(incomeRows).toHaveLength(1);
     expect(incomeRows[0].amount).toBe("531.25");
@@ -301,5 +325,207 @@ describe("GRZ concurrency — real HTTP double-write races", () => {
       .from(auditLogs)
       .where(eq(auditLogs.entityId, payment.id));
     expect(audits).toHaveLength(1);
+  });
+
+  it.each(["sold", "matured", "rolled_over"] as const)("rejects outstanding coupon and principal on a %s bond", async status => {
+    const bond = await seedActiveBond();
+    const payments = await db.insert(grzBondPayments).values(["coupon", "principal"].map(paymentType => ({
+      bondId: bond.id, paymentType, paymentDate: "2026-07-01",
+      grossAmount: "100.00", withholdingTax: "0.00", netAmount: "100.00", status: "scheduled" as const,
+    }))).returning();
+    if (status === "sold") {
+      await authRequest(request(app).put(`/api/grz/bonds/${bond.id}/sell`))
+        .send({ soldDate: "2026-06-01", soldPrice: "9500.00", accountId }).expect(200);
+    } else {
+      await db.update(grzBonds).set({ status }).where(eq(grzBonds.id, bond.id));
+    }
+    const balance = () => db.select({ balance: accounts.balance }).from(accounts).where(eq(accounts.id, accountId));
+    const before = await balance();
+    for (const payment of payments) {
+      await authRequest(request(app).post(`/api/grz/payments/${payment.id}/pay`))
+        .send({ date: "2026-07-01", accountId }).expect(409);
+      expect(await db.select().from(transactions).where(eq(transactions.idempotencyKey, grzCouponPaymentKey(payment.id)))).toHaveLength(0);
+      expect(await db.select().from(auditLogs).where(eq(auditLogs.entityId, payment.id))).toHaveLength(0);
+      const [stored] = await db.select().from(grzBondPayments).where(eq(grzBondPayments.id, payment.id));
+      expect(stored.incomeTransactionId).toBeNull();
+      expect(stored.actualPaymentDate).toBeNull();
+    }
+    expect(await balance()).toEqual(before);
+  });
+
+  it.each([
+    ["impossible date", "2026-09-31", "100", "15", "85"],
+    ["timestamp", "2026-08-02T23:30:00-02:00", "100", "15", "85"],
+    ["explicit null", null, "100", "15", "85"],
+    ["before due date", "2026-06-30", "100", "15", "85"],
+    ["future receipt", "2099-10-01", "100", "15", "85"],
+    ["zero net", "2026-07-01", "100", "100", "0"],
+    ["negative tax", "2026-07-01", "100", "-1", "101"],
+    ["unreconciled net", "2026-07-01", "100", "15", "87"],
+    ["unknown withholding", "2026-07-01", "100", null, "85"],
+    ["nonfinite amount", "2026-07-01", "NaN", "15", "85"],
+  ] as const)("rejects %s before posting coupon cash", async (_case, date, grossAmount, withholdingTax, netAmount) => {
+    const bond = await seedActiveBond();
+    const [payment] = await db.insert(grzBondPayments).values({
+      bondId: bond.id, paymentDate: "2026-07-01", paymentType: "coupon", status: "scheduled",
+      grossAmount, withholdingTax, netAmount,
+    }).returning();
+    const balance = async () => (await db.select({ value: accounts.balance }).from(accounts).where(eq(accounts.id, accountId)))[0].value;
+    const before = await balance();
+    await authRequest(request(app).post(`/api/grz/payments/${payment.id}/pay`)).send({ accountId, date }).expect(400);
+    expect(await balance()).toBe(before);
+    const [stored] = await db.select().from(grzBondPayments).where(eq(grzBondPayments.id, payment.id));
+    expect([stored.status, stored.incomeTransactionId, stored.actualPaymentDate]).toEqual(["scheduled", null, null]);
+    expect(await db.select().from(transactions).where(eq(transactions.idempotencyKey, grzCouponPaymentKey(payment.id)))).toHaveLength(0);
+    expect(await db.select().from(auditLogs).where(eq(auditLogs.entityId, payment.id))).toHaveLength(0);
+  });
+
+  it("uses the locked coupon breakdown in both the first posting and its audit", async () => {
+    const bond = await seedActiveBond();
+    const [payment] = await db.insert(grzBondPayments).values({ bondId: bond.id, paymentType: "coupon", status: "scheduled",
+      paymentDate: "2026-07-01", grossAmount: "100", withholdingTax: "15", netAmount: "85" }).returning();
+    const writer = await pool.connect();
+    let attempt: Promise<number> | undefined;
+    try {
+      await writer.query("BEGIN");
+      const { rows: [backend] } = await writer.query("SELECT pg_backend_pid() AS pid");
+      await writer.query("UPDATE grz_bond_payments SET gross_amount=110, withholding_tax=25 WHERE id=$1", [payment.id]);
+      attempt = authRequest(request(app).post(`/api/grz/payments/${payment.id}/pay`)).send({ accountId, date: "2026-07-01" })
+        .then(result => result.status);
+      const deadline = Date.now() + 5000;
+      let blocked = false;
+      while (Date.now() < deadline && !blocked) {
+        const { rows: [lock] } = await pool.query("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) AS waiting", [backend.pid]);
+        blocked = lock.waiting;
+        if (!blocked) await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      await writer.query("COMMIT");
+      expect(blocked).toBe(true);
+      expect(await attempt).toBe(200);
+      const [posting] = await db.select().from(transactions).where(eq(transactions.idempotencyKey, grzCouponPaymentKey(payment.id)));
+      expect(posting.notes).toContain("Gross: 110.00, WHT: 25.00");
+      const [audit] = await db.select().from(auditLogs).where(eq(auditLogs.entityId, payment.id));
+      expect(audit.details).toMatchObject({ grossAmount: "110.00", withholdingTax: "25.00", netAmount: "85.00" });
+    } finally {
+      try { await writer.query("ROLLBACK"); } finally { writer.release(); }
+      if (attempt) await Promise.allSettled([attempt]);
+    }
+  });
+
+  it.each(["changed breakdown", "legacy net only", "missing evidence", "duplicate evidence"] as const)(
+    "recovers a stranded posting only with its provable coupon terms (%s)", async scenario => {
+    const bond = await seedActiveBond();
+    const [payment] = await db.insert(grzBondPayments).values({ bondId: bond.id, paymentType: "coupon", status: "scheduled",
+      paymentDate: "2026-07-01", grossAmount: "100", withholdingTax: "15", netAmount: "85" }).returning();
+    const pay = () => authRequest(request(app).post(`/api/grz/payments/${payment.id}/pay`)).send({ accountId });
+    const hook = "r13_coupon_" + payment.id.replace(/-/g, "");
+    await pool.query(`CREATE FUNCTION ${hook}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic finalization failure'; END $$`);
+    try {
+      await pool.query(`CREATE TRIGGER ${hook} BEFORE UPDATE ON grz_bond_payments FOR EACH ROW WHEN (NEW.id='${payment.id}'::uuid) EXECUTE FUNCTION ${hook}()`);
+      await pay().expect(500);
+    } finally {
+      await pool.query(`DROP FUNCTION ${hook}() CASCADE`);
+    }
+    const key = grzCouponPaymentKey(payment.id);
+    const [posting] = await db.select().from(transactions).where(eq(transactions.idempotencyKey, key));
+    const before = await db.select({ balance: accounts.balance }).from(accounts).where(eq(accounts.id, accountId));
+    const createAudit = "entity_type='transaction' AND action='CREATE' AND entity_id=$1 AND household_id=$2";
+    if (scenario === "duplicate evidence") {
+      await pool.query(`INSERT INTO audit_logs(household_id,user_id,entity_type,entity_id,action,details)
+        SELECT household_id,user_id,entity_type,entity_id,action,details FROM audit_logs WHERE ${createAudit}`, [posting.id, householdId]);
+    } else if (scenario === "missing evidence") {
+      await pool.query(`DELETE FROM audit_logs WHERE ${createAudit}`, [posting.id, householdId]);
+    } else {
+      await db.update(grzBondPayments).set({ grossAmount: "110", withholdingTax: "25" }).where(eq(grzBondPayments.id, payment.id));
+      if (scenario === "legacy net only") {
+        await pool.query(`UPDATE audit_logs SET details=details-'grzCoupon' WHERE ${createAudit}`, [posting.id, householdId]);
+      }
+    }
+    if (scenario === "legacy net only") {
+      await pay().expect(200);
+      const [audit] = await db.select().from(auditLogs).where(eq(auditLogs.entityId, payment.id));
+      expect(audit.details).toMatchObject({ netAmount: "85.00", breakdownEvidence: "legacy_net_only" });
+      expect(audit.details).not.toHaveProperty("grossAmount");
+      expect(audit.details).not.toHaveProperty("withholdingTax");
+    } else {
+      await pay().expect(409);
+      expect(await db.select().from(auditLogs).where(eq(auditLogs.entityId, payment.id))).toHaveLength(0);
+      if (scenario === "changed breakdown") {
+        await db.update(grzBondPayments).set({ grossAmount: "100", withholdingTax: "15" }).where(eq(grzBondPayments.id, payment.id));
+        await pay().expect(200);
+      }
+    }
+    expect(await db.select({ balance: accounts.balance }).from(accounts).where(eq(accounts.id, accountId))).toEqual(before);
+    expect((await db.select().from(transactions).where(eq(transactions.idempotencyKey, key))).map(row => row.id)).toEqual([posting.id]);
+  });
+
+  it.each(["grant", "source account"] as const)("waits for a concurrent %s withdrawal before recording a sale", async change => {
+    const bond = await seedActiveBond();
+    const editor = await pool.connect();
+    let sale: Promise<number> | undefined;
+    try {
+      await editor.query("BEGIN");
+      const { rows: [session] } = await editor.query("SELECT pg_backend_pid() AS pid");
+      if (change === "grant") {
+        await editor.query("UPDATE household_members SET role='professional' WHERE household_id=$1", [householdId]);
+      } else {
+        await editor.query("UPDATE accounts SET deleted_at=now() WHERE id=$1", [accountId]);
+      }
+      sale = authRequest(request(app).put(`/api/grz/bonds/${bond.id}/sell`))
+        .send({ soldPrice: "9500.00", soldDate: "2026-06-01", accountId }).then(result => result.status);
+      const until = Date.now() + 5_000;
+      let waiting = false;
+      while (Date.now() < until && !waiting) {
+        const { rows: [lock] } = await pool.query("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) AS waiting", [session.pid]);
+        waiting = lock.waiting;
+        if (!waiting) await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      await editor.query("COMMIT");
+      expect(waiting).toBe(true);
+      expect(await sale).toBe(change === "grant" ? 403 : 404);
+      const [stored] = await db.select().from(grzBonds).where(eq(grzBonds.id, bond.id));
+      expect(stored.status).toBe("active");
+      expect(await db.select().from(investmentTransactions).where(eq(investmentTransactions.notes, `GRZ Bond Sale: ${bond.bondName}`))).toHaveLength(0);
+      expect(await db.select().from(auditLogs).where(eq(auditLogs.entityId, bond.id))).toHaveLength(0);
+    } finally {
+      try { await editor.query("ROLLBACK"); } finally { editor.release(); }
+      if (sale) await Promise.allSettled([sale]);
+      if (change === "grant") {
+        await db.update(householdMembers).set({ role: "admin" }).where(eq(householdMembers.householdId, householdId));
+      } else {
+        await db.update(accounts).set({ deletedAt: null }).where(eq(accounts.id, accountId));
+      }
+    }
+  });
+
+  it("rechecks a bond disposed while the authorized coupon request waits for the bond lock", async () => {
+    const bond = await seedActiveBond();
+    const [payment] = await db.insert(grzBondPayments).values({ bondId: bond.id, paymentType: "coupon",
+      paymentDate: "2026-07-01", grossAmount: "100", withholdingTax: "0", netAmount: "100", status: "scheduled" }).returning();
+    const seller = await pool.connect();
+    let attempt: Promise<number> | undefined;
+    try {
+      await seller.query("BEGIN");
+      const { rows: [session] } = await seller.query("SELECT pg_backend_pid() AS pid");
+      await seller.query("UPDATE grz_bonds SET status='sold',sold_date='2026-06-01' WHERE id=$1", [bond.id]);
+      attempt = authRequest(request(app).post(`/api/grz/payments/${payment.id}/pay`))
+        .send({ accountId, date: "2026-07-01" }).then(result => result.status);
+      const until = Date.now() + 5_000;
+      let blocked = false;
+      while (Date.now() < until && !blocked) {
+        const { rows: [lock] } = await pool.query("SELECT EXISTS (SELECT FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))) AS waiting", [session.pid]);
+        blocked = lock.waiting;
+        if (!blocked) await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      // Settlement holds the bond first and must still be able to lock its installment.
+      await seller.query("SELECT id FROM grz_bond_payments WHERE id=$1 FOR UPDATE NOWAIT", [payment.id]);
+      await seller.query("COMMIT");
+      expect(blocked).toBe(true);
+      expect(await attempt).toBe(409);
+      expect(await db.select().from(transactions).where(eq(transactions.idempotencyKey, grzCouponPaymentKey(payment.id)))).toHaveLength(0);
+    } finally {
+      try { await seller.query("ROLLBACK"); } finally { seller.release(); }
+      if (attempt) await Promise.allSettled([attempt]);
+    }
   });
 });

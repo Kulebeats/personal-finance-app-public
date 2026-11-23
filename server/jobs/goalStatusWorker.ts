@@ -5,6 +5,30 @@ import { logger } from "../utils/logger";
 import { Money } from "../core/money";
 import { buildGoalBalanceUpdate, calculatePercentComplete } from "../services/goalCalculations";
 import { goalActivityLogService } from "../services/GoalActivityLogService";
+import { HouseholdCalendarUnavailable, householdToday } from "../services/householdCalendarToday";
+
+/**
+ * Each household's calendar date for this run, read once per household (NEW-15).
+ * Null when the household's zone is unusable: its goals are left as saved
+ * rather than recomputed on another calendar.
+ */
+function householdDates() {
+  const dates = new Map<string, string | null>();
+  return async (householdId: string): Promise<string | null> => {
+    if (dates.has(householdId)) return dates.get(householdId) ?? null;
+    let today: string | null = null;
+    try {
+      today = await householdToday(db, householdId);
+    } catch (error) {
+      if (!(error instanceof HouseholdCalendarUnavailable)) throw error;
+      logger.error("Goal status recalculation skipped a household with an unusable time zone", {
+        job: "goal-status", householdId, error: error.message,
+      });
+    }
+    dates.set(householdId, today);
+    return today;
+  };
+}
 
 // Small threshold for detecting meaningful changes (half cent)
 const CHANGE_THRESHOLD = "0.005";
@@ -56,11 +80,15 @@ export async function runGoalStatusRecalculation() {
 
   let updatedCount = 0;
   let statusChanges = 0;
+  const todayFor = householdDates();
 
   for (const goal of activeGoals) {
+    // The household's calendar date, never the host's or UTC's (NEW-15).
+    const today = await todayFor(goal.householdId);
+    if (today === null) continue;
     // Keep Money throughout - buildGoalBalanceUpdate accepts Money directly (FIX: DATA-MONEY-CROSS-001)
     const currentBalanceMoney = Money.from(goal.currentAmount);
-    const update = buildGoalBalanceUpdate(goal, currentBalanceMoney);
+    const update = buildGoalBalanceUpdate(goal, currentBalanceMoney, today);
 
     if (!hasGoalUpdate(goal, update)) {
       continue;
@@ -102,6 +130,7 @@ export async function runGoalStatusRecalculation() {
   }
 
   logger.info("Goal status recalculation complete", {
+    job: "goal-status", outcome: "success",
     totalGoals: activeGoals.length,
     updatedCount,
     statusChanges,

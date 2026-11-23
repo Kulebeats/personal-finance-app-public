@@ -7,7 +7,6 @@
 import { Router } from "express";
 import { householdGuard } from "../../middleware/householdGuard";
 import { requireRole } from "../../middleware/validateEntity";
-import { generalLimiter } from "../../middleware/rateLimit";
 import { categoriesController, categoryGroupsController } from "./categories.controller";
 import { categoriesOperationsController } from "./categories.operations.controller";
 
@@ -15,7 +14,6 @@ const router = Router();
 router.use(householdGuard);
 
 // Apply rate limiting to all category routes
-router.use(generalLimiter);
 
 // Seed default categories (must be before parameterized routes)
 router.post("/seed", requireRole("admin"), categoriesOperationsController.seedDefaults);

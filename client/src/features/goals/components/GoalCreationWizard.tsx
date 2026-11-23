@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -38,15 +39,14 @@ import {
   DEFAULT_INVESTMENT,
   parseAmount,
   getMonthsRemaining,
-  canSubmitSaveUp,
-  canSubmitPayDown,
-  canSubmitInvestment,
   buildSaveUpPayload,
   buildInvestmentPayload,
   buildPayDownPayload,
   buildAssignmentPayload,
   calculateTotalAssigned,
 } from "./GoalCreationWizardData";
+import { GoalValidationSummary } from "./GoalValidationSummary";
+import { saveUpRequiredErrors, payDownRequiredErrors, investmentRequiredErrors } from "./goalRequiredFields";
 
 export function GoalCreationWizard({
   open,
@@ -67,6 +67,8 @@ export function GoalCreationWizard({
   const { data: availableFunds = [] } = useAvailableFunds();
 
   const [goalType, setGoalType] = useState<GoalType>(initialType ?? "save_up");
+  const [validationAttempt, setValidationAttempt] = useState(0);
+  useEffect(() => { setValidationAttempt(0); }, [open]);
   const [saveUpDraft, setSaveUpDraft] =
     useState<SaveUpGoalDraft>(DEFAULT_SAVE_UP);
   const [payDownDraft, setPayDownDraft] =
@@ -144,13 +146,12 @@ export function GoalCreationWizard({
   };
 
   const handleSubmit = async () => {
+    if (Object.keys(requiredErrors).length) { setValidationAttempt(value => value + 1); return; }
     const currency = defaultCurrency || "ZMW";
 
     if (goalType === "save_up") {
       if (saveUpStep === "details") {
-        if (canSubmitSaveUp(saveUpDraft)) {
-          setSaveUpStep("assignments");
-        }
+        setSaveUpStep("assignments");
         return;
       }
 
@@ -189,23 +190,26 @@ export function GoalCreationWizard({
     });
   };
 
-  const canSubmit =
+  const requiredErrors =
     goalType === "save_up"
-      ? canSubmitSaveUp(saveUpDraft)
+      ? saveUpRequiredErrors(saveUpDraft)
       : goalType === "pay_down"
-        ? canSubmitPayDown(payDownDraft)
-        : canSubmitInvestment(investmentDraft);
+        ? payDownRequiredErrors(payDownDraft)
+        : investmentRequiredErrors(investmentDraft);
+  const visibleErrors = validationAttempt ? requiredErrors : {};
 
   return (
     <Dialog open={open} onOpenChange={(value) => (!value ? onClose() : null)}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Create a goal</DialogTitle>
+          <DialogDescription>Choose a goal type and enter its details. Save Up goals can then be linked to accounts.</DialogDescription>
         </DialogHeader>
+        <GoalValidationSummary errors={requiredErrors} attempt={validationAttempt} />
 
         <Tabs
           value={goalType}
-          onValueChange={(val) => setGoalType(val as GoalType)}
+          onValueChange={(val) => { setGoalType(val as GoalType); setValidationAttempt(0); }}
         >
           <TabsList className="grid w-full grid-cols-3">
             <TabsTrigger value="save_up">Save Up</TabsTrigger>
@@ -214,7 +218,7 @@ export function GoalCreationWizard({
           </TabsList>
           <TabsContent value="save_up" className="mt-4">
             {saveUpStep === "details" ? (
-              <SaveUpGoalForm value={saveUpDraft} onChange={setSaveUpDraft} />
+              <SaveUpGoalForm value={saveUpDraft} onChange={setSaveUpDraft} errors={visibleErrors} />
             ) : (
               <GoalAssignmentStep
                 accounts={accounts}
@@ -236,6 +240,7 @@ export function GoalCreationWizard({
               onChange={setPayDownDraft}
               accounts={debtAccounts}
               accountsLoading={accountsLoading}
+              errors={visibleErrors}
             />
           </TabsContent>
           <TabsContent value="investment" className="mt-4">
@@ -243,6 +248,7 @@ export function GoalCreationWizard({
               value={investmentDraft}
               onChange={setInvestmentDraft}
               accounts={investmentAccounts}
+              errors={visibleErrors}
             />
           </TabsContent>
         </Tabs>
@@ -266,7 +272,7 @@ export function GoalCreationWizard({
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={createGoal.isPending || !canSubmit}
+            disabled={createGoal.isPending}
           >
             {createGoal.isPending
               ? "Creating..."

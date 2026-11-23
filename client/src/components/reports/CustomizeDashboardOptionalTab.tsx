@@ -15,11 +15,11 @@ import {
   OPTIONAL_WIDGET_METADATA,
   type WidgetMetadata,
 } from "./widgetConstants";
-import type { WidgetPreference } from "@shared/reports";
+import type { IdentifiedWidgetPreference } from "@shared/reports";
 import { CustomizeDashboardSortableItem } from "./CustomizeDashboardSortableItem";
 
 type CustomizeDashboardOptionalTabProps = {
-  orderedOptional: WidgetPreference[];
+  orderedOptional: IdentifiedWidgetPreference[];
   toggleOptional: (id: string, enabled: boolean) => void;
   handleDragEnd: (event: DragEndEvent) => void;
   sensors: SensorDescriptor<SensorOptions>[];

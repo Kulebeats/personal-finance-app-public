@@ -9,6 +9,7 @@ const redisMock = vi.hoisted(() => ({
 
 vi.mock("../../config/redis", () => ({
   redis: redisMock,
+  productionRedis: null,
 }));
 
 describe("AnalyticsCache", () => {

@@ -577,17 +577,26 @@ describe("Accounts REAL-DB Integration (R15)", () => {
         .expect(200);
       expect(getRes.body.data.balance).toBe("1250.00");
 
-      const [audit] = (await db
+      // NEW-32: the adjustment is audited by its ledger row's CREATE row,
+      // written in the same transaction as the row and the balance change
+      // (no longer an account UPDATE row written after commit).
+      const ledgerId = adjustRes.body.data.transactionId;
+      const audits = (await db
         .select()
         .from(auditLogs)
         .where(
           and(
-            eq(auditLogs.entityType, "account"),
-            eq(auditLogs.entityId, seedId),
-            eq(auditLogs.action, "UPDATE"),
+            eq(auditLogs.entityType, "transaction"),
+            eq(auditLogs.entityId, ledgerId),
+            eq(auditLogs.action, "CREATE"),
           ),
         )) as AuditRow[];
-      expect(audit).toBeDefined();
+      expect(audits).toHaveLength(1);
+      expect(audits[0].details).toMatchObject({
+        operation: "adjustBalance",
+        isIncrease: true,
+        newValue: { accountId: seedId, amount: "250.00", type: "balance_adjustment" },
+      });
 
       // A real transaction (expense) against the same account then reduces
       // the balance, and the Accounts read path reflects it exactly.

@@ -151,8 +151,10 @@ export class Money {
     return this._amount.isZero();
   }
 
+  // Strictly above zero. decimal.js isPositive() is true for +0, which made a
+  // zero amount "positive" (NEW-23); isPositiveOrZero() is the >= 0 test.
   isPositive(): boolean {
-    return this._amount.isPositive();
+    return this._amount.greaterThan(0);
   }
 
   isNegative(): boolean {
@@ -248,3 +250,11 @@ export const toMoneyDto = (
     currency: money.currency,
   };
 };
+
+/** A stored amount whose unit may be unknown; the DTO then says so rather than assuming ZMW. */
+export type AmountInUnitDto = { amount: string; currency: string | null };
+
+/** MoneyDto in the given unit, or the stored amount with an explicit unknown unit (FIN-05). */
+export function amountInUnit(amount: string | number, currency: string | null | undefined): AmountInUnitDto {
+  return currency ? toMoneyDto(amount, currency) : { amount: String(amount), currency: null };
+}

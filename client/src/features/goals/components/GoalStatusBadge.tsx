@@ -19,9 +19,11 @@ export function GoalStatusBadge({
   status,
   size = "sm",
 }: {
-  status: GoalStatus;
+  status: GoalStatus | null;
   size?: "sm" | "md" | "lg";
 }) {
+  // The server withholds the status with the progress it is derived from.
+  if (!status) return null;
   const sizeClass =
     size === "lg"
       ? "px-3 py-1 text-sm"

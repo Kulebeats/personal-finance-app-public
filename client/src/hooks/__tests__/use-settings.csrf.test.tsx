@@ -8,6 +8,7 @@
  */
 import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { personalPreferences } from "./personal-preferences-fixture";
 import { renderHook, act } from "@testing-library/react";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { clearCsrfToken } from "@/lib/api";
@@ -21,7 +22,6 @@ import {
   useUpdateHousehold,
   useUpdateMemberRole,
   useRemoveMember,
-  useAddMember,
   useCreateCategory,
   useUpdateCategory,
   useDeleteCategory,
@@ -51,6 +51,11 @@ import {
   useUpdateUserPreferences,
   useUpdateAIConsent,
 } from "../use-settings";
+import {
+  useInviteMember,
+  useTransferOwnership,
+  useLeaveHousehold,
+} from "../use-household-membership";
 
 // Serve the CSRF token fetch transparently so it never consumes per-test
 // mocks; everything else is forwarded to mockFetch.
@@ -126,7 +131,7 @@ const CASES: MutationCase[] = [
   {
     name: "useUpdateNotificationPreferences",
     useHook: useUpdateNotificationPreferences as () => MutationLike,
-    args: { preferences: [] },
+    args: { preferences: [{ notificationType: "large_transaction", emailEnabled: true }] },
     url: "/api/settings/notifications",
     method: "PUT",
   },
@@ -160,10 +165,24 @@ const CASES: MutationCase[] = [
     method: "DELETE",
   },
   {
-    name: "useAddMember",
-    useHook: useAddMember as () => MutationLike,
-    args: { emailOrUsername: "a@b.c", role: "member" },
-    url: "/api/household/members",
+    name: "useInviteMember",
+    useHook: useInviteMember as () => MutationLike,
+    args: { email: "a@b.c", role: "member" },
+    url: "/api/household/invite",
+    method: "POST",
+  },
+  {
+    name: "useTransferOwnership",
+    useHook: useTransferOwnership as () => MutationLike,
+    args: "u1",
+    url: "/api/household/transfer-ownership",
+    method: "POST",
+  },
+  {
+    name: "useLeaveHousehold",
+    useHook: useLeaveHousehold as () => MutationLike,
+    args: undefined,
+    url: "/api/household/leave",
     method: "POST",
   },
   // Categories
@@ -333,8 +352,8 @@ const CASES: MutationCase[] = [
   {
     name: "useTestRule",
     useHook: useTestRule as () => MutationLike,
-    args: "r1",
-    url: "/api/rules/r1/test",
+    args: { conditions: [], conditionLogic: "all" },
+    url: "/api/rules/preview",
     method: "POST",
   },
   {
@@ -356,13 +375,13 @@ const CASES: MutationCase[] = [
     name: "useUpdateUserPreferences",
     useHook: useUpdateUserPreferences as () => MutationLike,
     args: { autoFillTodayDate: true },
-    url: "/api/settings/preferences",
+    url: "/api/settings/user-preferences",
     method: "PUT",
   },
   {
     name: "useUpdateAIConsent",
     useHook: useUpdateAIConsent as () => MutationLike,
-    args: true,
+    args: { consentGiven: true, consentVersion: "v2.0" },
     url: "/api/ai/consent",
     method: "POST",
   },
@@ -387,9 +406,25 @@ describe("use-settings mutations attach x-csrf-token", () => {
     vi.clearAllMocks();
   });
 
-  it.each(CASES)("$name → $method $url", async ({ useHook, args, url, method, formData }) => {
+  it.each(CASES)("$name → $method $url", async ({ name, useHook, args, url, method, formData }) => {
+    const display = name === "useUpdateDisplaySettings" ? { settings: {
+      userId: "test-user", theme: "dark", currency: "ZMW", locale: "en-ZM",
+      timezone: "Africa/Lusaka", numberFormat: "US", dateFormat: "yyyy-MM-dd",
+      currencyPosition: "before", firstDayOfWeek: "Monday", viewMode: "comfortable",
+      dashboardWidgets: null, createdAt: null, updatedAt: null,
+    } } : null;
     mockFetch.mockResolvedValue(
-      mockFetchResponse({ success: true, data: {} }),
+      mockFetchResponse({ success: true, data: display ?? (name === "useUpdateNotificationPreferences" ? { preferences: [{
+        id: "notification-preference-1",
+        userId: "u1",
+        notificationType: "large_transaction",
+        inAppEnabled: true,
+        emailEnabled: true,
+        pushEnabled: false,
+        thresholdAmount: null,
+        createdAt: "2026-10-31T00:00:00.000Z",
+        updatedAt: "2026-10-31T00:00:00.000Z",
+      }] } : name === "useUpdateUserPreferences" ? { preferences: personalPreferences() } : {}) }),
     );
 
     const { wrapper } = createWrapper();

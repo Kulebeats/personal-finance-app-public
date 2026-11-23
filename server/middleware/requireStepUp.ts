@@ -30,6 +30,8 @@ export type StepUpLevel = keyof typeof STEP_UP_TTL;
 declare module "express-session" {
   interface SessionData {
     stepUpVerifiedAt?: number;
+    stepUpSessionId?: string;
+    stepUpUserId?: string;
   }
 }
 
@@ -57,7 +59,8 @@ export function requireStepUp(level: StepUpLevel = "SETTINGS") {
     const now = Date.now();
 
     // Check if step-up was verified within TTL
-    if (!stepUpAt || now - stepUpAt > ttlMs) {
+    if (!stepUpAt || now - stepUpAt > ttlMs || now < stepUpAt ||
+        req.session.stepUpSessionId !== req.sessionID || req.session.stepUpUserId !== req.session.userId) {
       logger.info("Step-up MFA required", {
         requestId: req.requestId,
         userId: req.session.userId?.substring(0, 8) + "...",
@@ -71,7 +74,8 @@ export function requireStepUp(level: StepUpLevel = "SETTINGS") {
         success: false,
         error: {
           code: "STEP_UP_REQUIRED",
-          message: "This action requires recent MFA verification",
+          // Users without MFA step up with their password, so never name MFA here.
+          message: "Please confirm it's you to continue",
         },
         requiresStepUp: true,
         level,
@@ -89,6 +93,8 @@ export function requireStepUp(level: StepUpLevel = "SETTINGS") {
  */
 export function setStepUpVerified(req: Request): void {
   req.session.stepUpVerifiedAt = Date.now();
+  req.session.stepUpSessionId = req.sessionID;
+  req.session.stepUpUserId = req.session.userId;
   logger.info("Step-up MFA verified", {
     requestId: req.requestId,
     userId: req.session.userId?.substring(0, 8) + "...",
@@ -100,6 +106,8 @@ export function setStepUpVerified(req: Request): void {
  */
 export function clearStepUpVerification(req: Request): void {
   delete req.session.stepUpVerifiedAt;
+  delete req.session.stepUpSessionId;
+  delete req.session.stepUpUserId;
 }
 
 /**
@@ -113,6 +121,6 @@ export function isStepUpValid(
   level: StepUpLevel = "SETTINGS"
 ): boolean {
   const stepUpAt = req.session.stepUpVerifiedAt;
-  if (!stepUpAt) return false;
-  return Date.now() - stepUpAt <= STEP_UP_TTL[level];
+  if (!stepUpAt || req.session.stepUpSessionId !== req.sessionID || req.session.stepUpUserId !== req.session.userId) return false;
+  return Date.now() >= stepUpAt && Date.now() - stepUpAt <= STEP_UP_TTL[level];
 }

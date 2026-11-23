@@ -30,6 +30,7 @@ import {
   categories,
   merchants,
   accounts,
+  transactionSplits,
 } from "@shared/schema";
 import { BaseReportRepository } from "./BaseReportRepository";
 import {
@@ -41,7 +42,10 @@ import { toMoneyDto } from "../../core/money";
 import type { ReportsTransactionsQuery } from "../../modules/reports/reports.validation";
 import type { QueryWithUser } from "./types";
 import { moneyFromValue } from "./moneyUtils";
+import { allocationAmount, allocationCategoryId, allocationKey, splitAllocationJoin } from "./splitAllocation";
 import Decimal from "decimal.js";
+import { couponCashDescriptionFields } from "../../services/grz/couponCashDescription";
+import type { TransactionType as DatabaseTransaction } from "../../utils/withTransaction";
 
 // ISSUE-RPT-005 FIX: Define proper type for transaction type filter
 type TransactionType = "income" | "expense" | "transfer";
@@ -56,8 +60,10 @@ export class TransactionReportRepository extends BaseReportRepository {
    */
   async getTransactions(
     householdId: string,
-    query: QueryWithUser<ReportsTransactionsQuery>
+    query: QueryWithUser<ReportsTransactionsQuery>, tx?: DatabaseTransaction
   ): Promise<ReportsTransactionsResponse> {
+    const cashDescription = couponCashDescriptionFields();
+    const cashMerchantName = sql<string | null>`case when ${cashDescription.merchantId} is null then null else ${merchants.name} end`;
     const {
       from,
       to,
@@ -78,7 +84,7 @@ export class TransactionReportRepository extends BaseReportRepository {
     } = query;
 
     const cursorData = parseCursor(cursor);
-    const baseCurrency = await this.getHouseholdCurrency(householdId);
+    const baseCurrency = await this.getHouseholdCurrency(householdId, tx);
 
     // SCP-321: fail closed before converting — amountBase (returned per row
     // and used for amount-sorted cursors) silently converts at 1 when a rate
@@ -89,7 +95,7 @@ export class TransactionReportRepository extends BaseReportRepository {
       includePending,
       scope,
       userId,
-    });
+    }, tx);
     const isAmountSort = sort.startsWith("amount");
     const isAsc = sort.endsWith("asc");
     // REPORTS-MONEY-001 FIX: Use Decimal for precise cursor amount comparison
@@ -105,16 +111,13 @@ export class TransactionReportRepository extends BaseReportRepository {
       eq(transactions.isExcludedFromReports, false),
       gte(transactions.date, from),
       lte(transactions.date, to),
-      sql`NOT EXISTS (
-        SELECT 1 FROM transaction_splits
-        WHERE transaction_splits.transaction_id = ${transactions.id}
-      )`,
+      // NEW-14: a split transaction is listed once per split (splitAllocation.ts).
     ];
 
-    if (categoryId) conditions.push(eq(transactions.categoryId, categoryId));
+    if (categoryId) conditions.push(sql`${allocationCategoryId} = ${categoryId}::uuid`);
     if (categoryGroupId)
       conditions.push(eq(categories.groupId, categoryGroupId));
-    if (merchantId) conditions.push(eq(transactions.merchantId, merchantId));
+    if (merchantId) conditions.push(eq(cashDescription.merchantId, merchantId));
     if (accountId) conditions.push(eq(transactions.accountId, accountId));
     if (type) conditions.push(eq(transactions.type, type as TransactionType));
     if (!type && !includeTransfers) {
@@ -127,9 +130,9 @@ export class TransactionReportRepository extends BaseReportRepository {
       const pattern = `%${search.trim()}%`;
       conditions.push(
         or(
-          ilike(transactions.name, pattern),
-          ilike(transactions.notes, pattern),
-          ilike(merchants.name, pattern)
+          ilike(cashDescription.name, pattern),
+          ilike(cashDescription.notes, pattern),
+          ilike(cashMerchantName, pattern)
         )!
       );
     }
@@ -175,9 +178,9 @@ export class TransactionReportRepository extends BaseReportRepository {
     const fxRateExpr = this.buildFxRateExpr(
       currencyExpr,
       baseCurrency,
-      sql`${transactions.date}`
+      sql`${transactions.date}`, { householdId }
     );
-    const amountBaseExpr = sql<string | number | null>`${transactions.amount}::numeric * ${fxRateExpr}`;
+    const amountBaseExpr = sql<string | number | null>`${allocationAmount}::numeric * ${fxRateExpr}`;
 
     // Cursor-based pagination
     if (cursorData) {
@@ -190,8 +193,8 @@ export class TransactionReportRepository extends BaseReportRepository {
           ? sql`${transactions.date} > ${cursorData.date}`
           : sql`${transactions.date} < ${cursorData.date}`;
         const idCompare = isAsc
-          ? sql`${transactions.id} > ${cursorData.id}`
-          : sql`${transactions.id} < ${cursorData.id}`;
+          ? sql`${allocationKey} > ${cursorData.id}::uuid`
+          : sql`${allocationKey} < ${cursorData.id}::uuid`;
 
         conditions.push(
           or(
@@ -210,8 +213,8 @@ export class TransactionReportRepository extends BaseReportRepository {
           ? sql`${transactions.date} > ${cursorData.date}`
           : sql`${transactions.date} < ${cursorData.date}`;
         const idCompare = isAsc
-          ? sql`${transactions.id} > ${cursorData.id}`
-          : sql`${transactions.id} < ${cursorData.id}`;
+          ? sql`${allocationKey} > ${cursorData.id}::uuid`
+          : sql`${allocationKey} < ${cursorData.id}::uuid`;
 
         conditions.push(
           or(
@@ -224,20 +227,21 @@ export class TransactionReportRepository extends BaseReportRepository {
 
     const fetchLimit = limit + 1;
 
-    const rows = await db
+    const rows = await (tx ?? db)
       .select({
         id: transactions.id,
         date: transactions.date,
-        name: transactions.name,
+        name: cashDescription.name,
         type: transactions.type,
-        amount: transactions.amount,
+        splitId: transactionSplits.id,
+        amount: allocationAmount,
         amountBase: amountBaseExpr,
         transactionCurrency: transactions.currency,
         isPending: transactions.isPending,
-        notes: transactions.notes,
-        merchantId: transactions.merchantId,
-        merchantName: merchants.name,
-        categoryId: transactions.categoryId,
+        notes: cashDescription.notes,
+        merchantId: cashDescription.merchantId,
+        merchantName: cashMerchantName,
+        categoryId: allocationCategoryId,
         categoryName: categories.name,
         categoryGroupId: categories.groupId,
         accountId: transactions.accountId,
@@ -249,18 +253,19 @@ export class TransactionReportRepository extends BaseReportRepository {
       .from(transactions)
       .leftJoin(accounts, eq(accounts.id, transactions.accountId))
       .leftJoin(merchants, eq(merchants.id, transactions.merchantId))
-      .leftJoin(categories, eq(categories.id, transactions.categoryId))
+      .leftJoin(transactionSplits, splitAllocationJoin)
+      .leftJoin(categories, sql`${categories.id} = ${allocationCategoryId}`)
       .where(and(...conditions))
       .orderBy(
         ...(isAmountSort
           ? [
               isAsc ? asc(amountBaseExpr) : desc(amountBaseExpr),
               isAsc ? asc(transactions.date) : desc(transactions.date),
-              isAsc ? asc(transactions.id) : desc(transactions.id),
+              isAsc ? asc(allocationKey) : desc(allocationKey),
             ]
           : [
               isAsc ? asc(transactions.date) : desc(transactions.date),
-              isAsc ? asc(transactions.id) : desc(transactions.id),
+              isAsc ? asc(allocationKey) : desc(allocationKey),
             ])
       )
       .limit(fetchLimit);
@@ -273,7 +278,7 @@ export class TransactionReportRepository extends BaseReportRepository {
       hasMore && lastItem
         ? encodeCursor(
             lastItem.date,
-            lastItem.id,
+            lastItem.splitId ?? lastItem.id,
             isAmountSort ? (lastItem.amountBase ?? undefined) : undefined
           )
         : null;
@@ -285,7 +290,7 @@ export class TransactionReportRepository extends BaseReportRepository {
     >();
 
     if (transactionIds.length > 0) {
-      const tagRows = await db
+      const tagRows = await (tx ?? db)
         .select({
           transactionId: transactionTags.transactionId,
           tagId: tags.id,
@@ -319,6 +324,7 @@ export class TransactionReportRepository extends BaseReportRepository {
 
         return {
           id: row.id,
+          splitId: row.splitId ?? null,
           date: row.date,
           name: row.name,
           type: row.type as "income" | "expense" | "transfer",

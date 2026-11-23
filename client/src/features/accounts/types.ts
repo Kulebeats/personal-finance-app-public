@@ -23,13 +23,20 @@ export interface NetWorthPoint {
   value: number;
   assets: number;
   liabilities: number;
+  currency?: string;
+  provenance?: "captured_snapshot";
 }
 
 export interface AccountsSummaryData {
   totalAssets: number;
   totalLiabilities: number;
   netWorthValue: number;
+  available?: boolean;
+  currency?: string;
+  status?: "checking" | "error" | "available" | "unavailable";
 }
+
+export type AccountHistoryState = "checking" | "error" | "ready";
 
 export interface AccountFilterState {
   dateRange: string;

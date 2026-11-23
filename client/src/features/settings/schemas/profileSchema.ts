@@ -1,4 +1,21 @@
 import { z } from "zod";
+import {
+  COUNTRY_CODE_MESSAGE,
+  COUNTRY_CODE_PATTERN,
+  FIRST_NAME_REQUIRED_MESSAGE,
+  LAST_NAME_REQUIRED_MESSAGE,
+  NRC_FORMAT_MESSAGE,
+  NRC_MAX_LENGTH,
+  NRC_PATTERN,
+  PROFILE_FULL_NAME_MAX_LENGTH,
+  PROFILE_NAME_MAX_LENGTH,
+  PROFILE_SOCIAL_EMAIL_MAX_LENGTH,
+  PROFILE_SOCIAL_LINK_MAX_LENGTH,
+  SOCIAL_EMAIL_TOO_LONG_MESSAGE,
+  SOCIAL_LINK_TOO_LONG_MESSAGE,
+  birthdayProblem,
+  birthdayProblemMessage,
+} from "@shared/profile-policy";
 
 /**
  * Profile validation schema using Zod
@@ -13,6 +30,16 @@ import { z } from "zod";
 // Zambian phone number regex: Either 9 digits OR +260 followed by 9 digits
 // This allows users to enter just "967237128" when country selector shows +260
 const zambianPhoneRegex = /^(\+260[0-9]{9}|[0-9]{9}|[0][0-9]{9})$/;
+
+// Birthday rules shared with the server (shared/profile-policy.ts), checked on
+// the local calendar day the picker shows.
+function localBirthdayProblem(date: Date) {
+  const today = new Date();
+  return birthdayProblem(
+    { year: date.getFullYear(), month: date.getMonth() + 1, day: date.getDate() },
+    { year: today.getFullYear(), month: today.getMonth() + 1, day: today.getDate() }
+  );
+}
 
 // Address sub-schema - Global standard
 const addressSchema = z.object({
@@ -31,7 +58,7 @@ const addressSchema = z.object({
   postalCode: z.string().max(20).optional(), // ZIP/Postcode/PIN - validation done elsewhere
   country: z
     .string()
-    .length(2, "Country code must be 2 characters")
+    .regex(COUNTRY_CODE_PATTERN, COUNTRY_CODE_MESSAGE)
     .default("ZM"), // ISO 3166-1 alpha-2
 });
 
@@ -39,19 +66,19 @@ export const profileSchema = z.object({
   fullName: z
     .string()
     .min(1, "Full name is required")
-    .max(100, "Name cannot exceed 100 characters"),
+    .max(PROFILE_FULL_NAME_MAX_LENGTH, "Name cannot exceed 100 characters"),
 
   firstName: z
     .string()
-    .min(1, "First name is required")
-    .max(50, "First name cannot exceed 50 characters"),
+    .min(1, FIRST_NAME_REQUIRED_MESSAGE)
+    .max(PROFILE_NAME_MAX_LENGTH, "First name cannot exceed 50 characters"),
   lastName: z
     .string()
-    .min(1, "Last name is required")
-    .max(50, "Last name cannot exceed 50 characters"),
+    .min(1, LAST_NAME_REQUIRED_MESSAGE)
+    .max(PROFILE_NAME_MAX_LENGTH, "Last name cannot exceed 50 characters"),
   displayName: z
     .string()
-    .max(50, "Display name cannot exceed 50 characters")
+    .max(PROFILE_NAME_MAX_LENGTH, "Display name cannot exceed 50 characters")
     .optional(),
 
   birthday: z
@@ -59,20 +86,12 @@ export const profileSchema = z.object({
       required_error: "Date of birth is required",
       invalid_type_error: "Date of birth is required",
     })
-    .refine(
-      (date) => !date || date <= new Date(),
-      "Birthday cannot be in the future"
-    )
-    .refine((date) => {
-      if (!date) return true;
-      const today = new Date();
-      const minAgeDate = new Date(
-        today.getFullYear() - 18,
-        today.getMonth(),
-        today.getDate()
-      );
-      return date <= minAgeDate;
-    }, "You must be at least 18 years old")
+    .superRefine((date, ctx) => {
+      const problem = date ? localBirthdayProblem(date) : null;
+      if (problem) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: birthdayProblemMessage(problem) });
+      }
+    })
     .nullable(),
 
   birthdayHideYear: z.boolean().default(false),
@@ -107,7 +126,14 @@ export const profileSchema = z.object({
 
   address: addressSchema,
 
-  annualIncome: z.string().optional(),
+  // Same rule as the server (users.annual_income is decimal(15, 2)).
+  annualIncome: z
+    .string()
+    .regex(
+      /^(\d{1,13}(\.\d{1,2})?)?$/,
+      "Enter an amount like 15000 or 15000.50 (no commas, at most 2 decimals)"
+    )
+    .optional(),
 
   incomeFrequency: z
     .enum(["monthly", "bi-weekly", "annual"])
@@ -130,8 +156,6 @@ export const profileSchema = z.object({
 
   riskTolerance: z.enum(["low", "medium", "high", ""]).optional(),
 
-  salaryRange: z.string().optional(),
-
   profilePicture: z.string().optional().or(z.literal("")),
 
   // Rich profile fields (Phase 2)
@@ -143,6 +167,7 @@ export const profileSchema = z.object({
     .object({
       linkedin: z
         .string()
+        .max(PROFILE_SOCIAL_LINK_MAX_LENGTH, SOCIAL_LINK_TOO_LONG_MESSAGE)
         .refine(
           (val) =>
             !val ||
@@ -156,6 +181,7 @@ export const profileSchema = z.object({
         .or(z.literal("")),
       facebook: z
         .string()
+        .max(PROFILE_SOCIAL_LINK_MAX_LENGTH, SOCIAL_LINK_TOO_LONG_MESSAGE)
         .refine(
           (val) =>
             !val ||
@@ -169,6 +195,7 @@ export const profileSchema = z.object({
         .or(z.literal("")),
       twitter: z
         .string()
+        .max(PROFILE_SOCIAL_LINK_MAX_LENGTH, SOCIAL_LINK_TOO_LONG_MESSAGE)
         .refine(
           (val) =>
             !val ||
@@ -180,6 +207,7 @@ export const profileSchema = z.object({
         .or(z.literal("")),
       github: z
         .string()
+        .max(PROFILE_SOCIAL_LINK_MAX_LENGTH, SOCIAL_LINK_TOO_LONG_MESSAGE)
         .refine(
           (val) =>
             !val ||
@@ -191,11 +219,13 @@ export const profileSchema = z.object({
         .or(z.literal("")),
       email: z
         .string()
+        .max(PROFILE_SOCIAL_EMAIL_MAX_LENGTH, SOCIAL_EMAIL_TOO_LONG_MESSAGE)
         .email("Invalid email address")
         .optional()
         .or(z.literal("")),
       website: z
         .string()
+        .max(PROFILE_SOCIAL_LINK_MAX_LENGTH, SOCIAL_LINK_TOO_LONG_MESSAGE)
         .url("Invalid website URL")
         .optional()
         .or(z.literal("")),
@@ -211,13 +241,10 @@ export const profileSchema = z.object({
 
   nrc: z
     .string()
-    .max(20, "NRC cannot exceed 20 characters")
+    .max(NRC_MAX_LENGTH, "NRC cannot exceed 20 characters")
     .optional()
     .or(z.literal(""))
-    .refine((val) => {
-      if (!val || val === "") return true;
-      return /^\d{6}\/\d{2}\/\d$/.test(val);
-    }, "Invalid NRC format. Expected format: 123456/78/9"),
+    .refine((val) => !val || NRC_PATTERN.test(val), NRC_FORMAT_MESSAGE),
 });
 
 export type ProfileFormData = z.infer<typeof profileSchema>;

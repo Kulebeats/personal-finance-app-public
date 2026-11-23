@@ -27,7 +27,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn, parseMoney } from "@/lib/utils";
-import { useFormatters } from "@/contexts/SettingsContext";
+import { useBudgetMoneyDisplay } from "../budgetMoneyDisplay";
 import { buildTransactionsUrl } from "@/features/transactions";
 import { useBudgetCategoryHistory } from "../hooks/useBudgetCategoryHistory";
 import { useBudgetAmountCommit } from "../hooks/useBudgetAmountCommit";
@@ -49,7 +49,7 @@ interface BudgetDetailModalProps {
     field: keyof BudgetCategory,
     value: BudgetCategory[keyof BudgetCategory],
   ) => void;
-  onCommitBudget?: (item: BudgetCategory, group: BudgetGroup, value: number) => void;
+  onCommitBudget?: (item: BudgetCategory, group: BudgetGroup, value: number) => Promise<boolean>;
 }
 
 /** First and last calendar day of the given 1-indexed month, as local dates. */
@@ -69,15 +69,17 @@ export function BudgetDetailModal({
   onUpdate,
   onCommitBudget,
 }: BudgetDetailModalProps) {
-  const { formatCurrency } = useFormatters();
   const [, navigate] = useLocation();
   const history = useBudgetCategoryHistory(snapshot?.itemId, year, month);
   // Same commit path as the inline row edit: only rows it can commit, only a real change.
   const commitBudget = useBudgetAmountCommit(snapshot, groups, onCommitBudget);
 
+  const group = groups?.find((g) => g.id === snapshot?.groupId);
+  const liveItem = group?.items.find((i) => i.id === snapshot?.itemId);
+  const item = liveItem ?? snapshot?.item;
+  const { formatCurrency, prefix } = useBudgetMoneyDisplay(item?.currency);
+  const { formatCurrency: formatHistory } = useBudgetMoneyDisplay(history.currency === undefined ? item?.currency : history.currency);
   if (!snapshot) return null;
-  const group = groups?.find((g) => g.id === snapshot.groupId);
-  const liveItem = group?.items.find((i) => i.id === snapshot.itemId);
   const selected = liveItem ? { ...snapshot, item: liveItem } : snapshot;
 
   const handleViewTransactions = () => {
@@ -135,9 +137,7 @@ export function BudgetDetailModal({
           </button>
         </div>
 
-        {/* Content */}
         <div className="p-6 overflow-y-auto flex-1">
-          {/* Main Stats Row */}
           <div className="grid grid-cols-3 gap-4 mb-8">
             <div className="space-y-2">
               <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
@@ -145,13 +145,16 @@ export function BudgetDetailModal({
               </label>
               <div className="relative">
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">
-                  $
+                  {prefix}
                 </span>
                 <input
                   type="text"
-                  value={selected.item.budget}
+                  aria-label="Monthly budget amount"
+                  readOnly={selected.item.coverage !== undefined}
+                  value={selected.item.budget ?? ""}
+                  placeholder="Unbudgeted"
                   onChange={(e) => {
-                    const val = parseMoney(e.target.value) || 0;
+                    const val = e.target.value.trim() === "" ? null : parseMoney(e.target.value);
                     onUpdate(selected.groupId, selected.itemId, "budget", val);
                   }}
                   onBlur={(e) => commitBudget(e.currentTarget.value)}
@@ -177,7 +180,7 @@ export function BudgetDetailModal({
                 Actual
               </label>
               <div className="py-2.5 px-3 bg-muted/50 rounded-lg font-bold text-lg text-foreground border border-transparent">
-                {formatCurrency(selected.item.actual)}
+                {selected.item.actual === null ? "Unavailable" : formatCurrency(selected.item.actual)}
               </div>
             </div>
             <div className="space-y-2">
@@ -187,12 +190,14 @@ export function BudgetDetailModal({
               <div
                 className={cn(
                   "py-2.5 px-3 rounded-lg font-bold text-lg text-center border",
-                  selected.item.remaining >= 0
+                  selected.item.remaining === null ? "bg-muted text-muted-foreground border-border" : selected.item.remaining >= 0
                     ? "bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 border-emerald-100 dark:border-emerald-900/50"
                     : "bg-rose-50 dark:bg-rose-950/30 text-rose-700 dark:text-rose-300 border-rose-100 dark:border-rose-900/50",
                 )}
               >
-                {formatCurrency(Math.abs(selected.item.remaining))}
+                {selected.item.remaining === null
+                  ? selected.item.coverage === "group" ? "Included in group" : selected.item.coverage === "unavailable" ? "Unavailable" : "Unbudgeted"
+                  : formatCurrency(Math.abs(selected.item.remaining))}
               </div>
             </div>
           </div>
@@ -261,18 +266,18 @@ export function BudgetDetailModal({
             </div>
           </div>
 
-          {/* History Section */}
           <div>
             <h3 className="text-sm font-bold text-foreground mb-3">
               History & Trends
             </h3>
-            <BudgetHistoryChart
+            {history.currency === null ? <p className="text-sm text-muted-foreground">Budget history unavailable in a single currency.</p> : <BudgetHistoryChart
               points={history.points}
               isLoading={history.isLoading}
+              isError={history.isError}
               hasData={history.hasData}
               average={history.average}
-              formatCurrency={formatCurrency}
-            />
+              formatCurrency={formatHistory}
+            />}
           </div>
         </div>
 

@@ -1,4 +1,5 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -176,14 +177,14 @@ describe("MerchantDetailView", () => {
       data: {
         merchant: mockMerchant,
         analytics: {
-          totalSpent: 1000,
+          totalSpent: { amount: "1000.00", currency: "ZMW" },
           transactionCount: 10,
-          averageTransaction: 100,
+          averageTransaction: { amount: "100.00", currency: "ZMW" },
           trend: [],
         },
-        last30: { totalSpent: 300, transactionCount: 5, averageTransaction: 60, trend: [] },
-        last90: { totalSpent: 600, transactionCount: 8, averageTransaction: 75, trend: [] },
-        last365: { totalSpent: 1000, transactionCount: 10, averageTransaction: 100, trend: [] },
+        last30: { totalSpent: { amount: "300.00", currency: "ZMW" }, transactionCount: 5, averageTransaction: { amount: "60.00", currency: "ZMW" }, trend: [] },
+        last90: { totalSpent: { amount: "600.00", currency: "ZMW" }, transactionCount: 8, averageTransaction: { amount: "75.00", currency: "ZMW" }, trend: [] },
+        last365: { totalSpent: { amount: "1000.00", currency: "ZMW" }, transactionCount: 10, averageTransaction: { amount: "100.00", currency: "ZMW" }, trend: [] },
         categoryOptions: [],
         breakdownItems: [],
         aliases: [],
@@ -476,7 +477,7 @@ describe("MerchantDetailView", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("calls handleDeleteMerchant when delete button is clicked", () => {
+  it("calls handleDeleteMerchant once the archive is confirmed in the dialog", async () => {
     const handleDeleteMerchant = vi.fn();
     mockedUseMerchantDetailState.mockReturnValue({
       state: {
@@ -577,7 +578,11 @@ describe("MerchantDetailView", () => {
     const deleteButton = screen.getByRole("button", { name: /delete/i });
     fireEvent.click(deleteButton);
 
-    expect(handleDeleteMerchant).toHaveBeenCalled();
+    // NEW-37: the app's confirm dialog comes first; nothing is archived yet.
+    const dialog = await screen.findByRole("alertdialog", { name: /archive merchant\?/i });
+    expect(handleDeleteMerchant).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: /^archive merchant$/i }));
+    expect(handleDeleteMerchant).toHaveBeenCalledTimes(1);
   });
 
   it("disables edit button when onEdit is not provided", () => {
@@ -695,14 +700,14 @@ describe("MerchantDetailView", () => {
       data: {
         merchant: mockMerchant,
         analytics: {
-          totalSpent: 1000,
+          totalSpent: { amount: "1000.00", currency: "ZMW" },
           transactionCount: 10,
-          averageTransaction: 100,
+          averageTransaction: { amount: "100.00", currency: "ZMW" },
           trend: [],
         },
-        last30: { totalSpent: 300, transactionCount: 5, averageTransaction: 60, trend: [] },
-        last90: { totalSpent: 600, transactionCount: 8, averageTransaction: 75, trend: [] },
-        last365: { totalSpent: 1000, transactionCount: 10, averageTransaction: 100, trend: [] },
+        last30: { totalSpent: { amount: "300.00", currency: "ZMW" }, transactionCount: 5, averageTransaction: { amount: "60.00", currency: "ZMW" }, trend: [] },
+        last90: { totalSpent: { amount: "600.00", currency: "ZMW" }, transactionCount: 8, averageTransaction: { amount: "75.00", currency: "ZMW" }, trend: [] },
+        last365: { totalSpent: { amount: "1000.00", currency: "ZMW" }, transactionCount: 10, averageTransaction: { amount: "100.00", currency: "ZMW" }, trend: [] },
         categoryOptions: [],
         breakdownItems: [],
         aliases: [],
@@ -784,5 +789,54 @@ describe("MerchantDetailView", () => {
     );
 
     expect(screen.getByText("10")).toBeInTheDocument(); // transaction count
+  });
+});
+
+/**
+ * NEW-37: archiving a merchant from its detail view asks through the app's
+ * AlertDialog, never the browser's native confirm box.
+ */
+describe("MerchantDetailView archive confirmation", () => {
+  function arrange() {
+    const handleDeleteMerchant = vi.fn();
+    const defaults = mockedUseMerchantDetailState.getMockImplementation()!(null);
+    mockedUseMerchantDetailState.mockReturnValue({
+      ...defaults,
+      data: { ...defaults.data, merchant: mockMerchant },
+      actions: { ...defaults.actions, handleDeleteMerchant },
+    });
+    const nativeConfirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<MerchantDetailView merchantId="1" onClose={vi.fn()} />, { wrapper: createWrapper() });
+    return { handleDeleteMerchant, nativeConfirm, user: userEvent.setup() };
+  }
+
+  it("opens the dialog instead of the native confirm, and Cancel archives nothing", async () => {
+    const { handleDeleteMerchant, nativeConfirm, user } = arrange();
+
+    await user.click(screen.getByRole("button", { name: /delete/i }));
+    const dialog = await screen.findByRole("alertdialog", { name: /archive merchant\?/i });
+    expect(within(dialog).getByText(/transactions, aliases and logo are kept/i)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: /cancel/i }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(handleDeleteMerchant).not.toHaveBeenCalled();
+    expect(nativeConfirm).not.toHaveBeenCalled();
+    nativeConfirm.mockRestore();
+  });
+
+  it("the D shortcut opens the dialog; Escape cancels and returns focus to the trigger", async () => {
+    const { handleDeleteMerchant, nativeConfirm, user } = arrange();
+    const trigger = screen.getByRole("button", { name: /delete/i });
+    trigger.focus();
+
+    await user.keyboard("d");
+    await screen.findByRole("alertdialog", { name: /archive merchant\?/i });
+    await user.keyboard("{Escape}");
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(handleDeleteMerchant).not.toHaveBeenCalled();
+    expect(nativeConfirm).not.toHaveBeenCalled();
+    await waitFor(() => expect(trigger).toHaveFocus());
+    nativeConfirm.mockRestore();
   });
 });

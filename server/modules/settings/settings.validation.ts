@@ -1,20 +1,13 @@
 import { z } from "zod";
+import { INVESTMENT_NOTIFICATION_PREFERENCE_TYPES, NOTIFICATION_TYPES } from "@shared/notificationTypes";
+import { passwordPolicySchema } from "../auth/auth.password-policy";
 
-export const updateProfileSchema = z.object({
-  fullName: z.string().min(1).max(100).optional(),
-  firstName: z.string().max(50).optional(),
-  lastName: z.string().max(50).optional(),
-  displayName: z.string().max(50).optional(),
-  birthday: z.string().optional().nullable(),
-  timezone: z.string().optional(),
-  language: z.string().optional(),
-  bio: z.string().max(1000).optional(),
-});
+export { updateProfileSchema, type UpdateProfileInput } from "./settings.profile.validation";
 
 export const changePasswordSchema = z
   .object({
     currentPassword: z.string().min(1),
-    newPassword: z.string().min(8),
+    newPassword: passwordPolicySchema,
     confirmPassword: z.string().min(8),
   })
   .refine((data) => data.newPassword === data.confirmPassword, {
@@ -22,24 +15,40 @@ export const changePasswordSchema = z
     path: ["confirmPassword"],
   });
 
+// Household policy only; display settings have their own validation schema.
 export const updatePreferencesSchema = z.object({
-  theme: z.enum(["light", "dark", "system"]).optional(),
-  dateFormat: z.string().optional(),
-  currency: z.string().length(3).optional(),
-  weekStartDay: z.number().min(0).max(6).optional(),
-  notificationsEnabled: z.boolean().optional(),
   showPendingTransactions: z.boolean().optional(),
   allowEditPending: z.boolean().optional(),
-});
+  // NEW-16: the budget rollover projection reads this column.
+  autoRolloverBudget: z.boolean().optional(),
+}).strict().refine(
+  (data) => data.showPendingTransactions !== undefined
+    || data.allowEditPending !== undefined
+    || data.autoRolloverBudget !== undefined,
+  { message: "At least one household policy field is required" },
+);
+
+/**
+ * NEW-26: a threshold is a non-negative amount that fits decimal(15,2): at most
+ * 13 integer digits and 2 decimals. A JSON number is checked by its own
+ * spelling, so a float such as 0.30000000000000004 or 1e21 is refused rather
+ * than rounded. Zero stays valid.
+ */
+const NOTIFICATION_THRESHOLD_PATTERN = /^\d{1,13}(\.\d{1,2})?$/;
+const notificationThresholdSchema = z.union([z.string(), z.number()])
+  .transform(value => String(value))
+  .refine(value => NOTIFICATION_THRESHOLD_PATTERN.test(value), {
+    message: "Threshold must be a non-negative amount with at most 2 decimal places",
+  });
 
 export const updateNotificationPreferencesSchema = z.object({
   preferences: z.array(
     z.object({
-      notificationType: z.string(),
+      notificationType: z.union([z.nativeEnum(NOTIFICATION_TYPES), z.enum(INVESTMENT_NOTIFICATION_PREFERENCE_TYPES)]),
       inAppEnabled: z.boolean().optional(),
       emailEnabled: z.boolean().optional(),
       pushEnabled: z.boolean().optional(),
-      thresholdAmount: z.union([z.string(), z.number()]).optional().nullable(),
+      thresholdAmount: notificationThresholdSchema.optional().nullable(),
     }),
   ),
 });

@@ -9,6 +9,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { GoalImagePicker } from "./GoalImagePicker";
+import { goalFieldErrorProps, type GoalFieldErrors } from "./goalRequiredFields";
 
 // Custom types for Investment
 export type InvestmentGoalType =
@@ -58,10 +59,12 @@ export function InvestmentGoalForm({
   value,
   onChange,
   accounts,
+  errors = {},
 }: {
   value: InvestmentGoalDraft;
   onChange: (next: InvestmentGoalDraft) => void;
   accounts: Array<{ id: string; name: string }>;
+  errors?: GoalFieldErrors;
 }) {
   const update = (patch: Partial<InvestmentGoalDraft>) => {
     onChange({ ...value, ...patch });
@@ -77,6 +80,7 @@ export function InvestmentGoalForm({
         <Label htmlFor="inv-name">Goal name</Label>
         <Input
           id="inv-name"
+          {...goalFieldErrorProps(errors, "inv-name")}
           value={value.name}
           onChange={(event) => update({ name: event.target.value })}
           placeholder="e.g. Early Retirement"
@@ -134,6 +138,7 @@ export function InvestmentGoalForm({
           <Label htmlFor="inv-other-type">Please specify</Label>
           <Input
             id="inv-other-type"
+            {...goalFieldErrorProps(errors, "inv-other-type")}
             value={value.otherGoalType}
             onChange={(event) => update({ otherGoalType: event.target.value })}
             placeholder="e.g. Art Collection"
@@ -190,6 +195,7 @@ export function InvestmentGoalForm({
           <Label htmlFor="inv-target">Target amount</Label>
           <Input
             id="inv-target"
+            {...goalFieldErrorProps(errors, "inv-target")}
             type="number"
             inputMode="decimal"
             value={value.targetAmount}

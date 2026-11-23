@@ -8,12 +8,22 @@
  */
 
 import { tagRepository } from "../../repositories/TagRepository";
-import { transactionRepository } from "../../repositories/TransactionRepository";
+import { tagWriteRepository } from "../../repositories/TagWriteRepository";
+import type { HouseholdContext } from "../../middleware/householdGuard";
 import { NotFoundError, ConflictError, ValidationError } from "../../core/errors";
 import { logger } from "../../utils/logger";
-import { db } from "../../db";
-import { sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { businessAuditService } from "../../services/BusinessAuditService";
 import { tags, type Tag } from "@shared/schema";
+import { withTransaction, type TransactionType } from "../../utils/withTransaction";
+import { lockTagNames, normalizeTagName, rethrowTagNameClash, TAG_NAME_TAKEN } from "./tags.name-guard";
+
+/** Refuse `name` if another tag in the household has it in any case (NEW-36). */
+async function assertNameFree(householdId: string, name: string, tx: TransactionType, excludeTagId?: string) {
+  if (await tagRepository.findByName(householdId, name, { excludeTagId, executor: tx })) {
+    throw new ConflictError(TAG_NAME_TAKEN);
+  }
+}
 
 export interface CreateTagInput {
   householdId: string;
@@ -36,6 +46,8 @@ export interface MergeTagsInput {
   sourceTagIds: string[];
   targetTagId: string;
   householdId: string;
+  /** Who merged; the audit row is written inside the merge transaction (Rule 9). */
+  audit: { userId: string; ipAddress?: string };
 }
 
 export interface ArchiveTagInput {
@@ -61,67 +73,22 @@ const DEFAULT_TAGS = [
 
 export class TagService {
   /**
-   * Verify transaction access for security
-   */
-  async verifyTransactionAccess(
-    transactionId: string,
-    householdId: string,
-    userId: string
-  ) {
-    const transaction = await transactionRepository.findByIdWithVisibility(
-      transactionId,
-      householdId,
-      userId
-    );
-    if (!transaction) {
-      throw new NotFoundError("Transaction not found");
-    }
-    return transaction;
-  }
-
-  /**
-   * Get all tags for a household with optional search filtering
-   * P3: Backend tag search filtering
-   */
-  async listTags(
-    householdId: string,
-    options?: { search?: string; limit?: number }
-  ) {
-    return await tagRepository.findByHousehold(householdId, options);
-  }
-
-  /**
-   * Get a specific tag by ID
-   */
-  async getTagById(id: string, householdId: string) {
-    const tag = await tagRepository.findById(id, householdId);
-    if (!tag) {
-      throw new NotFoundError("Tag not found");
-    }
-    return tag;
-  }
-
-  /**
    * Create a new tag
    */
-  async createTag(data: CreateTagInput) {
-    // Check for duplicate tag name
-    const existingTag = await tagRepository.findByName(
-      data.householdId,
-      data.name
-    );
-    if (existingTag) {
-      throw new ConflictError(
-        "A tag with this name already exists in your household"
-      );
-    }
-
+  async createTag(input: CreateTagInput) {
     // Validate color format if provided (CODE-006)
-    if (data.color && !/^#[0-9A-Fa-f]{6}$/.test(data.color)) {
+    if (input.color && !/^#[0-9A-Fa-f]{6}$/.test(input.color)) {
       throw new ValidationError("Invalid color format. Use hex format like #FF5733");
     }
+    // The checked and stored name is trimmed and NFC-normalised (N5)
+    const data = { ...input, name: normalizeTagName(input.name) };
 
-    const tag = await tagRepository.create(data);
+    // Case-insensitive duplicate check and insert in one locked transaction (NEW-36)
+    const tag = await withTransaction(async (tx) => {
+      await lockTagNames(tx, data.householdId);
+      await assertNameFree(data.householdId, data.name, tx);
+      return tagRepository.create(data, tx);
+    }).catch(rethrowTagNameClash);
     logger.info("Created tag", { householdId: data.householdId, tagId: tag.id });
     return tag;
   }
@@ -129,21 +96,14 @@ export class TagService {
   /**
    * Update an existing tag
    */
-  async updateTag(id: string, householdId: string, data: UpdateTagInput) {
+  async updateTag(id: string, householdId: string, input: UpdateTagInput) {
+    // A rename is checked and stored trimmed and NFC-normalised, like create (N5)
+    const data = input.name === undefined ? input : { ...input, name: normalizeTagName(input.name) };
+
     // Verify tag exists
     const existingTag = await tagRepository.findById(id, householdId);
     if (!existingTag) {
       throw new NotFoundError("Tag not found");
-    }
-
-    // Check for duplicate name if name is being changed
-    if (data.name && data.name !== existingTag.name) {
-      const duplicateTag = await tagRepository.findByName(householdId, data.name);
-      if (duplicateTag) {
-        throw new ConflictError(
-          "A tag with this name already exists in your household"
-        );
-      }
     }
 
     // Validate color format if provided (CODE-006)
@@ -151,7 +111,16 @@ export class TagService {
       throw new ValidationError("Invalid color format. Use hex format like #FF5733");
     }
 
-    const updatedTag = await tagRepository.update(id, householdId, data);
+    // A rename checks the name case-insensitively, ignoring this tag, under the same lock
+    // as create; the update runs in that transaction (NEW-36).
+    const updatedTag = await withTransaction(async (tx) => {
+      const name = data.name;
+      if (name !== undefined && name !== existingTag.name) {
+        await lockTagNames(tx, householdId);
+        await assertNameFree(householdId, name, tx, id);
+      }
+      return tagRepository.update(id, householdId, data, tx);
+    }).catch(rethrowTagNameClash);
     return { oldValue: existingTag, newValue: updatedTag };
   }
 
@@ -168,149 +137,17 @@ export class TagService {
     return existingTag;
   }
 
-  /**
-   * Get all tags on a transaction
-   */
-  async getTransactionTags(
-    transactionId: string,
-    householdId: string,
-    userId: string
-  ) {
-    await this.verifyTransactionAccess(transactionId, householdId, userId);
-    return await tagRepository.getTransactionTags(transactionId);
+  /** Actor and audit share the locked writer transaction. */
+  addTransactionTags(transactionId: string, tagIds: string[], actor: HouseholdContext, ipAddress?: string) {
+    return tagWriteRepository.write(actor, { operation: "add", transactionId, tagIds }, ipAddress);
   }
 
-  /**
-   * Add tags to a transaction
-   */
-  async addTransactionTags(
-    transactionId: string,
-    tagIds: string[],
-    householdId: string,
-    userId: string
-  ) {
-    await this.verifyTransactionAccess(transactionId, householdId, userId);
-
-    // Verify all tags belong to household (batch query for performance)
-    if (tagIds.length > 0) {
-      const foundTags = await tagRepository.findByIds(tagIds, householdId);
-      const foundIds = new Set(foundTags.map((t) => t.id));
-      const missingIds = tagIds.filter((id) => !foundIds.has(id));
-      if (missingIds.length > 0) {
-        throw new NotFoundError(`Tag(s) not found: ${missingIds.join(", ")}`);
-      }
-    }
-
-    // Add tags and update usage counts (DATA-001).
-    // SCP-335: only increment when the link was newly inserted — re-tagging an
-    // already-tagged transaction must not inflate usageCount.
-    for (const tagId of tagIds) {
-      const { inserted } = await tagRepository.addTagToTransaction(
-        transactionId,
-        tagId
-      );
-      if (inserted) {
-        await tagRepository.incrementUsageCount(tagId);
-      }
-    }
-
-    return await tagRepository.getTransactionTags(transactionId);
+  removeTransactionTag(transactionId: string, tagId: string, actor: HouseholdContext, ipAddress?: string) {
+    return tagWriteRepository.write(actor, { operation: "remove", transactionId, tagIds: [tagId] }, ipAddress);
   }
 
-  /**
-   * Remove a tag from a transaction
-   */
-  async removeTransactionTag(
-    transactionId: string,
-    tagId: string,
-    householdId: string,
-    userId: string
-  ) {
-    await this.verifyTransactionAccess(transactionId, householdId, userId);
-
-    // Verify tag belongs to household
-    const tag = await tagRepository.findById(tagId, householdId);
-    if (!tag) {
-      throw new NotFoundError("Tag not found");
-    }
-
-    await tagRepository.removeTagFromTransaction(transactionId, tagId);
-    // Update usage count (DATA-001)
-    await tagRepository.decrementUsageCount(tagId);
-
-    return await tagRepository.getTransactionTags(transactionId);
-  }
-
-  /**
-   * Set all tags on a transaction (replace existing)
-   */
-  async setTransactionTags(
-    transactionId: string,
-    tagIds: string[],
-    householdId: string,
-    userId: string
-  ) {
-    await this.verifyTransactionAccess(transactionId, householdId, userId);
-
-    // Get current tags to update usage counts
-    const currentTags = await tagRepository.getTransactionTags(transactionId);
-    const currentTagIds = currentTags.map((t) => t.id);
-
-    // Verify all new tags belong to household (batch query for performance)
-    if (tagIds.length > 0) {
-      const foundTags = await tagRepository.findByIds(tagIds, householdId);
-      const foundIds = new Set(foundTags.map((t) => t.id));
-      const missingIds = tagIds.filter((id) => !foundIds.has(id));
-      if (missingIds.length > 0) {
-        throw new NotFoundError(`Tag(s) not found: ${missingIds.join(", ")}`);
-      }
-    }
-
-    // Set tags
-    const updatedTags = await tagRepository.setTransactionTags(
-      transactionId,
-      tagIds
-    );
-
-    // Update usage counts (DATA-001)
-    const addedTagIds = tagIds.filter((id) => !currentTagIds.includes(id));
-    const removedTagIds = currentTagIds.filter((id) => !tagIds.includes(id));
-
-    for (const tagId of addedTagIds) {
-      await tagRepository.incrementUsageCount(tagId);
-    }
-    for (const tagId of removedTagIds) {
-      await tagRepository.decrementUsageCount(tagId);
-    }
-
-    return updatedTags;
-  }
-
-  /**
-   * Get all transactions with a specific tag
-   */
-  async getTagTransactions(
-    tagId: string,
-    householdId: string,
-    userId: string,
-    limit: number = 50,
-    offset: number = 0
-  ) {
-    // Verify tag belongs to household
-    const tag = await tagRepository.findById(tagId, householdId);
-    if (!tag) {
-      throw new NotFoundError("Tag not found");
-    }
-
-    const result = await tagRepository.findTransactionsByTag(
-      tagId,
-      householdId,
-      userId,
-      limit,
-      offset
-    );
-
-    return { tag, transactions: result.transactions, count: result.count };
+  setTransactionTags(transactionId: string, tagIds: string[], actor: HouseholdContext, ipAddress?: string) {
+    return tagWriteRepository.write(actor, { operation: "set", transactionId, tagIds }, ipAddress);
   }
 
   /**
@@ -318,7 +155,7 @@ export class TagService {
    * Moves all transaction associations from source tags to target tag
    */
   async mergeTags(input: MergeTagsInput) {
-    const { sourceTagIds, targetTagId, householdId } = input;
+    const { sourceTagIds, targetTagId, householdId, audit } = input;
 
     // Validate input
     if (sourceTagIds.length === 0) {
@@ -326,39 +163,37 @@ export class TagService {
     }
 
     // Filter out targetTagId from sourceTagIds if present (user may have selected it)
-    const filteredSourceIds = sourceTagIds.filter(id => id !== targetTagId);
+    const filteredSourceIds = Array.from(new Set(sourceTagIds.filter(id => id !== targetTagId)));
     if (filteredSourceIds.length === 0) {
       throw new ValidationError("No source tags to merge - select tags other than the target");
     }
 
-    // Verify all tags exist and belong to household (batch query for performance)
-    const allTagIds = [targetTagId, ...filteredSourceIds];
-    const foundTags = await tagRepository.findByIds(allTagIds, householdId);
-    const foundTagsMap = new Map(foundTags.map((t) => [t.id, t]));
-
-    const targetTag = foundTagsMap.get(targetTagId);
-    if (!targetTag) {
-      throw new NotFoundError("Target tag not found");
-    }
-
-    const sourceTags: Tag[] = [];
-    for (const sourceTagId of filteredSourceIds) {
-      const tag = foundTagsMap.get(sourceTagId);
-      if (!tag) {
-        throw new NotFoundError(`Source tag not found: ${sourceTagId}`);
-      }
-      sourceTags.push(tag);
-    }
-
     // Perform merge in transaction
-    await db.transaction(async (tx) => {
+    const mergedTagNames = await withTransaction(async (tx) => {
+      // NEW-19: lock the target and every source (household-scoped, id order)
+      // before checking them, so a concurrent merge, rename or delete of the
+      // same tags waits instead of racing this one.
+      const locked = await tx.select().from(tags)
+        .where(and(eq(tags.householdId, householdId), inArray(tags.id, [targetTagId, ...filteredSourceIds])))
+        .orderBy(asc(tags.id))
+        .for("update");
+      const lockedById = new Map(locked.map((tag) => [tag.id, tag]));
+      if (!lockedById.has(targetTagId)) {
+        throw new NotFoundError("Target tag not found");
+      }
+      const sourceTags: Tag[] = filteredSourceIds.map((sourceTagId) => {
+        const tag = lockedById.get(sourceTagId);
+        if (!tag) throw new NotFoundError(`Source tag not found: ${sourceTagId}`);
+        return tag;
+      });
+
       // For each source tag, move its transaction associations to target
       for (const sourceTagId of filteredSourceIds) {
         // Update transaction_tags: replace source tag with target tag
         // Use raw SQL to handle conflicts (some transactions may already have target tag)
         await tx.execute(sql`
           INSERT INTO transaction_tags (transaction_id, tag_id)
-          SELECT DISTINCT transaction_id, ${targetTagId}
+          SELECT DISTINCT transaction_id, ${targetTagId}::uuid
           FROM transaction_tags
           WHERE tag_id = ${sourceTagId}
           ON CONFLICT (transaction_id, tag_id) DO NOTHING
@@ -393,6 +228,20 @@ export class TagService {
         SET usage_count = ${usageCount}
         WHERE id = ${targetTagId}
       `);
+
+      // Rule 9: the audit row commits or rolls back with the merge.
+      const names = sourceTags.map((tag) => tag.name);
+      await businessAuditService.log({
+        tx,
+        householdId,
+        userId: audit.userId,
+        action: "UPDATE",
+        entityType: "tag",
+        entityId: targetTagId,
+        details: { operation: "merge_tags", sourceTagIds: filteredSourceIds, mergedTagNames: names },
+        ipAddress: audit.ipAddress,
+      });
+      return names;
     });
 
     logger.info("Merged tags", {
@@ -405,7 +254,7 @@ export class TagService {
     return {
       targetTag: await tagRepository.findById(targetTagId, householdId),
       mergedTagIds: filteredSourceIds,
-      mergedTagNames: sourceTags.map((t) => t.name),
+      mergedTagNames,
     };
   }
 
@@ -435,66 +284,24 @@ export class TagService {
   }
 
   /**
-   * Get tag usage statistics for analytics (CODE-005)
-   */
-  async getTagAnalytics(householdId: string, limit: number = 20) {
-    const allTags = await tagRepository.findByHousehold(householdId);
-
-    // Sort by usage count
-    const sortedTags = allTags
-      .sort((a, b) => (b.usageCount || 0) - (a.usageCount || 0))
-      .slice(0, limit);
-
-    const totalTags = allTags.length;
-    const totalUsage = allTags.reduce((sum, tag) => sum + (tag.usageCount || 0), 0);
-    const averageUsage = totalTags > 0 ? totalUsage / totalTags : 0;
-
-    return {
-      topTags: sortedTags.map((tag) => ({
-        id: tag.id,
-        name: tag.name,
-        color: tag.color,
-        usageCount: tag.usageCount || 0,
-        percentage: totalUsage > 0 ? ((tag.usageCount || 0) / totalUsage) * 100 : 0,
-      })),
-      summary: {
-        totalTags,
-        totalUsage,
-        averageUsage: Number(averageUsage.toFixed(2)),
-      },
-    };
-  }
-
-  /**
    * Create default tags for a household (P3)
-   * Skips tags that already exist with the same name
+   * Skips a name the household already has in any case, archived or not, checked under the
+   * tag-name lock like create (NEW-36, NEW-39)
    */
   async createDefaultTags(
     householdId: string
   ): Promise<{ created: number; skipped: number; tags: Tag[] }> {
-    const existingTags = await tagRepository.findByHousehold(householdId);
-    const existingNames = new Set(
-      existingTags.map((t) => t.name.toLowerCase())
-    );
-
-    let created = 0;
-    let skipped = 0;
-    const createdTags: Tag[] = [];
-
-    for (const defaultTag of DEFAULT_TAGS) {
-      if (existingNames.has(defaultTag.name.toLowerCase())) {
-        skipped++;
-        continue;
+    const createdTags = await withTransaction(async (tx) => {
+      await lockTagNames(tx, householdId);
+      const written: Tag[] = [];
+      for (const defaultTag of DEFAULT_TAGS) {
+        if (await tagRepository.findByName(householdId, defaultTag.name, { executor: tx })) continue;
+        written.push(await tagRepository.create({ householdId, name: defaultTag.name, color: defaultTag.color }, tx));
       }
-
-      const tag = await tagRepository.create({
-        householdId,
-        name: defaultTag.name,
-        color: defaultTag.color,
-      });
-      createdTags.push(tag);
-      created++;
-    }
+      return written;
+    });
+    const created = createdTags.length;
+    const skipped = DEFAULT_TAGS.length - created;
 
     logger.info("Created default tags", {
       householdId,
@@ -503,125 +310,6 @@ export class TagService {
     });
 
     return { created, skipped, tags: createdTags };
-  }
-
-  /**
-   * Suggest tags based on transaction name or merchant (P3)
-   * Uses pattern matching and frequency analysis
-   */
-  async suggestTags(
-    householdId: string,
-    options: {
-      transactionName?: string;
-      merchantName?: string;
-      limit?: number;
-    }
-  ): Promise<
-    Array<{
-      id: string;
-      name: string;
-      color: string | null;
-      confidence: number;
-      reason: string;
-    }>
-  > {
-    const { transactionName, merchantName, limit = 5 } = options;
-    const suggestions: Array<{
-      id: string;
-      name: string;
-      color: string | null;
-      confidence: number;
-      reason: string;
-    }> = [];
-
-    // Get all household tags
-    const allTags = await tagRepository.findByHousehold(householdId);
-    if (allTags.length === 0) {
-      return [];
-    }
-
-    // Search terms to match against
-    const searchTerms = [
-      transactionName?.toLowerCase(),
-      merchantName?.toLowerCase(),
-    ].filter(Boolean) as string[];
-
-    if (searchTerms.length === 0) {
-      // No search terms - return most used tags
-      const sortedTags = [...allTags].sort(
-        (a, b) => (b.usageCount || 0) - (a.usageCount || 0)
-      );
-      return sortedTags.slice(0, limit).map((tag) => ({
-        id: tag.id,
-        name: tag.name,
-        color: tag.color,
-        confidence: 0.5,
-        reason: "frequently_used",
-      }));
-    }
-
-    // Score each tag based on name matching
-    for (const tag of allTags) {
-      const tagNameLower = tag.name.toLowerCase();
-      let maxConfidence = 0;
-      let reason = "no_match";
-
-      for (const term of searchTerms) {
-        // Exact match
-        if (tagNameLower === term) {
-          maxConfidence = Math.max(maxConfidence, 0.95);
-          reason = "exact_match";
-        }
-        // Tag name contains search term
-        else if (term.includes(tagNameLower)) {
-          maxConfidence = Math.max(maxConfidence, 0.85);
-          reason = "term_contains_tag";
-        }
-        // Search term contains tag name
-        else if (tagNameLower.includes(term)) {
-          maxConfidence = Math.max(maxConfidence, 0.75);
-          reason = "tag_contains_term";
-        }
-        // Partial word match
-        else {
-          const tagWords = tagNameLower.split(/\s+/);
-          const termWords = term.split(/\s+/);
-          for (const tagWord of tagWords) {
-            for (const termWord of termWords) {
-              if (tagWord === termWord) {
-                maxConfidence = Math.max(maxConfidence, 0.7);
-                reason = "word_match";
-              } else if (
-                tagWord.includes(termWord) ||
-                termWord.includes(tagWord)
-              ) {
-                maxConfidence = Math.max(maxConfidence, 0.5);
-                reason = "partial_word_match";
-              }
-            }
-          }
-        }
-      }
-
-      // Boost confidence by usage (more used = more likely correct)
-      const usageBoost = Math.min((tag.usageCount || 0) / 100, 0.1);
-      maxConfidence = Math.min(maxConfidence + usageBoost, 0.99);
-
-      if (maxConfidence > 0.3) {
-        suggestions.push({
-          id: tag.id,
-          name: tag.name,
-          color: tag.color,
-          confidence: Number(maxConfidence.toFixed(2)),
-          reason,
-        });
-      }
-    }
-
-    // Sort by confidence and return top N
-    return suggestions
-      .sort((a, b) => b.confidence - a.confidence)
-      .slice(0, limit);
   }
 }
 

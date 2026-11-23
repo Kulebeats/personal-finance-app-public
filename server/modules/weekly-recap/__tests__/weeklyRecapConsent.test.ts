@@ -13,7 +13,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vites
 import { randomUUID } from "crypto";
 import { db } from "../../../db";
 import { eq } from "drizzle-orm";
-import { accounts, auditLogs, users, households } from "@shared/schema";
+import { accounts, auditLogs, users, households, householdMembers, userNotificationPreferences } from "@shared/schema";
 import { sendEmail } from "../../../services/emailService";
 import { sendWeeklyRecapEmail } from "../weekly-recap.email.service";
 import {
@@ -70,6 +70,8 @@ describe("weekly-recap consent gate + audit (SCP-319)", () => {
       failedLoginAttempts: user.failedLoginAttempts,
       lockedUntil: user.lockedUntil,
     });
+    await db.insert(userNotificationPreferences).values({ userId, notificationType: "weekly_recap", emailEnabled: true });
+    await db.insert(householdMembers).values({ householdId, userId, role: "owner" });
     await db.insert(accounts).values({
       id: randomUUID(),
       householdId,

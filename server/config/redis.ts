@@ -1,11 +1,16 @@
 import { randomUUID } from "node:crypto";
 import Redis from "ioredis";
+import { getProductionRedis } from "./redis/production-slot.mjs";
 import { logger } from "../utils/logger";
 
-// Redis is optional in development - only connect if REDIS_URL is set
+// A refused/revoked installed profile must never fall back to REDIS_URL.
+export const productionRedis = getProductionRedis();
+
+// Ordinary Redis remains optional in development. The admitted profile owns its
+// connection privately and does not construct a second ioredis client here.
 export let redis: Redis | null = null;
 
-if (process.env.REDIS_URL) {
+if (!productionRedis && process.env.REDIS_URL) {
   redis = new Redis(process.env.REDIS_URL, {
     maxRetriesPerRequest: null, // Required for BullMQ
     enableReadyCheck: false,
@@ -34,7 +39,22 @@ if (process.env.REDIS_URL) {
  * jobs, and AI rate-limit/cache counters are cluster-wide.
  */
 export function isRedisEnabled(): boolean {
+  if (productionRedis) {
+    productionRedis.assertCurrent();
+    return true;
+  }
   return redis !== null;
+}
+
+/**
+ * Required scheduled work needs no Redis capability: job locks are Postgres
+ * advisory locks (server/core/scheduling/advisoryLock.ts), outside the cache
+ * namespace and its eviction (OPS-013). An admitted profile must still be
+ * current, so a revoked profile keeps failing closed.
+ */
+export function assertRequiredJobCapabilities(): void {
+  if (!productionRedis) return;
+  productionRedis.assertCurrent();
 }
 
 // ============================================================================
@@ -148,6 +168,11 @@ export async function withRedisLock<T>(
   ttlSeconds: number,
   fn: () => Promise<T>,
 ): Promise<{ ran: boolean; result?: T }> {
+  if (productionRedis) {
+    productionRedis.assertCurrent();
+    // No scheduler-lock contract is exposed by this profile facade.
+    throw new Error("REDIS_PROFILE_LOCK_UNAVAILABLE");
+  }
   // No Redis => single instance => no contention, just run it.
   if (!redis) {
     const result = await fn();
@@ -174,6 +199,7 @@ export async function redisIncrementWithTtl(
   key: string,
   windowSeconds: number,
 ): Promise<{ count: number; ttlSeconds: number } | null> {
+  if (productionRedis) return productionRedis.quota.increment(key, windowSeconds);
   if (!redis) return null;
 
   try {
@@ -206,6 +232,7 @@ export async function redisIncrementWithTtl(
 export async function redisReadCounter(
   key: string,
 ): Promise<{ count: number; ttlSeconds: number } | null> {
+  if (productionRedis) return productionRedis.quota.read(key);
   if (!redis) return null;
 
   try {
@@ -226,6 +253,7 @@ export async function redisReadCounter(
  * outage, or when Redis is not configured (caller should fall back).
  */
 export async function redisGetJson<T>(key: string): Promise<T | null> {
+  if (productionRedis) return productionRedis.cache.getJson<T>(key);
   if (!redis) return null;
   try {
     const raw = await redis.get(key);
@@ -246,6 +274,7 @@ export async function redisSetJson<T>(
   value: T,
   ttlSeconds: number,
 ): Promise<boolean> {
+  if (productionRedis) return productionRedis.cache.setJson(key, value, ttlSeconds);
   if (!redis) return false;
   try {
     await redis.setex(key, ttlSeconds, JSON.stringify(value));
@@ -261,6 +290,7 @@ export async function redisSetJson<T>(
  * the delete fails, allowing callers to fall back to local invalidation.
  */
 export async function redisDeleteKey(key: string): Promise<boolean> {
+  if (productionRedis) return productionRedis.cache.deleteKey(key);
   if (!redis) return false;
   try {
     const deleted = await redis.del(key);
@@ -276,6 +306,7 @@ export async function redisDeleteKey(key: string): Promise<boolean> {
  * No-op when Redis is unavailable.
  */
 export async function redisDeleteByPrefix(prefix: string): Promise<number> {
+  if (productionRedis) return productionRedis.cache.deleteByPrefix(prefix);
   if (!redis) return 0;
 
   return new Promise<number>((resolve) => {

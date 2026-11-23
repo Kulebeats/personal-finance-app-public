@@ -8,6 +8,9 @@
 import Layout from "@/components/Layout";
 import { useLocation } from "wouter";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { useBudgetRecalculationPreview } from "@/features/budget/hooks/useBudgetRecalculationPreview";
+import { UnavailableBudgetsNotice } from "@/features/budget/components/UnavailableBudgetsNotice";
+import { isUnbudgetedUnavailable } from "@/hooks/useUnbudgetedSpend";
 
 // Feature module imports
 import {
@@ -21,6 +24,7 @@ import {
   BudgetWalkthrough,
   BudgetSummaryCard,
   ContributionsSection,
+  BudgetGridScroller,
   BudgetPageHeader,
   BudgetLoadingState,
   BudgetErrorState,
@@ -34,12 +38,16 @@ export default function Budget() {
   const [, setLocation] = useLocation();
 
   const budgetData = useBudgetPageData();
+  const budgetPreview = useBudgetRecalculationPreview(budgetData.isSettingsOpen);
 
   // Use modal management hook with save handlers
   const modals = useBudgetModals({
     selectedYear: budgetData.selectedYear,
     selectedMonth: budgetData.selectedMonth,
     moveMoneyOptions: budgetData.moveMoneyOptions,
+    budgets: budgetData.apiBudgets,
+    householdCurrency: budgetData.householdCurrency,
+    unavailableBudgets: budgetData.unavailableBudgets,
     createBudget: budgetData.createBudget,
     updateBudget: budgetData.updateBudget,
     updateBudgetForecast: budgetData.updateBudgetForecast,
@@ -101,16 +109,12 @@ export default function Budget() {
         <div className="flex-1 flex flex-col w-full">
           {budgetData.viewMode === "budget" ? (
             <>
-              <div className="grid grid-cols-12 gap-4 py-3 px-4 text-xs font-semibold text-muted-foreground uppercase tracking-wider border-b border-border mb-2">
-                <div className="col-span-5">Category</div>
-                <div className="col-span-3 text-right pr-4">Budget</div>
-                <div className="col-span-2 text-right pr-8">Actual</div>
-                <div className="col-span-2 text-right">Remaining</div>
-              </div>
-
+              <UnavailableBudgetsNotice budgets={budgetData.unavailableBudgets} />
+              <BudgetGridScroller>
               <div className="bg-card rounded-lg border border-border shadow-sm overflow-hidden pb-6">
                 <BudgetSection
                   title="Income"
+                  currency={budgetData.reportingCurrency}
                   groups={budgetData.incomeGroups}
                   onToggleGroup={budgetData.toggleGroup}
                   onAddItemToGroup={budgetData.addItemToGroup}
@@ -122,12 +126,14 @@ export default function Budget() {
                   showUnbudgeted={Boolean(
                     budgetData.showUnbudgetedBySection.Income
                   )}
+                  unbudgetedSpent={budgetData.unbudgetedSpend.income}
                   onToggleShowUnbudgeted={() =>
                     budgetData.toggleUnbudgetedSection("Income")
                   }
                 />
                 <BudgetSection
                   title="Expenses"
+                  currency={budgetData.reportingCurrency}
                   groups={budgetData.expenseGroups}
                   onToggleGroup={budgetData.toggleGroup}
                   onAddItemToGroup={budgetData.addItemToGroup}
@@ -140,6 +146,7 @@ export default function Budget() {
                   showUnbudgeted={Boolean(
                     budgetData.showUnbudgetedBySection.Expenses
                   )}
+                  unbudgetedSpent={budgetData.unbudgetedSpend.expense}
                   onToggleShowUnbudgeted={() =>
                     budgetData.toggleUnbudgetedSection("Expenses")
                   }
@@ -147,6 +154,7 @@ export default function Budget() {
                 {budgetData.savingsGroups.length > 0 && (
                   <BudgetSection
                     title="Savings"
+                    currency={budgetData.reportingCurrency}
                     groups={budgetData.savingsGroups}
                     onToggleGroup={budgetData.toggleGroup}
                     onAddItemToGroup={budgetData.addItemToGroup}
@@ -166,6 +174,7 @@ export default function Budget() {
                 {budgetData.debtGroups.length > 0 && (
                   <BudgetSection
                     title="Debts"
+                    currency={budgetData.reportingCurrency}
                     groups={budgetData.debtGroups}
                     onToggleGroup={budgetData.toggleGroup}
                     onAddItemToGroup={budgetData.addItemToGroup}
@@ -184,6 +193,7 @@ export default function Budget() {
                 )}
                 <ContributionsSection goals={budgetData.contributionGoals} />
               </div>
+              </BudgetGridScroller>
             </>
           ) : (
             <>
@@ -205,6 +215,7 @@ export default function Budget() {
 
         <div className="w-full lg:w-80 shrink-0 lg:sticky lg:top-6 order-first lg:order-last">
           <BudgetSummaryCard
+            currency={budgetData.reportingCurrency}
             totalIncomeBudget={budgetData.totalIncomeBudget}
             totalIncomeActual={budgetData.totalIncomeActual}
             totalExpenseBudget={budgetData.totalExpenseBudget}
@@ -215,6 +226,8 @@ export default function Budget() {
             expenseGroups={budgetData.expenseGroups}
             summaryTab={budgetData.summaryTab}
             onTabChange={budgetData.setSummaryTab}
+            isIncomeActualIncomplete={isUnbudgetedUnavailable(budgetData.unbudgetedSpend.income)}
+            isExpenseActualIncomplete={isUnbudgetedUnavailable(budgetData.unbudgetedSpend.expense)}
           />
         </div>
       </div>
@@ -230,6 +243,7 @@ export default function Budget() {
         onCommitBudget={modals.handleCommitItemBudget}
       />
       <BudgetSettingsModal
+        preview={budgetPreview}
         isOpen={budgetData.isSettingsOpen}
         onClose={() => budgetData.setIsSettingsOpen(false)}
         budgetSystem={budgetData.budgetSystem}
@@ -239,12 +253,10 @@ export default function Budget() {
             onSuccess: () => budgetData.setIsSettingsOpen(false),
           });
         }}
-        onRecalculate={() =>
-          budgetData.recalculateBudgets.mutate({ months: 3 })
-        }
+        categories={budgetData.categories}
+        categoryGroups={budgetData.categoryGroups}
         onClear={() => budgetData.clearBudgets.mutate()}
         isSaving={budgetData.updateBudgetSettings.isPending}
-        isRecalculating={budgetData.recalculateBudgets.isPending}
         isClearing={budgetData.clearBudgets.isPending}
         onStartWalkthrough={() => budgetData.setIsWalkthroughActive(true)}
       />
@@ -255,6 +267,7 @@ export default function Budget() {
         defaultApplyScope={budgetData.defaultApplyScope}
         isSaving={isBudgetEditSaving}
         onSave={modals.handleBudgetEditSave}
+        opener={modals.budgetEditOpener}
       />
       <ForecastEditModal
         isOpen={Boolean(modals.forecastEdit)}

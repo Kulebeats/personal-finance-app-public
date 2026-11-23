@@ -6,7 +6,6 @@ const mockHouseholdRepository = vi.hoisted(() => ({
   findPendingInvitationByEmail: vi.fn(),
   createInvitation: vi.fn(),
   findInvitationById: vi.fn(),
-  updateInvitationExpiry: vi.fn(),
 }));
 
 const mockUserRepository = vi.hoisted(() => ({
@@ -23,6 +22,13 @@ const mockAuditService = vi.hoisted(() => ({
 }));
 
 const mockSendEmail = vi.hoisted(() => vi.fn().mockResolvedValue(true));
+
+const mockRotateInvitationForResend = vi.hoisted(() => vi.fn());
+
+vi.mock("../invitations.resend", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../invitations.resend")>()),
+  rotateInvitationForResend: mockRotateInvitationForResend,
+}));
 
 vi.mock("../../../repositories/HouseholdRepository", () => ({
   householdRepository: mockHouseholdRepository,
@@ -107,7 +113,7 @@ describe("household invitations email delivery", () => {
     expect(res.status).toHaveBeenCalledWith(201);
   });
 
-  it("sends email when resending an invitation", async () => {
+  it("emails only the new code when resending an invitation", async () => {
     const existingInvitation = {
       id: "invite-2",
       householdId: "household-1",
@@ -120,12 +126,14 @@ describe("household invitations email delivery", () => {
       createdAt: new Date("2026-02-07T00:00:00.000Z"),
     };
 
-    mockHouseholdRepository.findInvitationById.mockResolvedValue(
-      existingInvitation
-    );
-    mockHouseholdRepository.updateInvitationExpiry.mockResolvedValue({
-      ...existingInvitation,
-      expiresAt: new Date("2026-02-14T00:00:00.000Z"),
+    const rotatedCode = "d".repeat(64);
+    mockRotateInvitationForResend.mockResolvedValue({
+      invitation: {
+        ...existingInvitation,
+        inviteCode: rotatedCode,
+        expiresAt: new Date("2026-02-14T00:00:00.000Z"),
+      },
+      inviteCode: rotatedCode,
     });
 
     const req: any = {
@@ -144,6 +152,10 @@ describe("household invitations email delivery", () => {
         to: "invitee@example.com",
       })
     );
+    const [{ html, text }] = mockSendEmail.mock.calls[0];
+    expect(text).toContain(`/invite/${rotatedCode}`);
+    expect(html).toContain(`/invite/${rotatedCode}`);
+    expect(`${html}${text}`).not.toContain(existingInvitation.inviteCode);
     expect(res.status).toHaveBeenCalledWith(200);
   });
 

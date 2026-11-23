@@ -8,11 +8,14 @@ import crypto from "crypto";
 
 export const MFA_BACKUP_CODE_EXPIRY_DAYS = 90;
 
+/** How long an emailed one-time code stays usable. */
+export const MFA_CODE_TTL_MS = 10 * 60 * 1000;
+
 /**
- * Generate a 6-digit numeric OTP.
+ * Generate a 6-digit numeric OTP with a cryptographically secure RNG.
  */
 export function generateMfaCode(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
 }
 
 /**

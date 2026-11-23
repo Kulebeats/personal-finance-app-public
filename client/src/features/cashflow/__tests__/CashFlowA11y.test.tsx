@@ -182,6 +182,8 @@ describe("CashFlow Accessibility", () => {
 
   afterEach(() => {
     restoreLocation(originalLocation);
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     vi.clearAllMocks();
   });
 
@@ -273,6 +275,10 @@ describe("CashFlow Accessibility", () => {
     const user = userEvent.setup();
 
     // Mock fetch for export; serve apiCall's CSRF token fetch transparently.
+    const downloadFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("date,amount", { headers: { "Content-Disposition": 'attachment; filename="cashflow.csv"' } }));
+    const downloadClick = vi.fn();
+    vi.stubGlobal("URL", class extends URL { static createObjectURL = vi.fn(() => "blob:cashflow"); static revokeObjectURL = vi.fn(); });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) { downloadClick(this.download); });
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ success: true, data: { id: "export-123" } }),
@@ -284,6 +290,7 @@ describe("CashFlow Accessibility", () => {
           json: () => Promise.resolve({ csrfToken: "test-csrf" }),
         } as unknown as Response);
       }
+      if (String(input).endsWith("/download")) return downloadFetch(input, init);
       return mockFetch(input, init);
     }) as unknown as typeof fetch;
 
@@ -303,9 +310,8 @@ describe("CashFlow Accessibility", () => {
     // await hop before the export request, so wait rather than assert inline.
     await waitFor(() => expect(mockFetch).toHaveBeenCalled());
     await waitFor(() => {
-      expect(window.location.href).toBe(
-        "/api/reports/exports/export-123/download"
-      );
+      expect(downloadFetch).toHaveBeenCalledWith("/api/reports/exports/export-123/download", expect.objectContaining({ credentials: "include" }));
+      expect(downloadClick).toHaveBeenCalledWith("cashflow.csv");
     });
   });
 

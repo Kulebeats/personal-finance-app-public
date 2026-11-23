@@ -1,3 +1,18 @@
+# These two staged harness files have independently reviewed byte pins.
+server/testing/production/runtime-bootstrap.mjs text eol=lf
+server/testing/production/runtime-enforcement.mjs text eol=lf
+# Preserve portable native/data inventory bytes across Windows checkouts.
+docs/reviews/completion-v2-evidence/R20/RUNTIME-NATIVE-DATA-CANDIDATE.jsonl text eol=lf
+# The installed component copies and pins this trusted runtime closure byte-for-byte.
+server/testing/production/runtime-installed-bootstrap.mjs text eol=lf
+server/testing/production/runtime-installed-component.mjs text eol=lf
+server/testing/production/runtime-installed-data.mjs text eol=lf
+server/testing/production/runtime-installed-loading.mjs text eol=lf
+scripts/runtime-installed-custody-windows.ps1 text eol=lf
+# Keep the reviewed opening-receipt migration byte hash stable on Windows.
+migrations/0026_r13_opening_operation_receipts.sql text eol=lf
+migrations/0027_r13_holding_deletion_receipts.sql text eol=lf
+migrations/0028_r13_sip_authorization.sql text eol=lf
 # The Jarvis CLIs start with a hashbang that vitest 4.1 cannot parse when the
 # line ends in CRLF (Windows checkouts with core.autocrlf=true). Keep them LF.
 scripts/jarvis/*.mjs text eol=lf

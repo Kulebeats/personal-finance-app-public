@@ -1,6 +1,8 @@
-import { redis } from "../config/redis";
 import { createHash } from "crypto";
+import { productionRedis } from "../config/redis";
 import { logger } from "../utils/logger";
+import { createOrdinaryAnalyticsBackend, type AnalyticsCacheBackend } from "./analytics-cache-backend";
+import type { AnalyticsEndpoint } from "../config/redis/keys.mjs";
 
 const CACHE_VERSION = 1; // Increment to invalidate all caches
 
@@ -19,7 +21,6 @@ const CACHE_TTLS: Record<string, number> = {
   // New endpoints
   financialRatios: 300,
   debtAnalysis: 300,
-  netWorthChanges: 600,
   expenseClassification: 300,
   goalsProgress: 60,
   subcategoryBreakdown: 300,
@@ -33,6 +34,8 @@ interface CacheEntry<T> {
 }
 
 export class AnalyticsCache {
+  constructor(private readonly backend: AnalyticsCacheBackend | null = productionRedis?.analytics ?? createOrdinaryAnalyticsBackend()) {}
+
   private generateKey(
     endpoint: string,
     householdId: string,
@@ -77,44 +80,45 @@ export class AnalyticsCache {
     compute: () => Promise<T>,
   ): Promise<T & { generatedAt: string }> {
     // If Redis is not available, just compute and return with current time
-    if (!redis) {
+    const backend = this.backend;
+    backend?.assertCurrent();
+    // A calculation started before a ledger or visibility change can finish after cache invalidation.
+    // Read balance-sensitive reports, including derived net-worth changes, directly from their source.
+    const liveRead = endpoint === "netWorth" || endpoint === "netWorthChanges" || endpoint === "debtAnalysis" || endpoint === "budgetComparison"
+      || (endpoint === "cashflow" && params.includeForecast === true);
+    if (!backend || liveRead) {
       const result = await compute();
+      backend?.assertCurrent();
       return { ...result, generatedAt: new Date().toISOString() };
     }
 
     const key = this.generateKey(endpoint, householdId, params);
     const ttl = CACHE_TTLS[endpoint] || 300;
 
-    try {
-      // Try cache first
-      const cached = await redis.get(key);
-      if (cached) {
-        const entry = JSON.parse(cached) as CacheEntry<T>;
-        // Handle legacy cache format if any exists (though version bump should prevent this)
-        if (entry.generatedAt) {
-          return { ...entry.data, generatedAt: entry.generatedAt };
-        }
-        // Fallback for raw data if ever encountered
-        return {
-          ...(entry as unknown as T),
-          generatedAt: new Date().toISOString(),
-        };
+    // An injected required binding rejects failures; ordinary optional fallback
+    // lives in its backend and cannot swallow a profile-generation refusal.
+    const cached = await backend.getJson<CacheEntry<T>>(key);
+    backend.assertCurrent();
+    if (cached !== null) {
+      // Handle legacy cache format if any exists (though version bump should prevent this)
+      if (cached.generatedAt) {
+        return { ...cached.data, generatedAt: cached.generatedAt };
       }
-    } catch (error) {
-      logger.warn("Redis get error, falling back to compute", { error });
+      // Fallback for raw data if ever encountered
+      return {
+        ...(cached as unknown as T),
+        generatedAt: new Date().toISOString(),
+      };
     }
 
     // Compute
     const result = await compute();
+    backend.assertCurrent();
     const generatedAt = new Date().toISOString();
     const entry: CacheEntry<T> = { data: result, generatedAt };
 
-    try {
-      // Cache result with wrapper
-      await redis.setex(key, ttl, JSON.stringify(entry));
-    } catch (error) {
-      logger.warn("Redis set error", { error });
-    }
+    await backend.setJson(key, entry, ttl);
+    backend.assertCurrent();
 
     return { ...result, generatedAt };
   }
@@ -124,30 +128,10 @@ export class AnalyticsCache {
    * REPORTS-CACHE-001: Updated pattern to handle new key structure with userId
    */
   async invalidateHousehold(householdId: string): Promise<void> {
-    if (!redis) return;
-
-    try {
-      // Pattern matches both with and without userId segment for backwards compatibility
-      const pattern = `analytics:*:${householdId}*:v${CACHE_VERSION}:*`;
-      const stream = redis.scanStream({
-        match: pattern,
-        count: 100,
-      });
-
-      stream.on("data", (keys: string[]) => {
-        if (keys.length) {
-          const pipeline = redis!.pipeline();
-          keys.forEach((key) => pipeline.del(key));
-          pipeline.exec();
-        }
-      });
-
-      stream.on("end", () => {
-        // scan complete
-      });
-    } catch (error) {
-      logger.error("Cache invalidation error", { error });
-    }
+    if (!this.backend) return;
+    this.backend.assertCurrent();
+    await this.backend.invalidate({ scope: "household", householdId });
+    this.backend.assertCurrent();
   }
 
   /**
@@ -155,29 +139,13 @@ export class AnalyticsCache {
    * REPORTS-CACHE-001: Updated pattern to handle new key structure with userId
    */
   async invalidateEndpoint(
-    endpoint: string,
+    endpoint: AnalyticsEndpoint,
     householdId: string,
   ): Promise<void> {
-    if (!redis) return;
-
-    try {
-      // Pattern matches both with and without userId segment for backwards compatibility
-      const pattern = `analytics:${endpoint}:${householdId}*:v${CACHE_VERSION}:*`;
-      const stream = redis.scanStream({
-        match: pattern,
-        count: 100,
-      });
-
-      stream.on("data", (keys: string[]) => {
-        if (keys.length) {
-          const pipeline = redis!.pipeline();
-          keys.forEach((key) => pipeline.del(key));
-          pipeline.exec();
-        }
-      });
-    } catch (error) {
-      logger.error("Cache endpoint invalidation error", { error });
-    }
+    if (!this.backend) return;
+    this.backend.assertCurrent();
+    await this.backend.invalidate({ scope: "endpoint", endpoint, householdId });
+    this.backend.assertCurrent();
   }
 }
 

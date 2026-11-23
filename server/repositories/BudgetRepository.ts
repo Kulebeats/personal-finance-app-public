@@ -1,6 +1,7 @@
 import type { Budget, InsertBudget } from "@shared/schema";
 import type { Money } from "../core/money";
 import { budgetSpendRepository } from "./BudgetSpendRepository";
+import type { BudgetReadContext } from "./BudgetReadContext";
 import type { TransactionType } from "../utils/withTransaction";
 import {
   budgetCrudRepository,
@@ -33,24 +34,25 @@ export class BudgetRepository {
     return this.crudRepository.findByHousehold(householdId, options);
   }
 
-  async findById(id: string, householdId: string): Promise<Budget | undefined> {
-    return this.crudRepository.findById(id, householdId);
+  async findById(id: string, householdId: string, tx?: TransactionType, forUpdate = false): Promise<Budget | undefined> {
+    return tx ? this.crudRepository.findById(id, householdId, tx, forUpdate) : this.crudRepository.findById(id, householdId);
   }
 
-  async create(data: InsertBudget): Promise<Budget> {
-    return this.crudRepository.create(data);
+  async create(data: InsertBudget, tx?: TransactionType): Promise<Budget> {
+    return this.crudRepository.create(data, tx);
   }
 
   async update(
     id: string,
     householdId: string,
     data: Partial<Budget>,
+    tx?: TransactionType,
   ): Promise<Budget | undefined> {
-    return this.crudRepository.update(id, householdId, data);
+    return this.crudRepository.update(id, householdId, data, tx);
   }
 
-  async delete(id: string, householdId: string): Promise<boolean> {
-    return this.crudRepository.delete(id, householdId);
+  async delete(id: string, householdId: string, tx?: TransactionType): Promise<boolean> {
+    return this.crudRepository.delete(id, householdId, tx);
   }
 
   async calculateSpent(
@@ -162,6 +164,8 @@ export class BudgetRepository {
     currency: string = "ZMW",
     categoryTypeMap: Map<string, "income" | "expense">,
     groupTypeMap: Map<string, "income" | "expense">,
+    context: BudgetReadContext,
+    includeFlex = true,
   ): Promise<{
     byCategoryId: Map<string, Money>;
     byCategoryGroupId: Map<string, Money>;
@@ -176,6 +180,8 @@ export class BudgetRepository {
       currency,
       categoryTypeMap,
       groupTypeMap,
+      context,
+      includeFlex,
     );
   }
 
@@ -256,12 +262,13 @@ export class BudgetRepository {
     }>,
     startDate: string,
     endDate: string,
+    options: { refreshZero?: boolean } = {},
   ): Promise<{ created: number; updated: number }> {
     return this.rolloverRepository.persistBudgetPeriodRollovers(
       budgetProgresses,
       startDate,
       endDate,
-      (data, tx) => this.upsertPeriod(data, tx),
+      options,
     );
   }
 }

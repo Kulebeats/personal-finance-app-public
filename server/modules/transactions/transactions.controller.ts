@@ -11,6 +11,8 @@ import { Request, Response } from "express";
 import { z } from "zod";
 import { transactionService as legacyTransactionService } from "../../services/TransactionService";
 import { transactionGoalLinkService } from "../../services/TransactionGoalLinkService";
+import { readGoalSourceVisibility } from "../../services/goal/GoalViewerProgress";
+import { mapLinkResponseMoney } from "../goals/goals.helpers";
 import {
   uploadAttachment,
   listAttachments,
@@ -36,7 +38,7 @@ import { businessAuditService } from "../../services/BusinessAuditService";
 import { householdRepository } from "../../repositories/HouseholdRepository";
 import {
   mapTransactionMoney,
-  mapTransactionLinkMoney,
+  mapVisibleTransactionMoney,
 } from "./transactions.helpers";
 
 // SEC-VALID-005: Validation schemas for owner and review updates
@@ -135,35 +137,16 @@ export async function getSummary(req: Request, res: Response): Promise<void> {
     );
   }
 
-  const { startDate, endDate, ownerUserId, accountId, tagIds } =
-    queryResult.data;
-
-  if (tagIds && tagIds.length > 0) {
-    await transactionService.validateTagIds(tagIds, householdId);
-  }
-
-  // Apply pending visibility preference to match list behavior
-  const prefs = await householdRepository.findPreferences(householdId);
-  const includePending = prefs?.showPendingTransactions ?? true;
-
-  const summary = await transactionService.getTransactionSummary(
-    householdId,
-    userId,
-    startDate,
-    endDate,
-    {
-      ownerUserId,
-      accountId,
-      tagIds,
-      includePending,
-    },
-  );
+  const { startDate, endDate, groupBy: _groupBy, ...filters } = queryResult.data;
+  const summary = await transactionService.getTransactionSummary(householdId, userId, startDate, endDate, filters);
 
   success(res, {
     ...summary,
-    totalIncome: toMoneyDto(summary.totalIncome),
-    totalExpenses: toMoneyDto(summary.totalExpenses),
-    netFlow: toMoneyDto(summary.netFlow),
+    totalIncome: toMoneyDto(summary.totalIncome, summary.currency),
+    totalExpenses: toMoneyDto(summary.totalExpenses, summary.currency),
+    netFlow: toMoneyDto(summary.netFlow, summary.currency),
+    largestIncome: toMoneyDto(summary.largestIncome, summary.currency),
+    largestExpense: toMoneyDto(summary.largestExpense, summary.currency),
   });
 }
 
@@ -189,17 +172,22 @@ export async function getById(req: Request, res: Response): Promise<void> {
  * GET /api/transactions/:id/goals
  */
 export async function getGoalLinks(req: Request, res: Response): Promise<void> {
-  const { householdId } = req.householdContext!;
   const { id } = req.params;
+  const parsedId = z.string().uuid().safeParse(id);
+  if (!parsedId.success) {
+    throw new ValidationError("Invalid transaction ID", parsedId.error.errors);
+  }
 
   const links = await transactionGoalLinkService.getLinksForTransaction(
-    id,
-    householdId,
+    parsedId.data,
+    req.householdContext!,
   );
 
+  // FIN-01: each goal's applied effect only for a member who can see all of that goal's progress.
+  const visibility = await readGoalSourceVisibility(req.householdContext!, [...new Set(links.map((link) => link.goalId))]);
   success(
     res,
-    links.map((link) => mapTransactionLinkMoney(link)),
+    links.map((link) => mapLinkResponseMoney(link, link.goal.currency, visibility.get(link.goalId)?.progressVisible === true)),
   );
 }
 
@@ -238,7 +226,7 @@ export async function create(req: Request, res: Response): Promise<void> {
 
   res.status(isDuplicate ? 200 : 201).json({
     success: true,
-    data: mapTransactionMoney(transaction),
+    data: await mapVisibleTransactionMoney(transaction.id, req.householdContext!),
     isDuplicate,
   });
 }
@@ -275,7 +263,7 @@ export async function update(req: Request, res: Response): Promise<void> {
 
   logger.request(req, "Updated transaction");
 
-  success(res, mapTransactionMoney(transaction));
+  success(res, await mapVisibleTransactionMoney(transaction.id, req.householdContext!));
 }
 
 /**
@@ -326,7 +314,7 @@ export async function updateOwner(req: Request, res: Response): Promise<void> {
     { ipAddress: businessAuditService.getIpAddress(req) },
   );
 
-  success(res, mapTransactionMoney(transaction));
+  success(res, await mapVisibleTransactionMoney(transaction.id, req.householdContext!));
 }
 
 /**
@@ -364,7 +352,7 @@ export async function markReviewed(req: Request, res: Response): Promise<void> {
           auditContext,
         );
 
-  success(res, mapTransactionMoney(transaction));
+  success(res, await mapVisibleTransactionMoney(transaction.id, req.householdContext!));
 }
 
 // Re-export attachment methods for external use

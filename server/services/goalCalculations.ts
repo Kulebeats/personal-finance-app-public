@@ -3,11 +3,10 @@ import {
   calculateGoalProgress,
   calculatePercentComplete as engineCalculatePercent,
   determineGoalStatus,
-  calculateGoalProjection,
-  calculateRequiredMonthlyContribution,
   toMoney,
 } from "../core/calculations";
 import { Money } from "../core/money";
+import { projectedCompletionDate, requiredMonthlyContribution } from "./goal/goalForecast";
 
 export type GoalStatus = "on_track" | "behind" | "at_risk" | "completed";
 
@@ -115,7 +114,9 @@ export function calculatePercentComplete(
 
 export function calculateStatus(
   goal: Goal,
-  currentOverride?: number
+  currentOverride: number | undefined,
+  /** The household's calendar date (householdToday); required so status never runs on the UTC day. */
+  today: string
 ): GoalStatus {
   if (goal.isCompleted) return "completed";
 
@@ -133,7 +134,8 @@ export function calculateStatus(
     startDate: new Date(goal.startDate).toISOString().split("T")[0],
     targetDate: goal.targetDate
       ? new Date(goal.targetDate).toISOString().split("T")[0]
-      : new Date().toISOString().split("T")[0], // Default to today if no target date to avoid errors, though logic handles it
+      : today, // An undated goal is judged against today
+    currentDate: today,
   });
 
   // Map engine status to local GoalStatus
@@ -155,78 +157,60 @@ export function calculateStatus(
   }
 }
 
+/**
+ * What a save-up or investment goal still needs, in the goal's currency.
+ * Progress below zero counts as none (as the number helpers above clamp it).
+ */
+function remainingToTarget(goal: Goal, currentOverride?: Money): Money {
+  const target = new Money(goal.targetAmount, goal.currency);
+  const current = new Money((currentOverride ?? new Money(goal.currentAmount)).amount, goal.currency);
+  return target.subtract(current.isNegative() ? Money.zero(goal.currency) : current);
+}
+
+/**
+ * NEW-15: the monthly amount that reaches the target by its date, counted in
+ * calendar months from `today`, the household's calendar date. Null for a
+ * pay-down goal or one with no target date; zero once the target is reached.
+ */
 export function calculateMonthlyProjection(
   goal: Goal,
-  currentOverride?: number
-): number | null {
+  today: string,
+  currentOverride?: Money
+): Money | null {
   if (goal.type === "pay_down") return null;
   if (!goal.targetDate) return null;
-
-  const current = getGoalCurrentAmount(goal, currentOverride);
-  const target = getGoalTargetAmount(goal);
-
-  if (current >= target) return 0;
-
-  const targetDate = new Date(goal.targetDate);
-  const today = new Date();
-
-  // Engine helper for required monthly contribution
-  const monthsRemaining =
-    (targetDate.getFullYear() - today.getFullYear()) * 12 +
-    (targetDate.getMonth() - today.getMonth());
-
-  const effectiveMonths = Math.max(1, monthsRemaining);
-  const remaining = Math.max(0, target - current);
-
-  const required = calculateRequiredMonthlyContribution(
-    toMoney(remaining),
-    effectiveMonths
-  );
-  return required;
+  const remaining = remainingToTarget(goal, currentOverride);
+  if (remaining.isNegativeOrZero()) return Money.zero(goal.currency);
+  return requiredMonthlyContribution(remaining, today, goal.targetDate);
 }
 
+/**
+ * NEW-15: the date the goal completes at `monthlyContribution` (by default the
+ * monthly projection), in calendar months from `today`, the household's
+ * calendar date. Null when nothing is being added.
+ */
 export function calculateProjectedCompletion(
   goal: Goal,
-  monthlyContribution?: number,
-  currentOverride?: number
+  today: string,
+  monthlyContribution?: Money | null,
+  currentOverride?: Money
 ): string | null {
   if (goal.type === "pay_down") return null;
-
-  const current = getGoalCurrentAmount(goal, currentOverride);
-  const target = getGoalTargetAmount(goal);
-  const targetDate = goal.targetDate
-    ? new Date(goal.targetDate).toISOString().split("T")[0]
-    : "";
-
-  if (current >= target) return new Date().toISOString().split("T")[0];
-
-  const monthly =
-    monthlyContribution ?? calculateMonthlyProjection(goal, currentOverride);
-  if (!monthly || monthly <= 0) return null;
-
-  // Use engine projection with synthetic inputs to get date
-  // We construct a "recentContributions" input based on the monthly rate provided
-  // rate = recent / period. We want rate = monthly / 30 * period?
-  // Engine: dailyRate = recent / period.
-  // We want: dailyRate = monthly / 30.
-  // So let recent = monthly, period = 30.
-
-  const projection = calculateGoalProjection({
-    currentAmount: toMoney(current),
-    targetAmount: toMoney(target),
-    targetDate: targetDate || new Date().toISOString().split("T")[0], // Dummy date if missing, just need rate projection
-    recentContributions: toMoney(monthly),
-    contributionPeriodDays: 30,
-  });
-
-  return projection.projectedCompletionDate === "never"
-    ? null
-    : projection.projectedCompletionDate;
+  const remaining = remainingToTarget(goal, currentOverride);
+  if (remaining.isNegativeOrZero()) return today;
+  const monthly = monthlyContribution ?? calculateMonthlyProjection(goal, today, currentOverride);
+  return monthly ? projectedCompletionDate(remaining, monthly, today) : null;
 }
 
+/**
+ * The progress fields a balance change saves. `today` is the household's
+ * calendar date (householdToday). It is required, so no caller can fall back
+ * to the host's or UTC's date.
+ */
 export function buildGoalBalanceUpdate(
   goal: Goal,
-  newBalance: Money | number
+  newBalance: Money | number,
+  today: string
 ): {
   currentAmount: string;
   status: GoalStatus;
@@ -243,13 +227,9 @@ export function buildGoalBalanceUpdate(
   // For status/projection calculations, we need numbers (logic-only, not persistence)
   const balanceNumber = balanceMoney.toNumber();
 
-  const status = calculateStatus(goal, balanceNumber);
-  const monthlyProjection = calculateMonthlyProjection(goal, balanceNumber);
-  const projectedCompletionDate = calculateProjectedCompletion(
-    goal,
-    monthlyProjection ?? undefined,
-    balanceNumber
-  );
+  const status = calculateStatus(goal, balanceNumber, today);
+  const monthlyProjection = calculateMonthlyProjection(goal, today, balanceMoney);
+  const projectedCompletionDate = calculateProjectedCompletion(goal, today, monthlyProjection, balanceMoney);
   const percentComplete = calculatePercentComplete(goal, balanceNumber);
   const isCompleted = percentComplete >= 100;
 
@@ -257,8 +237,7 @@ export function buildGoalBalanceUpdate(
     // CRITICAL: Use Money.toString() for precision, not toFixed(2)
     currentAmount: balanceMoney.toString(),
     status,
-    monthlyProjection:
-      monthlyProjection === null ? null : new Money(String(monthlyProjection)).toString(),
+    monthlyProjection: monthlyProjection === null ? null : monthlyProjection.toString(),
     projectedCompletionDate,
     isCompleted,
     completedAt:

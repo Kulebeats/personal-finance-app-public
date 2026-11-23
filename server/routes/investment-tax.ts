@@ -4,92 +4,65 @@ import { householdGuard } from "../middleware/householdGuard";
 import { requireAuth } from "../auth";
 import { analyticsLimiter } from "../middleware/rateLimit";
 import { Parser } from "json2csv";
-import { logger } from "../utils/logger";
 import { businessAuditService } from "../services/BusinessAuditService";
 import { randomUUID } from "crypto";
+import { can } from "../core/authz/capabilities";
+import { ForbiddenError, ValidationError } from "../core/errors";
+import { asyncHandler } from "../utils/errorHandler";
+import { db } from "../db";
+import { householdToday } from "../services/householdCalendarToday";
+import { neutralizeCsvFormula } from "../core/csv";
 
 const router = Router();
-
-// SEC-AUTH-003: Apply authentication, household isolation, and rate limiting
 router.use(requireAuth);
 router.use(householdGuard);
 router.use(analyticsLimiter);
 
-// GET /api/investments/tax/summary?year=2024
-router.get("/summary", async (req: Request, res: Response) => {
-  try {
-    const householdId = req.householdContext!.householdId;
-    const year = Number(req.query.year) || new Date().getFullYear();
+/** The household's current calendar year, not the host's or the browser's. */
+async function householdYear(req: Request) {
+  return Number((await householdToday(db, req.householdContext!.householdId)).slice(0, 4));
+}
 
-    const summary = await investmentTaxService.getTaxSummary(householdId, year);
-    res.json(summary);
-  } catch (error) {
-    logger.error(
-      "Error fetching tax summary",
-      { requestId: req.requestId },
-      error as Error
-    );
-    res.status(500).json({ message: "Failed to fetch tax summary" });
-  }
-});
+async function taxYear(req: Request) {
+  // An omitted year is the household's current calendar year.
+  const year = req.query.year === undefined ? await householdYear(req) : Number(req.query.year);
+  if (!Number.isInteger(year) || year < 1000 || year >= 9999) throw new ValidationError("A valid tax year is required");
+  return year;
+}
 
-// GET /api/investments/tax/zra-export?year=2024&format=csv
-router.get("/zra-export", async (req: Request, res: Response) => {
-  try {
-    const { householdId, userId } = req.householdContext!;
-    const year = Number(req.query.year) || new Date().getFullYear();
-    const format = req.query.format === "json" ? "json" : "csv";
+// NEW-22: the report's default and latest selectable year (no financial data).
+router.get("/year", asyncHandler(async (req: Request, res: Response) => {
+  res.json({ year: await householdYear(req) });
+}));
 
-    const data = await investmentTaxService.getZraExport(householdId, year);
+router.get("/summary", asyncHandler(async (req: Request, res: Response) => {
+  const summary = await investmentTaxService.getTaxSummary(req.householdContext!, await taxYear(req));
+  res.json(summary);
+}));
 
-    // DPA audit (Rule 9): this endpoint egresses financial + PII data (ZRA
-    // withholding-tax export) - mirrors the reports CSV export's PROCESS/
-    // data_export audit row. There is no persisted export record for this
-    // single-shot endpoint, so a fresh id identifies the egress event itself.
-    // Metadata only - never the exported rows.
-    await businessAuditService.log({
-      userId,
-      householdId,
-      action: "PROCESS",
-      entityType: "data_export",
-      entityId: randomUUID(),
-      details: {
-        exportType: "investment_tax_zra",
-        fileFormat: format,
-        year,
-        recordCount: data.length,
-      },
-      ipAddress: businessAuditService.getIpAddress(req),
-    });
+router.get("/zra-export", asyncHandler(async (req: Request, res: Response) => {
+  const actor = req.householdContext!;
+  if (!can(actor.role, "financial.export")) throw new ForbiddenError("Financial export access required");
+  const year = await taxYear(req), format = req.query.format === "json" ? "json" : "csv";
 
-    if (format === "json") {
-      res.json(data);
-    } else {
-      // CSV Export
-      const fields = [
-        "date",
-        "type",
-        "security",
-        "grossAmount",
-        "whtPaid",
-        "netAmount",
-        "institution",
-      ];
-      const parser = new Parser({ fields });
-      const csv = parser.parse(data);
-
-      res.header("Content-Type", "text/csv");
-      res.attachment(`zra_tax_export_${year}.csv`);
-      res.send(csv);
-    }
-  } catch (error) {
-    logger.error(
-      "Error generating ZRA export",
-      { requestId: req.requestId },
-      error as Error
-    );
-    res.status(500).json({ message: "Failed to generate export" });
-  }
-});
+  // This source-free record describes the request, not private financial rows
+  // or their count. Commit it before the final fresh protected financial read.
+  await db.transaction(tx => businessAuditService.log({
+    tx,
+    userId: actor.userId, householdId: actor.householdId, action: "PROCESS", entityType: "data_export", entityId: randomUUID(),
+    details: { exportType: "investment_tax_zra", fileFormat: format, year, phase: "requested" },
+    ipAddress: businessAuditService.getIpAddress(req),
+  }));
+  const data = await investmentTaxService.getZraExport(actor, year);
+  if (format === "json") return res.json(data);
+  const parser = new Parser({ fields: ["date", "type", "security", "grossAmount", "whtPaid", "netAmount", "institution"] });
+  // A-29: a security name is user-entered and `securities` is not household-scoped,
+  // so every text cell is neutralized before a spreadsheet opens it. Amounts stay numeric.
+  const rows = data.map(row => ({ ...row, date: neutralizeCsvFormula(row.date), type: neutralizeCsvFormula(row.type),
+    security: neutralizeCsvFormula(row.security), institution: neutralizeCsvFormula(row.institution) }));
+  res.header("Content-Type", "text/csv");
+  res.attachment(`zra_tax_export_${year}.csv`);
+  return res.send(parser.parse(rows));
+}));
 
 export default router;

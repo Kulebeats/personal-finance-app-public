@@ -101,7 +101,7 @@ describe("AdviceChat — consent gating", () => {
     renderChat();
 
     expect(
-      await screen.findByText(/ask a household admin to enable thandi/i),
+      await screen.findByText(/ask a household owner or administrator to enable or disable ai processing/i),
     ).toBeInTheDocument();
     expect(screen.queryByLabelText(composerLabel)).not.toBeInTheDocument();
   });
@@ -374,7 +374,7 @@ describe("AdviceChat — quota and error states", () => {
 
     // The invalidated consent query refetches, now consent-absent → gate.
     expect(
-      await screen.findByText(/ask a household admin to enable thandi/i),
+      await screen.findByText(/ask a household owner or administrator to enable or disable ai processing/i),
     ).toBeInTheDocument();
     expect(screen.queryByLabelText(composerLabel)).not.toBeInTheDocument();
   });

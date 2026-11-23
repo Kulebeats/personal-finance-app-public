@@ -4,9 +4,13 @@
  * TanStack Query hooks for budget operations.
  */
 
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { userErrorMessage } from "@/lib/errorCopy";
+import { calendarToday, useCalendarTimeZone } from "@/lib/calendarZone";
+import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import type { MoneyDto } from "@shared/money";
+import { isUnavailableFlexBudget, storeUnavailableBudgets, useUnavailableBudgets } from "@/hooks/useUnavailableBudgets";
+import { storeUnbudgetedSpend } from "@/hooks/useUnbudgetedSpend";
 
 // Types matching server schema
 export type BudgetPeriod = "monthly";
@@ -17,7 +21,9 @@ export interface Budget {
   name: string;
   categoryId?: string | null;
   categoryGroupId?: string | null;
-  amount: MoneyDto;
+  amount: MoneyDto | null;
+  /** Target denomination remains available when the recurring default is absent. */
+  currency?: string;
   period: BudgetPeriod;
   rolloverEnabled: boolean;
   rolloverAmount?: MoneyDto | null;
@@ -30,6 +36,8 @@ export interface Budget {
 }
 
 export interface BudgetWithProgress extends Budget {
+  // Progress omits months without an effective limit.
+  amount: MoneyDto;
   spent: MoneyDto;
   remaining: MoneyDto;
   percentUsed: number;
@@ -50,7 +58,7 @@ export interface BudgetSettings {
 export interface BudgetForecastPeriod {
   year: number;
   month: number;
-  amount: MoneyDto;
+  amount: MoneyDto | null;
 }
 
 export interface BudgetForecastEntry extends Budget {
@@ -72,6 +80,8 @@ export interface CreateBudgetInput {
   warningThreshold?: number;
   alertThreshold?: number;
   isActive?: boolean;
+  /** "This month only": the amount is that month's limit, with no recurring default. */
+  onlyFor?: { year: number; month: number };
 }
 
 // API response types
@@ -111,15 +121,21 @@ export function useBudgets(params?: { includeInactive?: boolean }) {
   });
 }
 
+export async function fetchBudgetProgress(queryClient: QueryClient, year: number, month: number) {
+  const res = await apiCall<ApiResponse<BudgetWithProgress[]> & { meta?: unknown }>(
+    `/budgets/progress?year=${year}&month=${month}`
+  );
+  // Every reader of the progress cache must store its companion metadata.
+  storeUnavailableBudgets(queryClient, year, month, res.meta);
+  storeUnbudgetedSpend(queryClient, year, month, res.meta);
+  return res.data;
+}
+
 export function useBudgetProgress(year: number, month: number) {
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: budgetKeys.progress(year, month),
-    queryFn: async () => {
-      const res = await apiCall<ApiResponse<BudgetWithProgress[]>>(
-        `/budgets/progress?year=${year}&month=${month}`
-      );
-      return res.data;
-    },
+    queryFn: () => fetchBudgetProgress(queryClient, year, month),
     staleTime: 60_000,
   });
 }
@@ -137,9 +153,10 @@ export function useBudgetAlerts(year: number, month: number) {
   });
 }
 
-export function useBudgetSettings() {
+export function useBudgetSettings(enabled = true) {
   return useQuery({
     queryKey: budgetKeys.settings(),
+    enabled,
     queryFn: async () => {
       const res = await apiCall<ApiResponse<BudgetSettings>>(
         "/budgets/settings"
@@ -172,7 +189,7 @@ export function useUpdateBudgetSettings() {
     onError: (error: Error) => {
       toast({
         title: "Failed to update budget settings",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -230,7 +247,7 @@ export function useUpdateBudgetForecast() {
     onError: (error: Error) => {
       toast({
         title: "Failed to update forecast",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -259,7 +276,7 @@ export function useRecalculateBudgets() {
     onError: (error: Error) => {
       toast({
         title: "Failed to recalculate budgets",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -288,7 +305,7 @@ export function useClearBudgets() {
     onError: (error: Error) => {
       toast({
         title: "Failed to clear budgets",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -322,7 +339,7 @@ export function useMoveBudgetAmount() {
     onError: (error: Error) => {
       toast({
         title: "Failed to move budget",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -351,11 +368,24 @@ export function useCreateBudget() {
     onError: (error: Error) => {
       toast({
         title: "Failed to create budget",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
   });
+}
+
+/**
+ * The household's flex budget, created on the server (once, audited) when it
+ * has none yet: a new household is on the flex system before any bucket
+ * exists, so its first flex amount needs one to be written to (N8 b2).
+ */
+export async function ensureFlexBudget(): Promise<Budget> {
+  const res = await apiCall<ApiResponse<Budget>>("/budgets/flex", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return res.data;
 }
 
 export function useUpdateBudget() {
@@ -369,6 +399,8 @@ export function useUpdateBudget() {
     }: {
       id: string;
       data: Partial<CreateBudgetInput>;
+      /** The inline editor may have retired while the request was in flight. */
+      canShowFeedback?: () => boolean;
     }) => {
       const res = await apiCall<ApiResponse<Budget>>(`/budgets/${id}`, {
         method: "PUT",
@@ -376,17 +408,19 @@ export function useUpdateBudget() {
       });
       return res.data;
     },
-    onSuccess: (budget) => {
+    onSuccess: (budget, { canShowFeedback }) => {
       queryClient.invalidateQueries({ queryKey: budgetKeys.all });
+      if (canShowFeedback && !canShowFeedback()) return;
       toast({
         title: "Budget updated",
         description: `${budget.name} has been updated.`,
       });
     },
-    onError: (error: Error) => {
+    onError: (error: Error, { canShowFeedback }) => {
+      if (canShowFeedback && !canShowFeedback()) return;
       toast({
         title: "Failed to update budget",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -410,7 +444,7 @@ export function useDeleteBudget() {
     onError: (error: Error) => {
       toast({
         title: "Failed to delete budget",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -419,6 +453,14 @@ export function useDeleteBudget() {
 
 // Helper for current month budgets
 export function useCurrentMonthBudgets() {
-  const now = new Date();
-  return useBudgetProgress(now.getFullYear(), now.getMonth() + 1);
+  useCalendarTimeZone(); // NEW-15: re-derive when the household zone arrives.
+  // NEW-15: the calendar zone's month.
+  const [year, month] = calendarToday().split("-").map((part) => parseInt(part, 10));
+  const progress = useBudgetProgress(year, month);
+  const unavailableBudgets = useUnavailableBudgets(year, month);
+  // Without a flex row, both modes show the available category/group progress.
+  const needsMode = Boolean(progress.data?.some(budget => budget.isFlexBucket) || unavailableBudgets.some(isUnavailableFlexBudget));
+  const settings = useBudgetSettings(needsMode);
+  return { ...progress, unavailableBudgets, budgetSystem: settings.data?.budgetSystem,
+    isLoading: progress.isLoading || (needsMode && settings.isLoading) };
 }

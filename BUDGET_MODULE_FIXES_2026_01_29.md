@@ -23,7 +23,7 @@ Budget amounts were not properly validated to reject negative or zero values. Cu
 ### Solution
 
 #### 1. Enhanced Currency Validation
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/server/core/validation/money.ts`
+**File:** `/mnt/c/Users/USER/personal-finance-app/server/core/validation/money.ts`
 
 - Added strict currency code validation requiring uppercase 3-letter ISO 4217 format
 - Implemented whitelist of supported currencies (expandable list)
@@ -31,7 +31,7 @@ Budget amounts were not properly validated to reject negative or zero values. Cu
 - Validates against common currencies (USD, EUR, ZMW, etc.)
 
 #### 2. Budget Validation Schema Updates
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/server/modules/budgets/budgets.validation.ts`
+**File:** `/mnt/c/Users/USER/personal-finance-app/server/modules/budgets/budgets.validation.ts`
 
 - Changed `createBudgetSchema.amount` from `nonNegativeMoneyAmountSchema` to `positiveMoneyAmountSchema`
 - Changed `updateBudgetSchema.amount` to use `positiveMoneyAmountSchema`
@@ -39,7 +39,7 @@ Budget amounts were not properly validated to reject negative or zero values. Cu
 - Kept `forecastUpdateSchema.amount` as non-negative (allows zero for clearing budgets)
 
 #### 3. Service Layer Defense-in-Depth
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/server/services/budget/BudgetCoreService.ts`
+**File:** `/mnt/c/Users/USER/personal-finance-app/server/services/budget/BudgetCoreService.ts`
 
 - Added explicit validation in `createBudget()` to check for negative OR zero amounts
 - Added same validation in `updateBudget()` for amount changes
@@ -64,7 +64,7 @@ Uncertainty about whether budget_periods would be properly cascaded when parent 
 ### Solution
 
 #### 1. Database Cascade Verification Migration
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/migrations/20260129_budget_cascade_fix.sql`
+**File:** `/mnt/c/Users/USER/personal-finance-app/migrations/20260129_budget_cascade_fix.sql`
 
 - Verifies existing foreign key constraint has `ON DELETE CASCADE`
 - Recreates constraint if missing or incorrect
@@ -72,7 +72,7 @@ Uncertainty about whether budget_periods would be properly cascaded when parent 
 - Includes verification checks to confirm cascade behavior
 
 #### 2. Explicit Cascade in Repository
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/server/repositories/BudgetRepository.ts`
+**File:** `/mnt/c/Users/USER/personal-finance-app/server/repositories/BudgetRepository.ts`
 
 - Updated `delete()` method to explicitly delete budget_periods first
 - Provides audit trail and logging
@@ -98,7 +98,7 @@ Date handling used local time, causing timezone inconsistencies between budget p
 ### Solution
 
 #### 1. Timezone-Safe Date Utilities
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/server/utils/dateUtils.ts` (New File)
+**File:** `/mnt/c/Users/USER/personal-finance-app/server/utils/dateUtils.ts` (New File)
 
 Created comprehensive date utility module with:
 - `getMonthStart(year, month)`: Returns YYYY-MM-DD format (date-only, no time)
@@ -112,15 +112,15 @@ All functions explicitly avoid timezone conversions by using date-only strings.
 
 #### 2. Service Layer Updates
 
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/server/services/budget/BudgetForecastService.ts`
+**File:** `/mnt/c/Users/USER/personal-finance-app/server/services/budget/BudgetForecastService.ts`
 - Imported `getMonthStart` and `getMonthEnd` utilities
 - Updated `getMonthStart()` and `getMonthEnd()` methods to use utilities
 
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/server/services/budget/BudgetCoreService.ts`
+**File:** `/mnt/c/Users/USER/personal-finance-app/server/services/budget/BudgetCoreService.ts`
 - Updated `processBudgetRollover()` to use `getUTCFullYear()` and `getUTCMonth()`
 - Replaced inline date calculations with utility functions
 
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/server/services/budget/BudgetRecalculationService.ts`
+**File:** `/mnt/c/Users/USER/personal-finance-app/server/services/budget/BudgetRecalculationService.ts`
 - Updated `recalculateBudgets()` to use UTC date construction
 - Replaced inline date calculations with utility functions
 
@@ -143,7 +143,7 @@ Race conditions possible when multiple requests try to upsert the same budget pe
 ### Solution
 
 #### 1. FOR UPDATE Locking
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/server/repositories/BudgetRepository.ts`
+**File:** `/mnt/c/Users/USER/personal-finance-app/server/repositories/BudgetRepository.ts`
 
 Enhanced `findPeriod()` method:
 - Added optional `forUpdate` parameter
@@ -157,7 +157,7 @@ Enhanced `upsertPeriod()` method:
 - If insert fails due to race, retries with update
 
 #### 2. Unique Constraint Migration
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/migrations/20260129_budget_period_unique_constraint.sql`
+**File:** `/mnt/c/Users/USER/personal-finance-app/migrations/20260129_budget_period_unique_constraint.sql`
 
 - Added unique constraint: `(budget_id, start_date, end_date)`
 - Creates supporting index for performance
@@ -165,7 +165,7 @@ Enhanced `upsertPeriod()` method:
 - Includes verification checks
 
 #### 3. Budget Move Operation Enhancement
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/server/services/budget/BudgetForecastService.ts`
+**File:** `/mnt/c/Users/USER/personal-finance-app/server/services/budget/BudgetForecastService.ts`
 
 - Updated `moveBudgetAmount()` to use `forUpdate=true` when finding periods
 - Ensures exclusive lock during budget transfers
@@ -192,7 +192,7 @@ Potential performance issues in budget queries due to missing or suboptimal inde
 ### Solution
 
 #### 1. Comprehensive Performance Indexes
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/migrations/20260129_budget_performance_indexes.sql`
+**File:** `/mnt/c/Users/USER/personal-finance-app/migrations/20260129_budget_performance_indexes.sql`
 
 Created 7 new indexes:
 
@@ -235,7 +235,7 @@ Created 7 new indexes:
 - Helps PostgreSQL query planner choose optimal plans
 
 #### 3. Code Documentation
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/server/repositories/BudgetRepository.ts`
+**File:** `/mnt/c/Users/USER/personal-finance-app/server/repositories/BudgetRepository.ts`
 
 - Updated `batchCalculateSpent()` documentation
 - Notes both ISSUE-011 and BUDGET-PERF-001 fixes

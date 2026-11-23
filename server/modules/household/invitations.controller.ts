@@ -8,7 +8,7 @@
  */
 
 import { Request, Response, NextFunction } from "express";
-import crypto from "crypto";
+import { resolveRequestHousehold } from "../../core/authz/session-preconditions";
 import { householdRepository } from "../../repositories/HouseholdRepository";
 import { userRepository } from "../../repositories/UserRepository";
 import { logger } from "../../utils/logger";
@@ -21,14 +21,18 @@ import {
   ForbiddenError,
 } from "../../core/errors";
 import { businessAuditService } from "../../services/BusinessAuditService";
+import { assertMayGrantRole } from "./ownership.service";
 import { sendEmail } from "../../services/emailService";
+import { acceptInvitation, normalizeInviteEmail } from "./invitations.accept";
+import { INVITABLE_ROLES } from "@shared/household-members";
+import { buildInvitationEmailTemplate } from "./invitations.email-template";
 import {
-  assertInvitationAcceptableBy,
-  normalizeInviteEmail,
-} from "./invitations.accept";
+  generateInviteCode,
+  invitationExpiresAt,
+  rotateInvitationForResend,
+} from "./invitations.resend";
 
 // Constants
-const INVITATION_EXPIRY_DAYS = 7;
 const APP_URL = (process.env.APP_URL || "http://localhost:5173").replace(
   /\/$/,
   ""
@@ -37,46 +41,8 @@ const APP_URL = (process.env.APP_URL || "http://localhost:5173").replace(
 // Schemas
 const inviteMemberSchema = z.object({
   email: z.string().email(),
-  role: z.enum(["admin", "member", "view_only"]).default("member"),
+  role: z.enum(INVITABLE_ROLES).default("member"),
 });
-
-function buildInvitationEmailTemplate(params: {
-  inviterName: string;
-  householdName: string;
-  role: string;
-  inviteUrl: string;
-  expiresAt: Date;
-  recipientEmail: string;
-}): string {
-  const { inviterName, householdName, role, inviteUrl, expiresAt, recipientEmail } =
-    params;
-  const expiresOn = expiresAt.toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
-
-  return `
-  <html>
-    <head>
-      <meta charset="utf-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    </head>
-    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #111827; max-width: 600px; margin: 0 auto; padding: 20px;">
-      <h1 style="margin-bottom: 8px;">Household Invitation</h1>
-      <p><strong>${inviterName}</strong> invited you to join <strong>${householdName}</strong> as <strong>${role.replace("_", " ")}</strong>.</p>
-      <p>This invitation expires on <strong>${expiresOn}</strong>.</p>
-      <p style="margin: 24px 0;">
-        <a href="${inviteUrl}" style="display: inline-block; background: #f97316; color: #ffffff; text-decoration: none; padding: 12px 18px; border-radius: 6px; font-weight: 600;">Accept Invitation</a>
-      </p>
-      <p>If the button does not work, open this link:</p>
-      <p><a href="${inviteUrl}" style="word-break: break-all;">${inviteUrl}</a></p>
-      <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 20px 0;">
-      <p style="font-size: 12px; color: #6b7280;">This invitation was sent to ${recipientEmail}.</p>
-    </body>
-  </html>
-  `;
-}
 
 async function sendInvitationEmail(params: {
   email: string;
@@ -118,7 +84,7 @@ export const invitationsController = {
         );
       }
 
-      const household = await householdRepository.findByUserId(currentUserId);
+      const household = await resolveRequestHousehold(req, currentUserId);
       if (!household) {
         throw new NotFoundError("No household found");
       }
@@ -131,6 +97,7 @@ export const invitationsController = {
       if (!currentMember || !["owner", "admin"].includes(currentMember.role)) {
         throw new ForbiddenError("Only owners and admins can invite members");
       }
+      assertMayGrantRole(currentMember.role, parseResult.data.role); // §A3: admin invites are owner-only
 
       const normalizedEmail = normalizeInviteEmail(parseResult.data.email);
 
@@ -158,12 +125,8 @@ export const invitationsController = {
         );
       }
 
-      // Generate secure invite code (64 hex chars from 32 random bytes)
-      const inviteCode = crypto.randomBytes(32).toString("hex");
-
-      // Set expiration to 7 days from now
-      const expiresAt = new Date();
-      expiresAt.setDate(expiresAt.getDate() + INVITATION_EXPIRY_DAYS);
+      const inviteCode = generateInviteCode();
+      const expiresAt = invitationExpiresAt();
 
       // Create the invitation
       const invitation = await householdRepository.createInvitation({
@@ -222,7 +185,6 @@ export const invitationsController = {
           expiresAt: invitation.expiresAt,
           createdAt: invitation.createdAt,
         },
-        inviteUrl: invitePath,
       });
     } catch (error) {
       next(error);
@@ -243,82 +205,20 @@ export const invitationsController = {
         );
       }
 
-      // Find the invitation by code
-      const invitation = await householdRepository.findInvitationByCode(
+      // AH-06: every check, the join and its audit row run in one locked
+      // transaction (invitations.accept.ts).
+      const accepted = await acceptInvitation(
+        { userId: currentUserId, ipAddress: businessAuditService.getIpAddress(req) },
         parseResult.data.inviteCode
       );
 
-      if (!invitation) {
-        throw new NotFoundError("Invitation not found or invalid code");
-      }
-
-      // Unused, unexpired, and addressed to the signed-in user's email
-      await assertInvitationAcceptableBy(invitation, currentUserId);
-
-      // Check if user is already a member of this household
-      const existingMember = await householdRepository.findMember(
-        invitation.householdId,
-        currentUserId
-      );
-      if (existingMember) {
-        throw new ConflictError("You are already a member of this household");
-      }
-
-      // Check if user already belongs to another household
-      const userHousehold = await householdRepository.findByUserId(currentUserId);
-      if (userHousehold) {
-        throw new ConflictError(
-          "You are already a member of another household. Leave that household first to join a new one."
-        );
-      }
-
-      // SCP-318: add the member + mark the invitation accepted atomically (with
-      // the invitation row locked and re-checked) so concurrent accepts of the
-      // same code can't double-add the member or reuse the invite.
-      await householdRepository.acceptInvite(
-        invitation.id,
-        invitation.householdId,
-        currentUserId,
-        invitation.role
-      );
-
-      // Get the household details to return
-      const household = await householdRepository.findById(invitation.householdId);
-
       logger.info("Invitation accepted", {
-        invitationId: invitation.id,
-        householdId: invitation.householdId,
+        householdId: accepted.household.id,
         userId: currentUserId,
-        role: invitation.role,
+        role: accepted.role,
       });
 
-      // Audit logging
-      await businessAuditService.log({
-        householdId: invitation.householdId,
-        userId: currentUserId,
-        action: "CREATE",
-        entityType: "household_member",
-        entityId: currentUserId,
-        details: {
-          invitationId: invitation.id,
-          email: invitation.email,
-          role: invitation.role,
-          invitedBy: invitation.invitedBy,
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
-
-      success(res, {
-        accepted: true,
-        household: household
-          ? {
-              id: household.id,
-              name: household.name,
-              currency: household.currency,
-            }
-          : null,
-        role: invitation.role,
-      });
+      success(res, { accepted: true, ...accepted });
     } catch (error) {
       next(error);
     }
@@ -329,45 +229,24 @@ export const invitationsController = {
       const { inviteId } = req.params;
       const currentUserId = req.session.userId!;
 
-      const household = await householdRepository.findByUserId(currentUserId);
+      const household = await resolveRequestHousehold(req, currentUserId);
       if (!household) {
         throw new NotFoundError("No household found");
       }
 
-      // Check permissions
-      const currentMember = await householdRepository.findMember(
-        household.id,
-        currentUserId
+      // AH-05: a new code and a fresh expiry, locked and audited in one
+      // transaction (invitations.resend.ts). The old link stops working.
+      const { invitation, inviteCode } = await rotateInvitationForResend(
+        {
+          userId: currentUserId,
+          householdId: household.id,
+          ipAddress: businessAuditService.getIpAddress(req),
+        },
+        inviteId
       );
-      if (!currentMember || !["owner", "admin"].includes(currentMember.role)) {
-        throw new ForbiddenError("Only owners and admins can resend invitations");
-      }
+      const newExpiresAt = invitation.expiresAt;
 
-      // Find the invitation
-      const invitation = await householdRepository.findInvitationById(
-        inviteId,
-        household.id
-      );
-      if (!invitation) {
-        throw new NotFoundError("Invitation not found");
-      }
-
-      // Check if already accepted
-      if (invitation.acceptedAt) {
-        throw new ConflictError("This invitation has already been accepted");
-      }
-
-      // Update expiration to 7 days from now
-      const newExpiresAt = new Date();
-      newExpiresAt.setDate(newExpiresAt.getDate() + INVITATION_EXPIRY_DAYS);
-
-      const updatedInvitation = await householdRepository.updateInvitationExpiry(
-        inviteId,
-        household.id,
-        newExpiresAt
-      );
-
-      const invitePath = `/invite/${invitation.inviteCode}`;
+      const invitePath = `/invite/${inviteCode}`;
       const inviteUrl = `${APP_URL}${invitePath}`;
       const inviter =
         (await userRepository.findById(currentUserId)) ?? null;
@@ -390,26 +269,13 @@ export const invitationsController = {
         emailSent,
       });
 
-      // Audit logging
-      await businessAuditService.logUpdate({
-        householdId: household.id,
-        userId: currentUserId,
-        entityType: "household_invitation",
-        entityId: invitation.id,
-        oldValue: { expiresAt: invitation.expiresAt },
-        newValue: { expiresAt: newExpiresAt },
-        ipAddress: businessAuditService.getIpAddress(req),
-        metadata: { action: "resend_invitation" },
-      });
-
       success(res, {
         invitation: {
-          id: updatedInvitation?.id ?? invitation.id,
+          id: invitation.id,
           email: invitation.email,
           role: invitation.role,
           expiresAt: newExpiresAt,
         },
-        inviteUrl: invitePath,
       });
     } catch (error) {
       next(error);
@@ -420,7 +286,7 @@ export const invitationsController = {
     try {
       const currentUserId = req.session.userId!;
 
-      const household = await householdRepository.findByUserId(currentUserId);
+      const household = await resolveRequestHousehold(req, currentUserId);
       if (!household) {
         throw new NotFoundError("No household found");
       }
@@ -466,7 +332,7 @@ export const invitationsController = {
       const { inviteId } = req.params;
       const currentUserId = req.session.userId!;
 
-      const household = await householdRepository.findByUserId(currentUserId);
+      const household = await resolveRequestHousehold(req, currentUserId);
       if (!household) {
         throw new NotFoundError("No household found");
       }

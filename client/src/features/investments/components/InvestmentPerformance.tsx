@@ -18,7 +18,7 @@ interface InvestmentPerformanceProps {
   onTimeframeChange: (timeframe: PerformanceTimeframe) => void;
   displayCurrency: string;
   formatCurrency: (amount: number, currency: string) => string;
-  totalGainLossPercent: number;
+  totalGainLossPercent: number | null;
 }
 
 export function InvestmentPerformance({
@@ -38,8 +38,8 @@ export function InvestmentPerformance({
             <div className="flex items-center gap-2 text-sm">
               <div className="w-3 h-3 rounded-full bg-primary"></div>
               <span className="text-muted-foreground">
-                Your Portfolio ({totalGainLossPercent >= 0 ? "+" : ""}
-                {totalGainLossPercent.toFixed(1)}%)
+                Your Portfolio ({totalGainLossPercent === null ? "gain/loss unavailable"
+                  : `${totalGainLossPercent >= 0 ? "+" : ""}${totalGainLossPercent.toFixed(1)}%`})
               </span>
             </div>
             <div className="flex items-center gap-2 text-sm">

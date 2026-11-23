@@ -79,7 +79,6 @@ describe('ruleActionSchema', () => {
       'hide',
       'mark_reviewed',
       'link_goal',
-      'assign_member',
       'set_owner',
       'set_merchant',
       'set_category_from_merchant',
@@ -91,6 +90,10 @@ describe('ruleActionSchema', () => {
       });
       expect(result.success).toBe(true);
     });
+  });
+
+  it('rejects the removed assign_member action (A-44)', () => {
+    expect(ruleActionSchema.safeParse({ type: 'assign_member', value: 'test' }).success).toBe(false);
   });
 
   it('rejects invalid action type', () => {

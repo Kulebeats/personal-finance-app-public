@@ -11,6 +11,7 @@
 import { useMemo } from "react";
 import { Check, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { evaluatePasswordRules } from "@shared/password-policy";
 
 interface PasswordRequirement {
   label: string;
@@ -32,22 +33,7 @@ export function PasswordStrengthMeter({
 }: Props) {
   const requirements = useMemo<PasswordRequirement[]>(() => {
     return [
-      {
-        label: "At least 8 characters",
-        met: password.length >= 8,
-      },
-      {
-        label: "One uppercase letter",
-        met: /[A-Z]/.test(password),
-      },
-      {
-        label: "One lowercase letter",
-        met: /[a-z]/.test(password),
-      },
-      {
-        label: "One number",
-        met: /[0-9]/.test(password),
-      },
+      ...evaluatePasswordRules(password),
       {
         label: "Not your email",
         met: !email || password.toLowerCase() !== email.toLowerCase(),
@@ -135,11 +121,15 @@ export function PasswordStrengthMeter({
  */
 export function usePasswordValidation(password: string, email?: string) {
   return useMemo(() => {
+    const rules = evaluatePasswordRules(password);
+    const rulesMet = (id: string) => rules.find((rule) => rule.id === id)?.met ?? false;
     const validations = {
-      minLength: password.length >= 8,
-      hasUppercase: /[A-Z]/.test(password),
-      hasLowercase: /[a-z]/.test(password),
-      hasNumber: /[0-9]/.test(password),
+      minLength: rulesMet("length"),
+      hasUppercase: rulesMet("uppercase"),
+      hasLowercase: rulesMet("lowercase"),
+      hasNumber: rulesMet("number"),
+      hasSpecial: rulesMet("special"),
+      withinMaxLength: !rules.some((rule) => rule.id === "maxLength"),
       notEmail: !email || password.toLowerCase() !== email.toLowerCase(),
     };
 

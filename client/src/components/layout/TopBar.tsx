@@ -1,37 +1,38 @@
-import { PanelLeftOpen, Search } from "lucide-react";
+import { Menu, Search } from "lucide-react";
+import type { Ref } from "react";
 
 import { Breadcrumbs, type Breadcrumb } from "@/components/layout/Breadcrumbs";
 import { NotificationBell } from "@/components/NotificationBell";
 import { ProfileMenu, type Profile } from "@/components/layout/ProfileMenu";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { SheetTrigger } from "@/components/ui/sheet";
 
 type TopBarProps = {
-  collapsed: boolean;
-  onToggleSidebar: () => void;
+  navigationTriggerRef: Ref<HTMLButtonElement>;
   breadcrumbs: Breadcrumb[];
   onToggleCommandPalette: () => void;
-  hasPartnerView: boolean;
   profile?: Profile | null;
 };
 
 export function TopBar({
-  collapsed,
-  onToggleSidebar,
+  navigationTriggerRef,
   breadcrumbs,
   onToggleCommandPalette,
-  hasPartnerView,
   profile,
 }: TopBarProps) {
   return (
-    <header className="h-16 border-b border-border bg-background/80 backdrop-blur-md flex items-center justify-between px-8 sticky top-0 z-10">
-      <div className="flex items-center gap-4 w-full max-w-2xl">
-        {collapsed && (
-          <button onClick={() => onToggleSidebar()} aria-label="Open sidebar" className="mr-2 md:hidden">
-            <PanelLeftOpen className="w-5 h-5 text-muted-foreground" aria-hidden="true" />
+    <header className="min-h-16 shrink-0 border-b border-border bg-background/80 backdrop-blur-md flex flex-wrap items-center justify-between gap-2 px-3 py-2 md:px-8 sticky top-0 z-10">
+      <div className="flex min-w-0 flex-1 items-center gap-2 md:basis-48 md:gap-4 max-w-2xl">
+        <SheetTrigger asChild>
+          <button ref={navigationTriggerRef} type="button" aria-label="Open application navigation" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 md:hidden">
+            <Menu className="w-5 h-5 text-muted-foreground" aria-hidden="true" />
           </button>
-        )}
+        </SheetTrigger>
 
-        <Breadcrumbs breadcrumbs={breadcrumbs} />
+        <span className="min-w-0 truncate text-sm font-semibold md:hidden">
+          {breadcrumbs[breadcrumbs.length - 1]?.label ?? "Dashboard"}
+        </span>
+        <div className="hidden min-w-0 md:block"><Breadcrumbs breadcrumbs={breadcrumbs} /></div>
 
         <button
           onClick={() => onToggleCommandPalette()}
@@ -46,39 +47,10 @@ export function TopBar({
         </button>
       </div>
 
-      <div className="flex items-center gap-4">
-        <div
-          role="radiogroup"
-          aria-label="Account view selector"
-          className="items-center bg-muted/30 rounded-full p-1 border border-border/50 hidden sm:flex"
-        >
-          <button
-            role="radio"
-            aria-checked="true"
-            aria-label="View my accounts only"
-            className="px-3 py-1 rounded-full bg-card shadow-sm text-xs font-medium text-foreground transition-all"
-          >
-            Mine
-          </button>
-          <button
-            role="radio"
-            aria-checked="false"
-            aria-label="View joint accounts"
-            className="px-3 py-1 rounded-full text-xs font-medium text-muted-foreground hover:text-foreground transition-all"
-          >
-            Joint View
-          </button>
-          {hasPartnerView && (
-            <button
-              role="radio"
-              aria-checked="false"
-              aria-label="View partner accounts"
-              className="px-3 py-1 rounded-full text-xs font-medium text-muted-foreground hover:text-foreground transition-all"
-            >
-              Partner
-            </button>
-          )}
-        </div>
+      <div className="flex shrink-0 items-center gap-2 md:gap-4">
+        {/* NEW-37: the "Mine / Joint View / Partner" selector was removed. It had
+            no handler and no page reads a household view scope; per-page owner
+            filters (e.g. Transactions "Owner") are the working control. */}
         <ThemeToggle />
         <NotificationBell />
         <ProfileMenu profile={profile} />

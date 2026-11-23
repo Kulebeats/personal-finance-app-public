@@ -13,11 +13,13 @@ import { db } from "../db";
 import { users } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
-import { requireAuth, verifyPassword as verifyHash } from "../auth";
+import { requireAuthAllowingMfaEnrolment, verifyPassword as verifyHash } from "../auth";
 import { authLimiter } from "../middleware/rateLimit";
 import { logger } from "../utils/logger";
 import { auditService, AuditEventType } from "../services/AuditService";
 import { setStepUpVerified, isStepUpValid } from "../middleware/requireStepUp";
+import { consumeMfaCredential } from "../modules/auth/auth.mfa-credential";
+import { UnauthorizedError } from "../core/errors";
 import {
   MAX_FAILED_ATTEMPTS,
   LOCKOUT_DURATION_MS,
@@ -39,7 +41,8 @@ export function registerMfaStepUpRoutes(router: Router): void {
   router.post(
     "/step-up",
     authLimiter,
-    requireAuth,
+    // AH-11: reachable past the MFA grace (password step-up precedes enrolment).
+    requireAuthAllowingMfaEnrolment,
     async (req: Request, res: Response) => {
       try {
         const userId = req.session.userId!;
@@ -85,18 +88,13 @@ export function registerMfaStepUpRoutes(router: Router): void {
         let verified = false;
         let method: "password" | "mfa_code" | null = null;
 
-        // MFA code path: only for enrolled users with a live, unexpired code.
-        if (
-          code &&
-          user.mfaEnabled &&
-          user.mfaCode &&
-          user.mfaCodeExpiry &&
-          new Date() <= user.mfaCodeExpiry
-        ) {
-          if (await verifyHash(code, user.mfaCode)) {
+        // Login and step-up consume through the same locked credential check.
+        if (code) {
+          try {
+            await consumeMfaCredential(req, code, "step-up");
             verified = true;
             method = "mfa_code";
-          }
+          } catch (error) { if (!(error instanceof UnauthorizedError)) throw error; }
         }
 
         // Password re-auth path: available to every user.
@@ -154,14 +152,6 @@ export function registerMfaStepUpRoutes(router: Router): void {
           });
         }
 
-        // Consume the one-time MFA code only if that's what was used.
-        if (method === "mfa_code") {
-          await db
-            .update(users)
-            .set({ mfaCode: null, mfaCodeExpiry: null })
-            .where(eq(users.id, userId));
-        }
-
         // Reset the failed-attempt counter on successful re-auth (mirror login).
         if (user.failedLoginAttempts && user.failedLoginAttempts > 0) {
           await db
@@ -172,7 +162,7 @@ export function registerMfaStepUpRoutes(router: Router): void {
 
         setStepUpVerified(req);
 
-        await auditService.log({
+        if (method === "password") await auditService.log({
           eventType: AuditEventType.MFA_VERIFIED,
           userId,
           ipAddress: req.ip || req.socket.remoteAddress,
@@ -207,7 +197,7 @@ export function registerMfaStepUpRoutes(router: Router): void {
   /**
    * GET /step-up/status - Check if current session has valid step-up verification.
    */
-  router.get("/step-up/status", requireAuth, (req: Request, res: Response) => {
+  router.get("/step-up/status", requireAuthAllowingMfaEnrolment, (req: Request, res: Response) => {
     res.json({
       success: true,
       data: {

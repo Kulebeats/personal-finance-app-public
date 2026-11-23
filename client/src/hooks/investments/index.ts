@@ -53,7 +53,7 @@ export {
   useFXAttribution,
   useInvestmentPerformance,
   useTaxSummary,
-  useRefreshMarketData,
+  useTaxYear,
 } from "./usePortfolio";
 
 // Pension hooks

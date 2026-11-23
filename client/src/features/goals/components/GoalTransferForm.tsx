@@ -35,6 +35,8 @@ type GoalTransferFormProps = {
   toGoalId: string;
   onToGoalChange: (value: string) => void;
   amount: string;
+  /** Why the typed amount cannot be sent; shown under the field. */
+  amountError?: string;
   onAmountChange: (value: string) => void;
   date: Date;
   onDateChange: (value: Date) => void;
@@ -56,6 +58,7 @@ export function GoalTransferForm({
   toGoalId,
   onToGoalChange,
   amount,
+  amountError,
   onAmountChange,
   date,
   onDateChange,
@@ -138,7 +141,14 @@ export function GoalTransferForm({
               value={amount}
               onChange={(event) => onAmountChange(event.target.value)}
               placeholder="0.00"
+              aria-invalid={amountError ? true : undefined}
+              aria-describedby={amountError ? "transfer-amount-error" : undefined}
             />
+            {amountError ? (
+              <p id="transfer-amount-error" role="alert" className="text-sm text-destructive">
+                {amountError}
+              </p>
+            ) : null}
           </div>
           {mode === "account-to-goal" ? (
             <div className="grid gap-2">

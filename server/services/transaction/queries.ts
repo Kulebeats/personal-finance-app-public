@@ -6,14 +6,16 @@
  * @module services/transaction/queries
  */
 
-import { transactionRepository } from "../../repositories/TransactionRepository";
-import { householdRepository } from "../../repositories/HouseholdRepository";
+import { transactionRepository, type TransactionWithNames } from "../../repositories/TransactionRepository";
+import { requireTransferPair } from "../../repositories/TransactionTransferRepository";
 import { type Transaction } from "@shared/schema";
 import { NotFoundError, ValidationError } from "../../utils/errorHandler";
-import { Money } from "../../core/money";
-import { logger } from "../../utils/logger";
-// FIX PERF-TRANSACTIONS-002: Add caching for expensive summary aggregations
-import { withCache, TTL } from "../../core/cache";
+import Decimal from "decimal.js";
+import { readTransactionSummaryInputs, SummaryDataUnavailable, type TransactionSummaryOptions } from "../../repositories/TransactionSummaryInputs";
+export type { TransactionSummaryOptions } from "../../repositories/TransactionSummaryInputs";
+import { isCurrencyCode } from "@shared/denomination";
+
+
 
 /**
  * Query options for listing transactions
@@ -41,12 +43,7 @@ export interface TransactionQueryOptions {
   includePending?: boolean;
 }
 
-export interface TransactionSummaryOptions {
-  ownerUserId?: string | null;
-  accountId?: string;
-  tagIds?: string[];
-  includePending?: boolean;
-}
+
 
 /**
  * Convert query options to repository format (convert numbers to strings for amounts)
@@ -67,11 +64,11 @@ export async function getTransactions(
   householdId: string,
   userId: string,
   options?: TransactionQueryOptions,
-): Promise<Transaction[]> {
+): Promise<TransactionWithNames[]> {
   return await transactionRepository.findByHouseholdWithVisibility(
     householdId,
     userId,
-    toRepositoryOptions(options),
+    { ...toRepositoryOptions(options), includeSplits: true },
   );
 }
 
@@ -106,6 +103,7 @@ export async function getTransactionById(
     id,
     householdId,
     userId,
+    true,
   );
 
   if (!txn) {
@@ -142,21 +140,16 @@ export async function getTransferPair(
   const pair = await transactionRepository.findTransferPair(
     existing.transferTransactionId,
     householdId,
+    userId,
   );
-  const outflow = pair.find((txn) => !txn.isTransferIn);
-  const inflow = pair.find((txn) => txn.isTransferIn);
-
-  if (!outflow || !inflow) {
-    throw new NotFoundError("Transfer pair not found");
-  }
-
-  return { outflow, inflow };
+  if (pair.length !== 2) throw new NotFoundError("Transfer pair not found");
+  return requireTransferPair(pair);
 }
 
 /**
  * Get transaction summary for a period
  * Uses household base currency for aggregation with FX conversion (CLAUDE.md Money/Arithmetic Rule)
- * FIX PERF-TRANSACTIONS-002: Added date range capping and caching for performance
+ * Date range capping bounds the aggregation work.
  */
 export async function getTransactionSummary(
   householdId: string,
@@ -164,18 +157,16 @@ export async function getTransactionSummary(
   startDate: string,
   endDate: string,
   options?: TransactionSummaryOptions,
-): Promise<{
-  totalIncome: number;
-  totalExpenses: number;
-  netFlow: number;
-  transactionCount: number;
-  currency: string;
-}> {
+) {
   // FIX PERF-TRANSACTIONS-002: Cap date range to prevent unbounded memory usage
   const start = new Date(startDate);
   const end = new Date(endDate);
   const daysDiff = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
 
+  if (daysDiff < 0) {
+    throw new ValidationError("Start date must be on or before the end date.",
+      [{ field: "dateRange", message: "Date range is reversed" }]);
+  }
   if (daysDiff > 730) { // Cap at 2 years
     throw new ValidationError(
       "Date range too large. Maximum allowed is 2 years (730 days).",
@@ -183,104 +174,40 @@ export async function getTransactionSummary(
     );
   }
 
-  // FIX PERF-TRANSACTIONS-002: Cache expensive summary aggregations
-  // Use withCache wrapper to cache results for 5 minutes
-  const cachedSummary = withCache(
-    async (
-      hid: string,
-      uid: string,
-      start: string,
-      end: string,
-      opts?: TransactionSummaryOptions,
-    ) => {
-      // Get household base currency for consistent aggregation
-      const household = await householdRepository.findById(hid);
-      const baseCurrency = household?.currency ?? "ZMW";
-
-      const txns = await transactionRepository.findByHouseholdWithVisibility(
-        hid,
-        uid,
-        {
-          startDate: start,
-          endDate: end,
-          ownerUserId: opts?.ownerUserId,
-          accountId: opts?.accountId,
-          tagIds: opts?.tagIds,
-          includePending: opts?.includePending ?? true,
-        },
-      );
-
-  // Collect unique currencies for FX lookup
-  const currencies = new Set<string>();
-  for (const txn of txns) {
-    if (txn.isExcludedFromReports || txn.type === "transfer") continue;
-    const txnCurrency = txn.currency ?? baseCurrency;
-    if (txnCurrency !== baseCurrency) {
-      currencies.add(txnCurrency);
+  // Re-read visibility and amounts on each request. The old TTL cache had no
+  // complete invalidation path across financial and privacy writers.
+  const { rows: txns, currency: baseCurrency } = await readTransactionSummaryInputs(householdId, userId, startDate, endDate, options);
+  let income = new FlowDecimal(0), expenses = new FlowDecimal(0);
+  let largestIncome = new FlowDecimal(0), largestExpense = new FlowDecimal(0);
+  let firstTransactionDate: string | null = null, lastTransactionDate: string | null = null;
+  for (const row of txns) {
+    if (!firstTransactionDate || row.date < firstTransactionDate) firstTransactionDate = row.date;
+    if (!lastTransactionDate || row.date > lastTransactionDate) lastTransactionDate = row.date;
+    if (row.isExcludedFromReports || (row.type !== "income" && row.type !== "expense")) continue;
+    const native = new FlowDecimal(row.amount);
+    if (!native.isFinite() || native.lt(0)) throw new SummaryDataUnavailable(`Invalid amount on ${row.date}.`);
+    if (native.isZero()) continue;
+    if (!isCurrencyCode(row.currency)) throw new SummaryDataUnavailable(`Unknown transaction currency for conversion to ${baseCurrency} on ${row.date}.`);
+    const rate = row.currency === baseCurrency ? "1" : row.summaryRate;
+    if (!rate) throw new SummaryDataUnavailable(`No trusted ${row.currency} to ${baseCurrency} exchange rate is available for ${row.date}.`);
+    const converted = native.times(rate);
+    if (row.type === "income") {
+      income = income.plus(converted);
+      largestIncome = FlowDecimal.max(largestIncome, converted);
+    } else {
+      expenses = expenses.plus(converted);
+      largestExpense = FlowDecimal.max(largestExpense, converted);
     }
   }
 
-  // Get FX rates for non-base currencies
-  let fxRates = new Map<string, number>();
-  if (currencies.size > 0) {
-    const { getLatestFxRates } = await import("../../core/calculations");
-    fxRates = await getLatestFxRates([...currencies], baseCurrency);
-  }
-
-  // Use explicit currency for Money operations (CLAUDE.md Money/Arithmetic Rule)
-  let totalIncome = Money.zero(baseCurrency);
-  let totalExpenses = Money.zero(baseCurrency);
-
-  for (const txn of txns) {
-    if (txn.isExcludedFromReports) continue;
-    if (txn.type === "transfer") continue;
-
-    const txnCurrency = txn.currency ?? baseCurrency;
-    let amount = new Money(txn.amount, txnCurrency);
-
-    // Convert to base currency if needed
-    if (txnCurrency !== baseCurrency) {
-      // SCP-321: fail closed on a missing rate — never silently use 1.
-      const rate = fxRates.get(txnCurrency);
-      if (rate === undefined) {
-        logger.error("Missing FX rate in transaction summary", {
-          fromCurrency: txnCurrency,
-          toCurrency: baseCurrency,
-        });
-        throw new ValidationError(
-          `Exchange rate unavailable for ${txnCurrency} -> ${baseCurrency}`,
-        );
-      }
-      // Keep as string to avoid intermediate number conversion (CLAUDE.md Money/Arithmetic Rule)
-      const convertedAmount = amount.multiply(rate);
-      amount = new Money(convertedAmount.toString(), baseCurrency);
-    }
-
-    if (txn.type === "income") {
-      totalIncome = totalIncome.add(amount);
-    } else if (txn.type === "expense") {
-      totalExpenses = totalExpenses.add(amount);
-    }
-  }
-
-      return {
-        totalIncome: totalIncome.toNumber(),
-        totalExpenses: totalExpenses.toNumber(),
-        netFlow: totalIncome.subtract(totalExpenses).toNumber(),
-        transactionCount: txns.length,
-        currency: baseCurrency,
-      };
-    },
-    "transaction-summary",
-    {
-      ttlMs: TTL.MEDIUM, // 5 minutes
-      keyGenerator: (...args) => {
-        const [hid, uid, start, end, opts] = args as [string, string, string, string, TransactionSummaryOptions | undefined];
-        return `txn-summary:${hid}:${uid}:${start}:${end}:${opts?.ownerUserId || 'all'}:${opts?.accountId || 'all'}:${opts?.tagIds?.join(',') || 'all'}:${opts?.includePending ?? true}`;
-      },
-      tags: [`household:${householdId}`, 'transactions'],
-    },
-  );
-
-  return await cachedSummary(householdId, userId, startDate, endDate, options);
+  const displayedIncome = income.toDecimalPlaces(2), displayedExpenses = expenses.toDecimalPlaces(2);
+  return {
+    totalIncome: displayedIncome.toFixed(2), totalExpenses: displayedExpenses.toFixed(2), netFlow: displayedIncome.minus(displayedExpenses).toFixed(2),
+    largestIncome: largestIncome.toFixed(2), largestExpense: largestExpense.toFixed(2),
+    firstTransactionDate, lastTransactionDate, transactionCount: txns.length, currency: baseCurrency,
+  };
 }
+
+// Rates have up to 30 digits. Preserve their full product with ledger amounts
+// until rounding the period totals to cents.
+const FlowDecimal = Decimal.clone({ precision: 64, rounding: Decimal.ROUND_HALF_UP });

@@ -32,6 +32,12 @@ vi.mock("@/contexts/SettingsContext", () => ({
   useFormatters: () => ({ currency: "USD" }),
 }));
 
+// RecurringPatternsModal reads the data lifetime from the session; the real
+// SessionProvider is not under test here (same pattern as Investments tests).
+vi.mock("@/contexts/SessionContext", () => ({
+  useSession: () => ({ status: null, lifetime: null }),
+}));
+
 vi.mock("@/lib/format", () => ({
   formatCurrency: (val: number, _currency?: string) => `$${val.toFixed(2)}`,
 }));

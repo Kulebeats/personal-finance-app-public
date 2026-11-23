@@ -14,6 +14,7 @@ const mockSetLocation = vi.fn();
 
 vi.mock("@/contexts/SettingsContext", () => ({
   useFormatters: () => ({
+    currency: "USD",
     formatCurrency: (value: number) => `$${value.toFixed(2)}`,
   }),
 }));
@@ -111,13 +112,13 @@ describe("Dashboard hardened widgets", () => {
         {
           id: "rent",
           name: "Rent",
-          amount: "1200.00",
+          amount: { amount: "1200.00", currency: "USD" },
           nextDueDate: "2026-07-12",
         },
         {
           id: "internet",
           name: "Internet",
-          amount: "50.25",
+          amount: { amount: "50.25", currency: "USD" },
           nextDueDate: "2026-07-14",
         },
       ],

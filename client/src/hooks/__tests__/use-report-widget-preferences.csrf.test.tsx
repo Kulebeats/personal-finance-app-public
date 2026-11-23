@@ -50,7 +50,7 @@ describe("useUpdateReportWidgetPreferences", () => {
   });
 
   it("PATCHes with x-csrf-token and returns the updated preferences", async () => {
-    const preferences = { coreWidgets: {}, optionalWidgets: {} };
+    const preferences = { coreWidgets: {}, optionalWidgets: {}, customCharts: [], hasCompletedWidgetSetup: true };
     mockFetch.mockResolvedValue(
       mockFetchResponse({ success: true, data: { preferences } }),
     );

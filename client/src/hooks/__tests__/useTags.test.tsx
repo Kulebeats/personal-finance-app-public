@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+import { clearCsrfToken } from "@/lib/csrf";
 import {
   tagKeys,
   useTags,
@@ -23,6 +24,7 @@ import {
 } from "../useTags";
 
 const toastSpy = vi.fn();
+const endpointFetch = vi.fn();
 
 vi.mock("@/hooks/use-toast", () => ({
   useToast: () => ({ toast: toastSpy }),
@@ -40,19 +42,10 @@ const createWrapper = () => {
 };
 
 const mockFetchResponse = (data: unknown, ok = true): Response =>
-  ({
-    ok,
-    json: vi.fn().mockResolvedValue(data),
-  } as unknown as Response);
+  new Response(JSON.stringify(data), { status: ok ? 200 : 400 });
 
 const mockErrorResponse = (message: string, code?: string): Response =>
-  ({
-    ok: false,
-    json: vi.fn().mockResolvedValue({
-      success: false,
-      error: { message, code },
-    }),
-  } as unknown as Response);
+  new Response(JSON.stringify({ success: false, error: { message, code } }), { status: code === "CONFLICT" ? 409 : 400 });
 
 describe("useTags hooks", () => {
   const tagId = "11111111-1111-1111-1111-111111111111";
@@ -72,7 +65,10 @@ describe("useTags hooks", () => {
 
   beforeEach(() => {
     toastSpy.mockReset();
-    vi.stubGlobal("fetch", vi.fn());
+    clearCsrfToken(); endpointFetch.mockReset();
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => String(input) === "/api/csrf-token"
+      ? Promise.resolve(new Response(JSON.stringify({ csrfToken: "tags-test-token" })))
+      : endpointFetch(input, init));
   });
 
   afterEach(() => {
@@ -86,7 +82,7 @@ describe("useTags hooks", () => {
 
   describe("useTags", () => {
     it("fetches all tags", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockResolvedValue(
         mockFetchResponse({
           success: true,
@@ -107,7 +103,7 @@ describe("useTags hooks", () => {
     });
 
     it("handles fetch error", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockRejectedValue(new Error("Network error"));
 
       const { wrapper } = createWrapper();
@@ -120,7 +116,7 @@ describe("useTags hooks", () => {
 
   describe("useTag", () => {
     it("fetches a single tag by ID", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockResolvedValue(
         mockFetchResponse({
           success: true,
@@ -141,7 +137,7 @@ describe("useTags hooks", () => {
     });
 
     it("does not fetch when ID is empty", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
 
       const { wrapper } = createWrapper();
       const { result } = renderHook(() => useTag(""), { wrapper });
@@ -155,7 +151,7 @@ describe("useTags hooks", () => {
 
   describe("useTagTransactions", () => {
     it("fetches transactions for a tag", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       const mockResponse = {
         tag: mockTag,
         transactions: [{ id: transactionId, name: "Coffee", amount: "5.00" }],
@@ -181,7 +177,7 @@ describe("useTags hooks", () => {
 
   describe("useTransactionTags", () => {
     it("fetches tags for a transaction", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockResolvedValue(
         mockFetchResponse({
           success: true,
@@ -205,7 +201,7 @@ describe("useTags hooks", () => {
 
   describe("useTagAnalytics", () => {
     it("fetches tag analytics", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       const mockAnalytics = {
         topTags: [{ id: tagId, name: "Test", usageCount: 10, percentage: 50 }],
         summary: { totalTags: 5, totalUsage: 20, averageUsage: 4 },
@@ -232,7 +228,7 @@ describe("useTags hooks", () => {
 
   describe("useCreateTag", () => {
     it("creates a tag and shows success toast", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockResolvedValue(
         mockFetchResponse({ success: true, data: mockTag })
       );
@@ -262,7 +258,7 @@ describe("useTags hooks", () => {
     });
 
     it("shows conflict error toast for duplicate name", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockResolvedValue(mockErrorResponse("Duplicate", "CONFLICT"));
 
       const { wrapper } = createWrapper();
@@ -284,7 +280,7 @@ describe("useTags hooks", () => {
     });
 
     it("shows generic error toast on failure", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockRejectedValue(new Error("Network error"));
 
       const { wrapper } = createWrapper();
@@ -312,7 +308,7 @@ describe("useTags hooks", () => {
 
   describe("useUpdateTag", () => {
     it("updates a tag and shows success toast", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockResolvedValue(
         mockFetchResponse({
           success: true,
@@ -352,7 +348,7 @@ describe("useTags hooks", () => {
 
   describe("useDeleteTag", () => {
     it("deletes a tag with optimistic update", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockResolvedValue(mockFetchResponse({ success: true }));
 
       const { wrapper, queryClient } = createWrapper();
@@ -375,7 +371,7 @@ describe("useTags hooks", () => {
     });
 
     it("rolls back on error", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockRejectedValue(new Error("Network error"));
 
       const { wrapper, queryClient } = createWrapper();
@@ -409,7 +405,7 @@ describe("useTags hooks", () => {
 
   describe("useAddTagsToTransaction", () => {
     it("adds tags to a transaction", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockResolvedValue(
         mockFetchResponse({
           success: true,
@@ -445,7 +441,7 @@ describe("useTags hooks", () => {
 
   describe("useSetTransactionTags", () => {
     it("sets all tags on a transaction", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockResolvedValue(
         mockFetchResponse({
           success: true,
@@ -475,7 +471,7 @@ describe("useTags hooks", () => {
 
   describe("useRemoveTagFromTransaction", () => {
     it("removes a tag from a transaction", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockResolvedValue(mockFetchResponse({ success: true, data: [] }));
 
       const { wrapper, queryClient } = createWrapper();
@@ -507,7 +503,7 @@ describe("useTags hooks", () => {
 
   describe("useMergeTags", () => {
     it("merges tags with optimistic update", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       const sourceTag = { ...mockTag, id: "source-id", name: "Source Tag" };
       const mergeResult = {
         targetTag: mockTag,
@@ -548,7 +544,7 @@ describe("useTags hooks", () => {
     });
 
     it("rolls back merge on error", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       const sourceTag = { ...mockTag, id: "source-id", name: "Source Tag" };
       mockFetch.mockRejectedValue(new Error("Network error"));
 
@@ -585,7 +581,7 @@ describe("useTags hooks", () => {
 
   describe("useArchiveTag", () => {
     it("archives a tag with optimistic update", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockResolvedValue(
         mockFetchResponse({ success: true, data: mockTag })
       );
@@ -609,7 +605,7 @@ describe("useTags hooks", () => {
     });
 
     it("rolls back archive on error", async () => {
-      const mockFetch = vi.mocked(fetch);
+      const mockFetch = endpointFetch;
       mockFetch.mockRejectedValue(new Error("Network error"));
 
       const { wrapper, queryClient } = createWrapper();

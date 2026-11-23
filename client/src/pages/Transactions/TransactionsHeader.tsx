@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import {
   TransactionSearch,
   AdvancedFilterPopover,
+  FilterPresetSelector,
   type TransactionFilters,
 } from "@/features/transactions";
 import { DateRangePopover } from "@/components/transactions/DateRangePopover";
@@ -18,6 +19,8 @@ interface TransactionsHeaderProps {
   filters: TransactionFilters;
   setFilters: (filters: Partial<TransactionFilters>) => void;
   resetFilters: () => void;
+  /** Replace every filter with a saved preset's filters. */
+  applyFilters: (filters: TransactionFilters) => void;
   activeFilterCount: number;
   dateRangeValue: { startDate: Date | undefined; endDate: Date | undefined };
   setDateRangeValue: (range: { startDate: Date | undefined; endDate: Date | undefined }) => void;
@@ -34,6 +37,7 @@ export function TransactionsHeader({
   filters,
   setFilters,
   resetFilters,
+  applyFilters,
   activeFilterCount,
   dateRangeValue,
   setDateRangeValue,
@@ -46,14 +50,14 @@ export function TransactionsHeader({
   onAddTransaction,
 }: TransactionsHeaderProps) {
   return (
-    <div className="flex items-center justify-between mb-6 gap-4">
+    <div className="flex flex-wrap items-center justify-between mb-6 gap-3 md:gap-4">
       <h1 className="text-2xl font-bold shrink-0">Transactions</h1>
 
-      <div className="flex items-center gap-2 flex-1 justify-end min-w-0">
+      <div className="flex w-full flex-wrap items-center gap-2 min-w-0 md:w-auto md:flex-1 md:justify-end">
         <TransactionSearch
           value={filters.search}
           onChange={(search) => setFilters({ search })}
-          className="max-w-[240px]"
+          className="w-full sm:w-auto sm:max-w-[240px]"
         />
         <DateRangePopover value={dateRangeValue} onChange={setDateRangeValue} />
         <AdvancedFilterPopover
@@ -62,8 +66,9 @@ export function TransactionsHeader({
           onReset={resetFilters}
           activeCount={activeFilterCount}
         />
+        <FilterPresetSelector context="transactions" currentFilters={filters} onSelectPreset={applyFilters} />
 
-        <div className="h-6 w-px bg-border mx-2" />
+        <div className="hidden h-6 w-px bg-border mx-2 md:block" aria-hidden="true" />
 
         <Button variant="outline" size="sm" onClick={onImport}>
           <Download className="h-4 w-4 mr-1" />
@@ -78,7 +83,7 @@ export function TransactionsHeader({
           Add Transaction
         </Button>
 
-        <div className="h-6 w-px bg-border" />
+        <div className="hidden h-6 w-px bg-border md:block" aria-hidden="true" />
 
         <Button
           variant="outline"

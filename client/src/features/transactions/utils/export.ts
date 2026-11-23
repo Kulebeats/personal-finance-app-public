@@ -80,13 +80,13 @@ export function duplicateTransaction(
     name: `${transaction.name || "Transaction"} (copy)`,
     amount: transaction.amount,
     type: transaction.type,
-    categoryId: transaction.categoryId,
-    merchantId: transaction.merchantId,
+    categoryId: transaction.categoryId ?? undefined,
+    merchantId: transaction.merchantId ?? undefined,
     isPending: false,
     isRecurring: false,
     isExcludedFromReports: transaction.isExcludedFromReports,
     isExcludedFromBudget: transaction.isExcludedFromBudget,
     isPrivate: transaction.isPrivate,
-    notes: transaction.notes,
+    notes: transaction.notes ?? undefined,
   };
 }

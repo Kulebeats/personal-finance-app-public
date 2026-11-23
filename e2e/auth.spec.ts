@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./protected-test";
 import { getTestUser } from "./utils/testUser";
 import { pickVisible } from "./utils/locators";
 

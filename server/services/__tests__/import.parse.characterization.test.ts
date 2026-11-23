@@ -1,15 +1,9 @@
 /**
  * Characterization tests for ImportService's CSV parsing helpers.
  *
- * WHY: these pin the exact current behaviour of the money/date parsers ahead of
- * the ImportService split (LOC burn-down). They are written against the
- * pre-split implementation and must pass UNCHANGED against the extracted
- * `services/import/parse.ts` — that equivalence is the proof the refactor is
- * behaviour-preserving. This is CSV import of real financial data, so silent
- * drift in `parseImportAmount` would corrupt imported ledgers.
- *
- * Originally these reached the private methods on the ImportService class; they
- * now target the extracted pure module and pass with every assertion unchanged.
+ * Money forms retain the extraction characterization. FIN-15 deliberately
+ * replaces native-date precedence and rollover with strict calendar validation
+ * and an explicit choice for ambiguous slash ordering.
  */
 import { describe, it, expect } from "vitest";
 import {
@@ -73,7 +67,7 @@ describe("parseImportAmount — rejected forms", () => {
     // parser must refuse the row instead.
     const result = parseAmount("1.234");
     expect(result.amount).toBeUndefined();
-    expect(result.error?.reason).toBe("Invalid money amount");
+    expect(result.error?.reason).toMatch(/^Amount has more than 2 decimal places/);
   });
 
   it.each(["abc", "-", "1.2.3", "12-34", "1e5", "$", "()"])(
@@ -106,22 +100,17 @@ describe("parseImportDate", () => {
     expect(result.date?.getUTCDate()).toBe(14);
   });
 
-  it("falls back to dd/MM/yyyy only when the native parse fails", () => {
-    // 25/12/2026 is unparseable natively (month 25), so the dd/MM fallback
-    // resolves it to 25 December.
+  it("accepts an unambiguous dd/MM/yyyy date", () => {
     const result = parseDate("25/12/2026");
     expect(result.error).toBeUndefined();
-    expect(result.date?.getMonth()).toBe(11);
-    expect(result.date?.getDate()).toBe(25);
+    expect(result.date?.getUTCMonth()).toBe(11);
+    expect(result.date?.getUTCDate()).toBe(25);
   });
 
-  it("lets the native parser win on ambiguous slash dates (MM/dd wins)", () => {
-    // Pinning the known ambiguity: "01/02/2026" is natively valid as 2 January,
-    // so the dd/MM fallback never runs. Documented, not endorsed.
+  it("requires explicit ordering for ambiguous slash dates", () => {
     const result = parseDate("01/02/2026");
-    expect(result.error).toBeUndefined();
-    expect(result.date?.getMonth()).toBe(0);
-    expect(result.date?.getDate()).toBe(2);
+    expect(result.date).toBeUndefined();
+    expect(result.error?.reason).toMatch(/choose.*DD\/MM\/YYYY.*MM\/DD\/YYYY/i);
   });
 
   it.each([undefined, "", "   "])("requires a value (%j)", (raw) => {
@@ -137,6 +126,15 @@ describe("parseImportDate", () => {
   it.each(["not-a-date", "99/99/9999"])("rejects invalid dates (%s)", (raw) => {
     const result = parseDate(raw);
     expect(result.date).toBeUndefined();
-    expect(result.error?.reason).toBe("Invalid date");
+    expect(result.error?.reason).toMatch(/^Invalid date/);
   });
+
+  it.each(["2026-02-30", "2026-02-29", "1900-02-29", "04/31/2026"])(
+    "rejects impossible calendar dates (%s)", (raw) => {
+      expect(parseDate(raw, 4)).toMatchObject({
+        error: { rowIndex: 4, field: "date", value: raw },
+      });
+      expect(parseDate(raw).date).toBeUndefined();
+    },
+  );
 });

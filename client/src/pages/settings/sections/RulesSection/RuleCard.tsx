@@ -11,6 +11,8 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { removedActionLabel } from "./constants";
+import { ACTION_LABELS, CONDITION_LABELS, OPERATOR_LABELS } from "./ruleCardLabels";
 
 import type { Rule, RuleCondition, RuleAction } from "@/hooks/use-settings";
 
@@ -27,41 +29,8 @@ interface RuleCardProps {
   isDeleting?: boolean;
   isTesting?: boolean;
   goalNamesById?: Map<string, string>;
+  categoryNamesById?: Map<string, string>;
 }
-
-const CONDITION_LABELS: Record<string, string> = {
-  original_statement: "Statement",
-  merchant_name: "Merchant",
-  amount: "Amount",
-  category: "Category",
-  account: "Account",
-  transaction_type: "Type",
-  description: "Description",
-};
-
-const OPERATOR_LABELS: Record<string, string> = {
-  contains: "contains",
-  equals: "=",
-  starts_with: "starts with",
-  ends_with: "ends with",
-  not_contains: "doesn't contain",
-  greater_than: ">",
-  less_than: "<",
-  range: "between",
-  regex: "matches",
-};
-
-const ACTION_LABELS: Record<string, string> = {
-  rename_merchant: "Rename",
-  categorize: "Categorize",
-  add_tags: "Add tags",
-  set_merchant: "Set merchant",
-  hide: "Hide",
-  mark_reviewed: "Mark reviewed",
-  set_owner: "Set owner",
-  link_goal: "Link goal",
-  set_category_from_merchant: "Auto-categorize",
-};
 
 function ConditionPill({ condition }: { condition: RuleCondition }) {
   if (condition.enabled === false) return null;
@@ -88,20 +57,28 @@ function ConditionPill({ condition }: { condition: RuleCondition }) {
 function ActionPill({
   action,
   goalNamesById,
+  categoryNamesById,
 }: {
   action: RuleAction;
   goalNamesById?: Map<string, string>;
+  categoryNamesById?: Map<string, string>;
 }) {
   if (action.enabled === false) return null;
 
-  const typeLabel = ACTION_LABELS[action.type] || action.type;
+  const removedLabel = removedActionLabel(action.type);
+  const typeLabel = ACTION_LABELS[action.type] || removedLabel || action.type;
 
   // Some actions don't need a value display
   const noValueTypes = ["hide", "mark_reviewed", "set_category_from_merchant"];
   let displayValue: string | null = null;
-  if (!noValueTypes.includes(action.type)) {
+  if (!removedLabel && !noValueTypes.includes(action.type)) {
     if (action.type === "link_goal" && typeof action.value === "string") {
       displayValue = goalNamesById?.get(action.value) ?? action.value;
+    } else if (action.type === "categorize" && typeof action.value === "string") {
+      // The stored value is a category id; never show it to the user.
+      displayValue = categoryNamesById?.size
+        ? (categoryNamesById.get(action.value) ?? "Unknown category")
+        : null;
     } else if (typeof action.value === "string") {
       displayValue =
         action.value.length > 15
@@ -134,6 +111,7 @@ export function RuleCard({
   isFirst = false,
   isLast = false,
   goalNamesById,
+  categoryNamesById,
   isDeleting = false,
   isTesting = false,
 }: RuleCardProps) {
@@ -274,6 +252,7 @@ export function RuleCard({
             key={index}
             action={action}
             goalNamesById={goalNamesById}
+            categoryNamesById={categoryNamesById}
           />
         ))}
         {actions.length > 2 && (

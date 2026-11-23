@@ -5,6 +5,8 @@
  */
 
 import type { MoneyDto } from "@shared/money";
+import type { CalendarDateRange } from "@shared/household-calendar";
+import type { ReportsNetWorthChangesResponse } from "@shared/reports";
 
 // ============================================================================
 // TOGGLE - Controlled via VITE_USE_MOCK_REPORTS_DATA
@@ -547,17 +549,29 @@ export function getMockSpendingBreakdownData(): unknown {
 // MOCK NET WORTH CHANGES DATA
 // ============================================================================
 
-export function getMockNetWorthChangesData(): unknown {
+export function getMockNetWorthChangesData({ from, to }: CalendarDateRange): ReportsNetWorthChangesResponse {
   const currency = "ZMW";
+  const captures: string[] = [];
+  const through = new Date(`${to}T00:00:00Z`);
+  const month = new Date(`${from}T00:00:00Z`);
+  month.setUTCDate(1);
+  for (; from <= to && month <= through; month.setUTCMonth(month.getUTCMonth() + 1)) {
+    const end = new Date(month);
+    end.setUTCMonth(end.getUTCMonth() + 1, 0);
+    captures.push(end > through ? to : end.toISOString().slice(0, 10));
+  }
+
   let runningNetWorth = 700000;
-  const periods = MONTHS.map((month) => {
+  const periods = captures.slice(1).map((period, index) => {
     const isNegative = Math.random() < 0.25;
     const change = isNegative ? -rand(8000, 0.5) : rand(18000, 0.4);
     const startNetWorth = runningNetWorth;
     const endNetWorth = runningNetWorth + change;
     runningNetWorth = endNetWorth;
     return {
-      period: month,
+      period,
+      startPeriod: captures[index],
+      spansGap: false,
       startNetWorth: toMoneyDto(startNetWorth, currency),
       endNetWorth: toMoneyDto(endNetWorth, currency),
       change: toMoneyDto(change, currency),
@@ -571,10 +585,13 @@ export function getMockNetWorthChangesData(): unknown {
   );
 
   return {
-    baseCurrency: currency,
+    range: { from, to, currency },
     periods,
     totalChange: toMoneyDto(totalChange, currency),
-    avgMonthlyChange: toMoneyDto(totalChange / 12, currency),
+    avgMonthlyChange: periods.length ? toMoneyDto(totalChange / periods.length, currency) : null,
+    historyCoverage: "snapshots",
+    insufficientHistory: periods.length === 0,
+    missingMonths: [],
   };
 }
 

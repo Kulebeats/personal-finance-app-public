@@ -2,13 +2,34 @@
 import { categoryRepository } from "../../repositories/CategoryRepository";
 import { merchantRepository } from "../../repositories/MerchantRepository";
 import { recurringRepository } from "../../repositories/RecurringRepository";
-import type { InsertRecurringTransaction, RecurringTransaction } from "@shared/schema";
+import { accounts, categories, merchants, type InsertRecurringTransaction, type RecurringTransaction } from "@shared/schema";
+import { and, eq, isNull } from "drizzle-orm";
 import { EventTypes, outboxEventService } from "../../core/events";
 import { Money } from "../../core/money";
-import { NotFoundError, ValidationError } from "../../utils/errorHandler";
+import { ConflictError, NotFoundError, ValidationError } from "../../utils/errorHandler";
 import { logger } from "../../utils/logger";
+import { visibleAccountPredicate } from "../../core/authz/transaction-visibility";
+import type { HouseholdContext } from "../../middleware/householdGuard";
+import { getVisibleRecurringRuleById, listVisibleRecurringRules } from "./RecurringAudienceQuery";
+import { withWritableRecurringRule } from "./withWritableRecurringRule";
+import { createSignedManualRule } from "./RecurringManualWriter";
+import { auditRecurringRule, type RecurringAuditRequest } from "./RecurringRuleAudit";
 
-export class RecurringBaseService {
+const ruleAuditValues = ({ name, amount, frequency, isActive }: RecurringTransaction) => ({ name, amount, frequency, isActive });
+import { getVerifiedRecurringRuleCurrency, invalidateRecurringDenomination, recordRecurringDenomination, recurringDefinitionToken, withRecurringDefinitionMetadata, type VisibleRecurringRule } from "./RecurringDenomination";
+
+import { RecurringLifecycleService } from "./RecurringLifecycleService";
+
+export class RecurringBaseService extends RecurringLifecycleService {
+  /** Actor-scoped readers used only by ordinary GET routes. */
+  async getVisibleRecurringRules(actor: HouseholdContext, options?: { includeInactive?: boolean; includePaused?: boolean }): Promise<VisibleRecurringRule[]> {
+    return listVisibleRecurringRules(actor, options);
+  }
+
+  async getVisibleRecurringById(id: string, actor: HouseholdContext): Promise<VisibleRecurringRule> {
+    return getVisibleRecurringRuleById(id, actor);
+  }
+
   /**
    * Get all recurring rules for a household
    */
@@ -38,11 +59,15 @@ export class RecurringBaseService {
   /**
    * Get upcoming bills within X days
    */
+  getUpcomingBills(scope: HouseholdContext, withinDays?: number): Promise<VisibleRecurringRule[]>;
+  getUpcomingBills(scope: string, withinDays?: number): Promise<RecurringTransaction[]>;
   async getUpcomingBills(
-    householdId: string,
+    scope: HouseholdContext | string,
     withinDays: number = 14
   ): Promise<RecurringTransaction[]> {
-    return await recurringRepository.findUpcoming(householdId, withinDays);
+    return typeof scope === "string"
+      ? recurringRepository.findUpcoming(scope, withinDays)
+      : listVisibleRecurringRules(scope, { withinDays });
   }
 
   /**
@@ -51,8 +76,10 @@ export class RecurringBaseService {
   async createRecurring(
     data: Omit<InsertRecurringTransaction, "householdId">,
     householdId: string,
-    userId: string
-  ): Promise<RecurringTransaction> {
+    userId: string,
+    /** `audit`: request context for the CREATE row, written in the rule's transaction (FIN-13). */
+    denomination?: { actor: HouseholdContext; currency: string; audit?: RecurringAuditRequest },
+  ): Promise<VisibleRecurringRule> {
     // Validate amount
     const amountMoney = new Money(data.amount);
     if (amountMoney.isNegative() || amountMoney.isZero()) {
@@ -125,10 +152,12 @@ export class RecurringBaseService {
       }
     }
 
-    const rule = await recurringRepository.create({
+    if (denomination && (denomination.actor.householdId !== householdId || denomination.actor.userId !== userId)) throw new NotFoundError("Recurring rule");
+    // A rule created without a denomination receipt has no proven unit.
+    const rule = denomination ? await createSignedManualRule(data, denomination.actor, denomination.currency, denomination.audit) : withRecurringDefinitionMetadata(await recurringRepository.create({
       ...data,
       householdId,
-    });
+    }), null);
 
     logger.info("Recurring rule created", { householdId });
 
@@ -145,7 +174,7 @@ export class RecurringBaseService {
         logger.error("Failed to publish recurring event", { err })
       );
 
-    await recurringRepository.logHistory({
+    if (!denomination) await recurringRepository.logHistory({
       recurringTransactionId: rule.id,
       action: "created",
       newState: rule,
@@ -161,75 +190,92 @@ export class RecurringBaseService {
   async updateRecurring(
     id: string,
     data: Partial<RecurringTransaction>,
-    householdId: string,
-    userId?: string
-  ): Promise<RecurringTransaction> {
-    // Verify exists
-    const existing = await recurringRepository.findById(id, householdId);
-    if (!existing) {
-      throw new NotFoundError("Recurring rule not found");
-    }
-
-    // Validate amount if provided
-    if (data.amount !== undefined) {
-      const amountMoney = new Money(data.amount);
-      if (amountMoney.isNegative() || amountMoney.isZero()) {
-        throw new ValidationError("Invalid amount", [
-          { field: "amount", message: "Must be a positive number" },
-        ]);
+    actor: HouseholdContext,
+    denomination?: { confirmDenomination?: boolean; currency?: string; expectedDefinition?: string },
+    /** Request context for the UPDATE audit row, written in the update's transaction (FIN-13). */
+    audit?: RecurringAuditRequest,
+  ): Promise<{ beforeRule: RecurringTransaction; rule: VisibleRecurringRule }> {
+    id = id.toLowerCase();
+    data = { ...data, ...(data.accountId === undefined ? {} : { accountId: data.accountId.toLowerCase() }) };
+    const { beforeRule, rule } = await withWritableRecurringRule(id, actor, async (tx, beforeRule, audience) => {
+      const knownCurrency = audience.currencies.get(beforeRule.id);
+      const confirm = denomination?.confirmDenomination === true;
+      const definitionChanged = data.amount !== undefined || data.accountId !== undefined;
+      if (confirm && (data.amount === undefined || denomination?.currency === undefined)) throw new ValidationError("Confirm the entered amount and its ZMW denomination.");
+      if (confirm && !denomination?.expectedDefinition) throw new ValidationError("Reload the recurring rule before confirming its denomination.");
+      if (confirm && denomination?.expectedDefinition !== recurringDefinitionToken(beforeRule)) {
+        throw new ConflictError("Recurring definition changed. Reload it and enter the intended amount again.");
       }
-    }
-
-    if (data.frequency === "custom") {
-      const intervalUnit = data.intervalUnit ?? existing.intervalUnit;
-      const intervalValue = data.intervalValue ?? existing.intervalValue;
-      if (!intervalUnit || !intervalValue) {
-        throw new ValidationError("Custom frequency requires interval values", [
-          { field: "intervalUnit", message: "Required for custom frequency" },
-        ]);
+      const carryUnit = confirm || (knownCurrency === "ZMW" && definitionChanged);
+      if (carryUnit) {
+        const currency = denomination?.currency ?? knownCurrency;
+        const destination = audience.accounts.find(account => account.id === (data.accountId ?? beforeRule.accountId));
+        if (currency !== "ZMW" || destination?.currency !== currency || audience.householdCurrency !== currency) {
+          throw new ValidationError("Recurring denomination must be ZMW and match the destination and household; multi-currency recurring is not yet supported.");
+        }
       }
-    }
-
-    // FIX AUTH-REC-001: Validate account ownership if accountId is being changed
-    if (data.accountId !== undefined && userId) {
-      const account = await accountRepository.findByIdWithVisibility(
-        data.accountId,
-        householdId,
-        userId
-      );
-      if (!account) {
-        throw new NotFoundError("Account not found");
+      // The audience guard already holds current/source/destination account locks.
+      if (data.accountId !== undefined) {
+        const [account] = await tx.select({ id: accounts.id })
+          .from(accounts)
+          .where(and(eq(accounts.id, data.accountId), visibleAccountPredicate(actor)))
+          .limit(1);
+        if (!account) throw new NotFoundError("Recurring rule");
       }
-    }
 
-    // FIX DATA-REC-001: Validate category and merchant belong to household if being changed
-    if (data.categoryId !== undefined && data.categoryId !== null) {
-      const category = await categoryRepository.findByIdAndHousehold(
-        data.categoryId,
-        householdId
-      );
-      if (!category) {
-        throw new NotFoundError("Category not found");
+      if (data.amount !== undefined) {
+        const amountMoney = new Money(data.amount);
+        if (amountMoney.isNegative() || amountMoney.isZero()) {
+          throw new ValidationError("Invalid amount", [
+            { field: "amount", message: "Must be a positive number" },
+          ]);
+        }
       }
-    }
-
-    if (data.merchantId !== undefined && data.merchantId !== null) {
-      const merchant = await merchantRepository.findByIdAndHousehold(
-        data.merchantId,
-        householdId
-      );
-      if (!merchant) {
-        throw new NotFoundError("Merchant not found");
+      if (data.frequency === "custom") {
+        const intervalUnit = data.intervalUnit ?? beforeRule.intervalUnit;
+        const intervalValue = data.intervalValue ?? beforeRule.intervalValue;
+        if (!intervalUnit || !intervalValue) {
+          throw new ValidationError("Custom frequency requires interval values", [
+            { field: "intervalUnit", message: "Required for custom frequency" },
+          ]);
+        }
       }
-    }
+      if (data.categoryId !== undefined && data.categoryId !== null) {
+        const [category] = await tx.select({ id: categories.id }).from(categories)
+          .where(and(eq(categories.id, data.categoryId), eq(categories.householdId, actor.householdId), isNull(categories.deletedAt))).limit(1);
+        if (!category) throw new NotFoundError("Category not found");
+      }
+      if (data.merchantId !== undefined && data.merchantId !== null) {
+        const [merchant] = await tx.select({ id: merchants.id }).from(merchants)
+          .where(and(eq(merchants.id, data.merchantId), eq(merchants.householdId, actor.householdId))).limit(1);
+        if (!merchant) throw new NotFoundError("Merchant not found");
+      }
 
-    const rule = await recurringRepository.update(id, householdId, data);
+      const rule = await recurringRepository.update(id, actor.householdId, data, tx);
+      if (!rule) throw new NotFoundError("Recurring rule");
+      await recurringRepository.logHistory({
+        recurringTransactionId: rule.id,
+        action: "updated",
+        previousState: beforeRule,
+        newState: rule,
+        performedBy: actor.userId,
+      }, tx);
+      if (carryUnit) await recordRecurringDenomination(tx, rule, "ZMW", actor.userId, confirm ? "manual_confirmation" : "known_unit_edit");
+      else if (definitionChanged) await invalidateRecurringDenomination(tx, rule.id, actor.userId);
+      if (audit) {
+        await auditRecurringRule(tx, "UPDATE", rule.id, actor, audit, {
+          oldValue: ruleAuditValues(beforeRule), newValue: ruleAuditValues(rule),
+        });
+      }
+      return { beforeRule, rule: withRecurringDefinitionMetadata(rule, await getVerifiedRecurringRuleCurrency(rule.id, actor.householdId, tx)) };
+    }, {
+      additionalAccountIds: data.accountId === undefined ? [] : [data.accountId],
+      additionalCategoryIds: data.categoryId ? [data.categoryId] : [],
+      additionalMerchantIds: data.merchantId ? [data.merchantId] : [],
+      lockAccountsForUpdate: true,
+    });
 
-    if (!rule) {
-      throw new NotFoundError("Recurring rule not found");
-    }
-
-    logger.info("Recurring rule updated", { householdId });
+    logger.info("Recurring rule updated", { householdId: actor.householdId });
 
     // Emit recurring updated event
     outboxEventService
@@ -237,175 +283,14 @@ export class RecurringBaseService {
         eventType: EventTypes.RECURRING_UPDATED,
         aggregateType: "recurring",
         aggregateId: id,
-        householdId,
+        householdId: actor.householdId,
         payload: { id, changes: Object.keys(data) },
       })
       .catch((err) =>
         logger.error("Failed to publish recurring event", { err })
       );
 
-    await recurringRepository.logHistory({
-      recurringTransactionId: rule.id,
-      action: "updated",
-      previousState: existing,
-      newState: rule,
-      performedBy: userId,
-    });
-
-    return rule;
+    return { beforeRule, rule };
   }
 
-  /**
-   * Delete a recurring rule
-   */
-  async deleteRecurring(id: string, householdId: string): Promise<void> {
-    const deleted = await recurringRepository.delete(id, householdId);
-
-    if (!deleted) {
-      throw new NotFoundError("Recurring rule not found");
-    }
-
-    logger.info("Recurring rule deleted", { householdId });
-
-    // Emit recurring deleted event
-    outboxEventService
-      .publish({
-        eventType: EventTypes.RECURRING_DELETED,
-        aggregateType: "recurring",
-        aggregateId: id,
-        householdId,
-        payload: { id },
-      })
-      .catch((err) =>
-        logger.error("Failed to publish recurring event", { err })
-      );
-  }
-
-  /**
-   * Pause a recurring rule
-   */
-  async pauseRecurring(
-    id: string,
-    householdId: string,
-    userId?: string
-  ): Promise<RecurringTransaction> {
-    const existing = await recurringRepository.findById(id, householdId);
-    if (!existing) {
-      throw new NotFoundError("Recurring rule not found");
-    }
-
-    const rule = await recurringRepository.pause(id, householdId);
-
-    if (!rule) {
-      throw new NotFoundError("Recurring rule not found");
-    }
-
-    logger.info("Recurring rule paused", { householdId });
-
-    // Emit recurring paused event
-    outboxEventService
-      .publish({
-        eventType: EventTypes.RECURRING_PAUSED,
-        aggregateType: "recurring",
-        aggregateId: id,
-        householdId,
-        payload: { id },
-      })
-      .catch((err) =>
-        logger.error("Failed to publish recurring event", { err })
-      );
-
-    await recurringRepository.logHistory({
-      recurringTransactionId: rule.id,
-      action: "paused",
-      previousState: existing,
-      newState: rule,
-      performedBy: userId,
-    });
-
-    return rule;
-  }
-
-  /**
-   * Resume a recurring rule
-   */
-  async resumeRecurring(
-    id: string,
-    householdId: string,
-    userId?: string
-  ): Promise<RecurringTransaction> {
-    const existing = await recurringRepository.findById(id, householdId);
-    if (!existing) {
-      throw new NotFoundError("Recurring rule not found");
-    }
-
-    const rule = await recurringRepository.resume(id, householdId);
-
-    if (!rule) {
-      throw new NotFoundError("Recurring rule not found");
-    }
-
-    logger.info("Recurring rule resumed", { householdId });
-
-    // Emit recurring resumed event
-    outboxEventService
-      .publish({
-        eventType: EventTypes.RECURRING_RESUMED,
-        aggregateType: "recurring",
-        aggregateId: id,
-        householdId,
-        payload: { id },
-      })
-      .catch((err) =>
-        logger.error("Failed to publish recurring event", { err })
-      );
-
-    await recurringRepository.logHistory({
-      recurringTransactionId: rule.id,
-      action: "resumed",
-      previousState: existing,
-      newState: rule,
-      performedBy: userId,
-    });
-
-    return rule;
-  }
-
-  /**
-   * End a recurring rule
-   */
-  async endRecurring(
-    id: string,
-    householdId: string,
-    endDate?: string,
-    reason?: string,
-    userId?: string
-  ): Promise<RecurringTransaction> {
-    const existing = await recurringRepository.findById(id, householdId);
-    if (!existing) {
-      throw new NotFoundError("Recurring rule not found");
-    }
-
-    const finalEndDate = endDate || new Date().toISOString().split("T")[0];
-    const rule = await recurringRepository.update(id, householdId, {
-      endDate: finalEndDate,
-      isActive: false,
-      isPaused: false,
-    });
-
-    if (!rule) {
-      throw new NotFoundError("Recurring rule not found");
-    }
-
-    await recurringRepository.logHistory({
-      recurringTransactionId: rule.id,
-      action: "ended",
-      previousState: existing,
-      newState: rule,
-      changeReason: reason,
-      performedBy: userId,
-    });
-
-    return rule;
-  }
 }

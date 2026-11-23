@@ -89,8 +89,12 @@ services:
     ports:
       - "5000:5000"
     environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - SESSION_SECRET=${SESSION_SECRET}
+      DATABASE_URL: ${DATABASE_URL}
+      SESSION_SECRET: ${SESSION_SECRET}
+      # Thandi AI assistant (Claude primary). Empty means off; values live in .env only.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      AI_ANTHROPIC_DAILY_CALL_CAP: ${AI_ANTHROPIC_DAILY_CALL_CAP:-}
     depends_on:
       - postgres
 
@@ -105,6 +109,12 @@ services:
 volumes:
   pgdata:
 ```
+
+The `environment:` map is the only way a variable reaches the app container: compose reads `.env`
+to substitute `${VAR}`, but a variable that is in `.env` and not mapped here never reaches the app.
+On staging, an `ANTHROPIC_API_KEY` added to `.env` did nothing until compose mapped it. When you add
+a new variable to `.env`, add a `${VAR:-}` line here too. Run `docker compose up -d app` afterwards,
+because a running container keeps its old environment.
 
 ### 3.3 Platform Deployments
 

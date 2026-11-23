@@ -11,69 +11,53 @@
  * @module ai/ai.privacy-filters
  */
 
-import { and, eq, isNull, or, sql, SQL } from 'drizzle-orm';
+import { eq, isNull, or, sql, type SQL } from 'drizzle-orm';
 import { transactions, accounts, goals, recurringTransactions } from '@shared/schema';
+import { ForbiddenError } from '../../core/errors';
+import { can } from '../../core/authz/capabilities';
+import { visibleAccountPredicate } from '../../core/authz/transaction-visibility';
+import type { HouseholdContext } from '../../middleware/householdGuard';
+import type { QueryContext } from './ai.types';
+
+/**
+ * The signed caller every source-scoped AI reader is bound to. Fails closed when
+ * the resolved household context is missing, belongs to another caller or
+ * household, or lacks financial read access.
+ */
+export function requireFinancialReadActor(context: QueryContext): HouseholdContext {
+  const actor = context.actor;
+  if (!actor || actor.userId !== context.userId || actor.householdId !== context.householdId ||
+      !can(actor.role, 'financial.read')) {
+    throw new ForbiddenError('AI financial access requires the current caller context');
+  }
+  return actor;
+}
 
 /**
  * Privacy filters for transaction queries.
- * Requires accounts table to be joined.
+ * Requires the source account join and the resolved signed reader.
  *
  * Filters:
- * - Transaction not soft-deleted
- * - Transaction not excluded from reports
- * - Transaction not private (unless user is owner)
- * - Account not archived
- * - Account not private (unless user is owner)
- * - Account hideTransactions = false
+ * - Current financial-read membership; source account in the same household,
+ *   not soft-deleted, and not private unless the reader owns it
+ * - Transaction not soft-deleted, not excluded from reports, not split
+ * - Transaction not private (unless the reader owns it)
+ * - Account not archived and hideTransactions = false
  */
-export function transactionPrivacyFilters(
-  householdId: string,
-  userId?: string
-): SQL<unknown>[] {
-  const filters: SQL<unknown>[] = [
-    // Household isolation
-    eq(transactions.householdId, householdId),
-    // Soft-delete filter
+export function transactionPrivacyFilters(actor: HouseholdContext): SQL<unknown>[] {
+  return [
+    eq(transactions.householdId, actor.householdId),
+    visibleAccountPredicate(actor),
     isNull(transactions.deletedAt),
-    // Report exclusion filter
+    or(eq(transactions.isPrivate, false), eq(transactions.ownerUserId, actor.userId))!,
     eq(transactions.isExcludedFromReports, false),
+    eq(accounts.isArchived, false),
+    eq(accounts.hideTransactions, false),
     sql`NOT EXISTS (
       SELECT 1 FROM transaction_splits
       WHERE transaction_splits.transaction_id = ${transactions.id}
     )`,
   ];
-
-  // Transaction privacy - if private, only owner can see
-  if (userId) {
-    filters.push(
-      or(
-        eq(transactions.isPrivate, false),
-        eq(transactions.ownerUserId, userId)
-      )!
-    );
-  } else {
-    filters.push(eq(transactions.isPrivate, false));
-  }
-
-  // Account-level filters (requires JOIN with accounts)
-  filters.push(eq(accounts.isArchived, false));
-
-  // Account privacy - if private, only owner can see
-  if (userId) {
-    filters.push(
-      or(
-        eq(accounts.isPrivate, false),
-        eq(accounts.ownerUserId, userId)
-      )!
-    );
-  } else {
-    filters.push(eq(accounts.isPrivate, false));
-  }
-
-  // Hide transactions filter
-  filters.push(eq(accounts.hideTransactions, false));
-
-  return filters;
 }
 
 /**
@@ -118,6 +102,7 @@ export function accountPrivacyFilters(
 
   const filters: SQL<unknown>[] = [
     eq(accounts.householdId, householdId),
+    isNull(accounts.deletedAt),
   ];
 
   // Archive filter

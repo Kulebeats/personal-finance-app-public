@@ -1,18 +1,20 @@
 /**
  * Commit handler for the budget detail dialog's amount input.
  *
- * Skips the commit when the typed amount equals the last amount handed to
- * the save path, not the amount the row had when it was clicked: otherwise
+ * Skips the commit when the typed amount equals the last amount saved from
+ * this dialog, not the amount the row had when it was clicked: otherwise
  * 500 -> save 750 -> type 500 is skipped (page shows 500, 750 is saved) and
- * blurring an already-saved 750 re-commits it. onCommitBudget returns
- * nothing, so "saved" means handed off. The baseline resets when the dialog
- * closes or opens for another item.
+ * blurring an already-saved 750 re-commits it. A commit only opens the scope
+ * chooser, so the baseline moves only when onCommitBudget reports a save
+ * (A-17): after a cancel or a failed save, the same amount commits again.
+ * The baseline resets when the dialog closes or opens for another item.
  */
 import { useEffect, useRef } from "react";
 import { parseMoney } from "@/lib/utils";
 import type { SelectedItem, BudgetCategory, BudgetGroup } from "../types";
 
-type CommitBudget = (item: BudgetCategory, group: BudgetGroup, value: number) => void;
+/** Resolves true once the amount was saved, false when it was not. */
+type CommitBudget = (item: BudgetCategory, group: BudgetGroup, value: number) => Promise<boolean>;
 
 export function useBudgetAmountCommit(
   snapshot: SelectedItem | null,
@@ -35,7 +37,9 @@ export function useBudgetAmountCommit(
     const saved = lastCommitted.current;
     const savedAmount = saved?.itemId === snapshot.itemId ? saved.amount : snapshot.item.budget;
     if (!Number.isFinite(val) || val === savedAmount) return;
-    onCommitBudget(liveItem, group, val);
-    lastCommitted.current = { itemId: snapshot.itemId, amount: val };
+    const { itemId } = snapshot;
+    void onCommitBudget(liveItem, group, val).then((saved) => {
+      if (saved) lastCommitted.current = { itemId, amount: val };
+    });
   };
 }

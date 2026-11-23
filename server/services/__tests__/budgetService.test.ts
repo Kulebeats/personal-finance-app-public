@@ -25,6 +25,13 @@ function makeMockPeriod(overrides: {
   };
 }
 
+// The rollover month reads the household zone; these mocked households are legacy (UTC).
+vi.mock("../../repositories/AccountCreationGrant", () => ({ lockAccountHousehold: vi.fn(async () => {}) }));
+vi.mock("../householdCalendarToday", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../householdCalendarToday")>()),
+  householdCalendarZone: vi.fn(async () => "UTC"),
+}));
+
 vi.mock("../../db", () => ({
   db: {
     // Mock transaction to execute the callback with a mock tx object
@@ -53,6 +60,7 @@ vi.mock("../../repositories/BudgetRepository", () => ({
 vi.mock("../../repositories/BudgetQueryRepository", () => ({
   budgetQueryRepository: {
     getBudgetsWithProgress: vi.fn(),
+    getProgressProjection: vi.fn(),
   },
 }));
 
@@ -83,7 +91,8 @@ describe("BudgetService", () => {
             amount: "100.00",
             period,
           } as any,
-          "house-1"
+          "house-1",
+          { userId: "user-1" }
         )
       ).rejects.toMatchObject({
         message: "Invalid budget period",
@@ -146,6 +155,7 @@ describe("BudgetService", () => {
         name: "Groceries",
         amount: "100.00",
         period: "monthly",
+        currency: "ZMW",
       },
     ]);
 
@@ -155,6 +165,7 @@ describe("BudgetService", () => {
         startDate: "2025-05-01",
         endDate: "2025-05-31",
         budgetAmount: "150.00",
+        currency: "ZMW",
       },
     ]);
 
@@ -180,6 +191,7 @@ describe("BudgetService", () => {
       name: "Groceries",
       amount: "100.00",
       period: "monthly",
+      currency: "ZMW",
     });
 
     (budgetRepository.upsertPeriod as any).mockResolvedValue({
@@ -201,7 +213,8 @@ describe("BudgetService", () => {
         startDate: "2025-07-01",
         endDate: "2025-07-31",
         budgetAmount: "250.00",
-      })
+        currency: "ZMW",
+      }), expect.anything()
     );
     expect(budgetRepository.upsertPeriod).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -209,7 +222,8 @@ describe("BudgetService", () => {
         startDate: "2025-08-01",
         endDate: "2025-08-31",
         budgetAmount: "250.00",
-      })
+        currency: "ZMW",
+      }), expect.anything()
     );
   });
 
@@ -225,6 +239,7 @@ describe("BudgetService", () => {
       name: "Groceries",
       amount: "100.00",
       period: "monthly",
+      currency: "ZMW",
     });
 
     (budgetRepository.upsertPeriod as any).mockResolvedValue({
@@ -246,7 +261,8 @@ describe("BudgetService", () => {
         startDate: "2025-09-01",
         endDate: "2025-09-30",
         budgetAmount: "175.00",
-      })
+        currency: "ZMW",
+      }), expect.anything()
     );
   });
 
@@ -502,7 +518,7 @@ describe("BudgetService", () => {
     }
   });
 
-  it("processBudgetRollover calls getBudgetsWithProgress then persistBudgetPeriodRollovers", async () => {
+  it("processBudgetRollover uses a coherent shareable projection before persisting housekeeping", async () => {
     const { BudgetCoreService } = await import("../budget/BudgetCoreService");
     const { budgetRepository } = await import(
       "../../repositories/BudgetRepository"
@@ -538,9 +554,8 @@ describe("BudgetService", () => {
       },
     ];
 
-    (budgetQueryRepository.getBudgetsWithProgress as any).mockResolvedValue(
-      mockProgress
-    );
+    vi.mocked(budgetQueryRepository.getProgressProjection).mockResolvedValue({ progress: mockProgress,
+      preferences: { autoRolloverBudget: true, rolloverPercentage: 100, warningThreshold: 75, alertThreshold: 90 } } as unknown as Awaited<ReturnType<typeof budgetQueryRepository.getProgressProjection>>);
     (budgetRepository.persistBudgetPeriodRollovers as any).mockResolvedValue({
       created: 1,
       updated: 0,
@@ -548,14 +563,13 @@ describe("BudgetService", () => {
 
     const result = await service.processBudgetRollover("house-1", new Date(2025, 5, 15));
 
-    // Verify getBudgetsWithProgress was called (read operation)
-    expect(budgetQueryRepository.getBudgetsWithProgress).toHaveBeenCalledWith(
+    // The system projection is explicitly restricted to shareable sources.
+    expect(budgetQueryRepository.getProgressProjection).toHaveBeenCalledWith(
       "house-1",
       2025,
       6,
       expect.objectContaining({
-        autoRolloverBudget: true,
-        rolloverPercentage: 100,
+        context: { kind: "system", purpose: "budget-rollover", sharedOnly: true },
       })
     );
 
@@ -563,7 +577,8 @@ describe("BudgetService", () => {
     expect(budgetRepository.persistBudgetPeriodRollovers).toHaveBeenCalledWith(
       mockProgress,
       "2025-06-01",
-      "2025-06-30"
+      "2025-06-30",
+      { refreshZero: true },
     );
 
     expect(result).toEqual({ created: 1, updated: 0, total: 1 });
@@ -586,10 +601,13 @@ describe("BudgetService", () => {
     (householdRepository.findPreferences as any).mockResolvedValue({
       autoRolloverBudget: false,
     });
+    vi.mocked(budgetQueryRepository.getProgressProjection).mockResolvedValue({ progress: [], unavailable: [],
+      preferences: { autoRolloverBudget: false, rolloverPercentage: 100, warningThreshold: 75, alertThreshold: 90 },
+      unbudgeted: { expense: null, income: null } });
 
     const result = await service.processBudgetRollover("house-1");
 
-    // Should return early without calling any budget methods
+    // The coherent read establishes the disabled preference before any write.
     expect(budgetQueryRepository.getBudgetsWithProgress).not.toHaveBeenCalled();
     expect(budgetRepository.persistBudgetPeriodRollovers).not.toHaveBeenCalled();
     expect(result).toEqual({ created: 0, updated: 0, total: 0 });

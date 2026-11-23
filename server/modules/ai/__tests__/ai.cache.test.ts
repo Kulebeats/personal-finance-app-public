@@ -1,7 +1,7 @@
 /**
  * AI Cache - Unit Tests
  *
- * Tests caching behavior, TTL expiration, and invalidation.
+ * Tests disabled tool admission and the retained legacy cache primitives.
  *
  * @module ai/__tests__/ai.cache.test
  */
@@ -22,14 +22,22 @@ describe('AICache', () => {
   });
 
   describe('isCacheable', () => {
-    it('should return true for cacheable tools', () => {
-      expect(cache.isCacheable('get_spending_by_category')).toBe(true);
-      expect(cache.isCacheable('get_budget_status')).toBe(true);
-      expect(cache.isCacheable('get_goals_status')).toBe(true);
-      expect(cache.isCacheable('get_account_balances')).toBe(true);
+    it.each([
+      'get_spending_by_category',
+      'get_goals_status',
+      'get_upcoming_recurring',
+      'get_account_balances',
+      'get_merchant_spending',
+      'get_category_trends',
+      'get_monthly_summary',
+      'get_goal_assignments',
+      'get_cash_flow',
+    ])('bypasses unsafe result reuse for %s', toolName => {
+      expect(cache.isCacheable(toolName)).toBe(false);
     });
 
     it('should return false for non-cacheable tools', () => {
+      expect(cache.isCacheable('get_budget_status')).toBe(false);
       expect(cache.isCacheable('get_recent_transactions')).toBe(false);
       expect(cache.isCacheable('get_transaction_search')).toBe(false);
     });
@@ -41,32 +49,42 @@ describe('AICache', () => {
 
   describe('generateKey', () => {
     it('should generate consistent keys for same inputs', () => {
-      const key1 = cache.generateKey('hh-1', 'get_spending', { period: '30d' });
-      const key2 = cache.generateKey('hh-1', 'get_spending', { period: '30d' });
+      const key1 = cache.generateKey({ householdId: 'hh-1', userId: 'member-a' }, 'get_spending', { period: '30d' });
+      const key2 = cache.generateKey({ householdId: 'hh-1', userId: 'member-a' }, 'get_spending', { period: '30d' });
       expect(key1).toBe(key2);
     });
 
     it('should generate different keys for different households', () => {
-      const key1 = cache.generateKey('hh-1', 'get_spending', { period: '30d' });
-      const key2 = cache.generateKey('hh-2', 'get_spending', { period: '30d' });
+      const key1 = cache.generateKey({ householdId: 'hh-1', userId: 'member-a' }, 'get_spending', { period: '30d' });
+      const key2 = cache.generateKey({ householdId: 'hh-2', userId: 'member-a' }, 'get_spending', { period: '30d' });
       expect(key1).not.toBe(key2);
     });
 
     it('should generate different keys for different tools', () => {
-      const key1 = cache.generateKey('hh-1', 'get_spending', { period: '30d' });
-      const key2 = cache.generateKey('hh-1', 'get_budget', { period: '30d' });
+      const key1 = cache.generateKey({ householdId: 'hh-1', userId: 'member-a' }, 'get_spending', { period: '30d' });
+      const key2 = cache.generateKey({ householdId: 'hh-1', userId: 'member-a' }, 'get_budget', { period: '30d' });
       expect(key1).not.toBe(key2);
     });
 
     it('should generate different keys for different args', () => {
-      const key1 = cache.generateKey('hh-1', 'get_spending', { period: '30d' });
-      const key2 = cache.generateKey('hh-1', 'get_spending', { period: '90d' });
+      const key1 = cache.generateKey({ householdId: 'hh-1', userId: 'member-a' }, 'get_spending', { period: '30d' });
+      const key2 = cache.generateKey({ householdId: 'hh-1', userId: 'member-a' }, 'get_spending', { period: '90d' });
       expect(key1).not.toBe(key2);
     });
 
+    it('should generate different keys for different members of one household', () => {
+      const key1 = cache.generateKey({ householdId: 'hh-1', userId: 'member-a' }, 'get_spending', { period: '30d' });
+      const key2 = cache.generateKey({ householdId: 'hh-1', userId: 'member-b' }, 'get_spending', { period: '30d' });
+      expect(key1).not.toBe(key2);
+    });
+
+    it('should refuse a key without the acting member', () => {
+      expect(() => cache.generateKey({ householdId: 'hh-1', userId: '' }, 'get_spending', {})).toThrow();
+    });
+
     it('should sort args for consistent keys', () => {
-      const key1 = cache.generateKey('hh-1', 'tool', { a: 1, b: 2 });
-      const key2 = cache.generateKey('hh-1', 'tool', { b: 2, a: 1 });
+      const key1 = cache.generateKey({ householdId: 'hh-1', userId: 'member-a' }, 'tool', { a: 1, b: 2 });
+      const key2 = cache.generateKey({ householdId: 'hh-1', userId: 'member-a' }, 'tool', { b: 2, a: 1 });
       expect(key1).toBe(key2);
     });
   });
@@ -121,6 +139,17 @@ describe('AICache', () => {
   });
 
   describe('invalidateTool', () => {
+    it('should remove every generated member entry for the tool', () => {
+      const memberA = cache.generateKey({ householdId: 'hh-1', userId: 'member-a' }, 'tool1', {});
+      const memberB = cache.generateKey({ householdId: 'hh-1', userId: 'member-b' }, 'tool1', {});
+      cache.set(memberA, { data: 1 });
+      cache.set(memberB, { data: 2 });
+
+      expect(cache.invalidateTool('hh-1', 'tool1')).toBe(2);
+      expect(cache.get(memberA)).toBeNull();
+      expect(cache.get(memberB)).toBeNull();
+    });
+
     it('should remove entries for specific tool', () => {
       cache.set('ai:hh-1:tool1:a=1', { data: 1 });
       cache.set('ai:hh-1:tool1:b=2', { data: 2 });

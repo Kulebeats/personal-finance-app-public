@@ -9,27 +9,23 @@
 
 import crypto from "node:crypto";
 import { Request } from "express";
-import { userRepository } from "../../repositories/UserRepository";
 import {
   isEmailServiceConfigured,
   sendMfaCodeEmail,
 } from "../../services/emailService";
 import { auditService, AuditEventType } from "../../services/AuditService";
-import { verifyPassword } from "../../auth";
 import { logger } from "../../utils/logger";
-import { UnauthorizedError, NotFoundError } from "../../core/errors";
+import { UnauthorizedError } from "../../core/errors";
 import { User } from "@shared/schema";
 import { MfaLoginVerifyInput } from "./auth.validation";
+import { assertCurrentCredential } from "../../services/session-identity";
+import { consumeMfaCredential, storeMfaChallenge } from "./auth.mfa-credential";
+import { authSessionService } from "./auth.session.service";
 
 /**
  * MFA login code TTL
  */
 const MFA_CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
-
-/**
- * MFA backup codes expire after 90 days
- */
-const MFA_BACKUP_CODE_EXPIRY_DAYS = 90;
 
 export const authMfaService = {
   /**
@@ -46,6 +42,7 @@ export const authMfaService = {
     ipAddress: string,
     userAgent: string,
   ): Promise<void> {
+    await assertCurrentCredential(user);
     const code = this.generateMfaCode();
     const expiry = new Date(Date.now() + MFA_CODE_TTL_MS);
 
@@ -55,14 +52,19 @@ export const authMfaService = {
       m.hashPassword(code),
     );
 
-    await userRepository.update(user.id, {
-      mfaCode: hashedCode,
-      mfaCodeExpiry: expiry,
-    });
+    await storeMfaChallenge(user, hashedCode, expiry);
+
+    // An authenticated or different pending identity cannot keep its SID when
+    // entering this challenge. Ordinary anonymous challenges/resends keep their
+    // existing CSRF-bound session until successful MFA completion rotates it.
+    if (req.session.userId || (req.session.mfaPendingUserId && req.session.mfaPendingUserId !== user.id)) {
+      await authSessionService.regenerateSession(req);
+    }
 
     // Ensure no authenticated session is set yet
     delete req.session.userId;
     req.session.mfaPendingUserId = user.id;
+    req.session.mfaPendingSecurityGeneration = user.securityGeneration ?? 0;
     req.session.mfaPendingRememberMe = rememberMe;
 
     // Send MFA code via email when configured
@@ -105,87 +107,23 @@ export const authMfaService = {
     const ipAddress = req.ip || req.socket?.remoteAddress || "unknown";
     const userAgent = req.headers["user-agent"] || "unknown";
 
-    const user = await userRepository.findById(pendingUserId);
-    if (!user) {
-      throw new NotFoundError("User not found");
-    }
-
-    const now = new Date();
-    let mfaVerified = false;
-    let backupCodesUpdated: string[] | null | undefined;
-
-    // Primary MFA code verification (time-limited OTP)
-    const hasValidOtp =
-      Boolean(user.mfaCode) &&
-      Boolean(user.mfaCodeExpiry) &&
-      user.mfaCodeExpiry !== null &&
-      now <= new Date(user.mfaCodeExpiry);
-
-    if (hasValidOtp && user.mfaCode) {
-      // Compare provided code against stored hash
-      mfaVerified = await verifyPassword(data.code, user.mfaCode);
-    }
-
-    // Backup code verification (one-time use, 90-day expiry)
-    if (!mfaVerified && user.mfaBackupCodes && user.mfaBackupCodes.length > 0) {
-      const backupCodesExpired = this.areBackupCodesExpired(
-        user.mfaBackupCodesGeneratedAt,
-      );
-
-      if (!backupCodesExpired) {
-        let validCodeIndex = -1;
-        for (let i = 0; i < user.mfaBackupCodes.length; i++) {
-          const isValid = await verifyPassword(
-            data.code,
-            user.mfaBackupCodes[i],
-          );
-          if (isValid) {
-            validCodeIndex = i;
-            break;
-          }
-        }
-
-        if (validCodeIndex !== -1) {
-          mfaVerified = true;
-          backupCodesUpdated = user.mfaBackupCodes.filter(
-            (_code, index) => index !== validCodeIndex,
-          );
-        }
-      }
-    }
-
-    if (!mfaVerified) {
+    let user: User;
+    try { ({ user } = await consumeMfaCredential(req, data.code, "login")); }
+    catch (error) {
       await auditService.log({
         eventType: AuditEventType.MFA_FAILED,
-        userId: user.id,
+        userId: pendingUserId,
         ipAddress,
         userAgent,
-        details: { reason: "invalid_or_expired_code" },
+        details: { reason: error instanceof UnauthorizedError ? "invalid_or_expired_code" : "verification_unavailable" },
       });
-      throw new UnauthorizedError("Invalid or expired MFA code");
+      throw error;
     }
 
     const rememberMePending = Boolean(req.session.mfaPendingRememberMe);
 
-    // Clear MFA code and pending session state
-    delete req.session.mfaPendingUserId;
-    delete req.session.mfaPendingRememberMe;
-
-    const updateData: Partial<User> = {
-      mfaCode: null,
-      mfaCodeExpiry: null,
-    };
-    if (backupCodesUpdated !== undefined) {
-      updateData.mfaBackupCodes = backupCodesUpdated;
-    }
-    await userRepository.update(user.id, updateData);
-
-    await auditService.log({
-      eventType: AuditEventType.MFA_VERIFIED,
-      userId: user.id,
-      ipAddress,
-      userAgent,
-    });
+    // Keep the pending identity until finalizeLogin retires its exact old SID.
+    // Session regeneration then drops pending state before setting userId.
 
     return {
       user,
@@ -203,13 +141,4 @@ export const authMfaService = {
     return code.toString().padStart(6, "0");
   },
 
-  /**
-   * Check whether backup codes have expired.
-   */
-  areBackupCodesExpired(generatedAt?: Date | null): boolean {
-    if (!generatedAt) return false;
-    const expiryDate = new Date(generatedAt);
-    expiryDate.setDate(expiryDate.getDate() + MFA_BACKUP_CODE_EXPIRY_DAYS);
-    return new Date() > expiryDate;
-  },
 };

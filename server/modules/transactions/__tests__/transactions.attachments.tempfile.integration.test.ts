@@ -31,6 +31,8 @@ import {
   getTestApp,
 } from "../../../__tests__/fixtures";
 import { hashPassword } from "../../../auth";
+import { isStored } from "../../../__tests__/stored-upload-fixture";
+import { removeUploadObject } from "../../../core/storage/upload-objects";
 
 const UPLOADS_ROOT = path.resolve(process.cwd(), "uploads");
 const TEMP_UPLOAD_DIR = path.join(UPLOADS_ROOT, "temp");
@@ -162,11 +164,7 @@ describe("Transaction attachment temp-file hardening (W5a)", () => {
 
   afterAll(async () => {
     for (const filePath of createdFiles) {
-      try {
-        await fs.unlink(filePath);
-      } catch {
-        /* ignore */
-      }
+      await removeUploadObject(filePath);
     }
     try {
       await fs.rm(path.join(UPLOADS_ROOT, "transactions", transactionId), {
@@ -239,7 +237,7 @@ describe("Transaction attachment temp-file hardening (W5a)", () => {
       expect(attachment.filename).not.toContain("/");
       expect(attachment.filename).not.toContain("\\");
       expect(path.basename(attachment.storagePath)).toBe(attachment.filename);
-      expect(await fileExists(attachment.storagePath)).toBe(true);
+      expect(await isStored(attachment.storagePath)).toBe(true);
       createdFiles.push(attachment.storagePath);
 
       await expect(listRelativeFiles(TEMP_UPLOAD_DIR)).resolves.toEqual(

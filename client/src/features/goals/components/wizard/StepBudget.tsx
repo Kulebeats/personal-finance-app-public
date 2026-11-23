@@ -1,3 +1,4 @@
+import { ProtectedImage } from "@/components/session/ProtectedImage";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useFormatters } from "@/contexts/SettingsContext";
@@ -54,7 +55,7 @@ export function StepBudget({ goals, onUpdateGoal }: StepBudgetProps) {
                 {/* Goal thumbnail */}
                 <div className="w-10 h-10 rounded-lg bg-muted overflow-hidden shrink-0">
                   {goal.imageUrl ? (
-                    <img
+                    <ProtectedImage
                       src={goal.imageUrl}
                       alt=""
                       className="w-full h-full object-cover"
@@ -113,7 +114,7 @@ export function StepBudget({ goals, onUpdateGoal }: StepBudgetProps) {
               <div className="flex items-center gap-3">
                 <div className="w-12 h-12 rounded-lg bg-muted overflow-hidden">
                   {goal.imageUrl ? (
-                    <img
+                    <ProtectedImage
                       src={goal.imageUrl}
                       alt=""
                       className="w-full h-full object-cover"

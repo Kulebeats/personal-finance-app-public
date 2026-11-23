@@ -1,118 +1,93 @@
 /**
- * Investments E2E Tests
+ * Investments E2E (QA-01 rewrite).
  *
- * Exercises the investments feature as it is actually shipped
- * (client/src/pages/Investments.tsx + client/src/features/investments/**):
- * - The portfolio header, which always renders an "Investments" heading
- * - Either the empty state ("No Holdings Yet") or the populated tab set
- *   (Holdings / Performance / Allocation / Government (GRZ) / FX Impact /
- *   Tax Report / Pension / Recurring), whichever matches the current data
- * - The real "Add Investment Holding" dialog and its security-search step
- *
- * The previous version of this file asserted on fictional `data-testid`
- * attributes (`portfolio-value`, `holdings-table`, `allocation-chart`,
- * `security-result`, `fx-impact-panel`, `grz-bonds-table`, ...), a native
- * `<select>`-based add-holding form, and a route (`/investments/grz`) that
- * does not exist in the router - GRZ securities render as a tab on
- * `/investments`, not a sub-route. None of that matched the shipped UI.
+ * The previous version branched on whether the shared test account happened
+ * to hold anything (`if (isEmpty) ... else ...`) and skipped the tab test
+ * outright when it did not, so the populated page was never checked in CI.
+ * Each test now builds its own state: an empty synthetic household for the
+ * empty state and the add-holding dialog, and one with a known holding for
+ * the holdings table and the tab set. Creating a holding through the dialog
+ * is covered end to end by completion-r13-holding-delete.spec.ts.
  */
+import { randomUUID } from "node:crypto";
+import { test, expect, type Page } from "./protected-test";
+import { createCompletionFixture, type CompletionFixture } from "../server/testing/fixtures/completion-fixtures";
+import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
+import { signInAs } from "./utils/fixture-session";
 
-import { test, expect } from "@playwright/test";
-import { login } from "./utils/login";
+interface Seeded { fixture: CompletionFixture; securityName: string }
 
-test.describe("Investments", () => {
-  test.beforeEach(async ({ page }) => {
-    await login(page);
-    await page.goto("/investments");
-    await expect(page).toHaveURL(/\/investments/);
+async function householdWithHolding(): Promise<Seeded> {
+  const fixture = await createCompletionFixture();
+  const accountId = randomUUID(), securityId = randomUUID();
+  // Unique to this household's seed: securities are shared across households,
+  // so a fixed name could match another fixture's holding.
+  const securityName = `Synthetic Copperbelt Shares ${securityId.slice(0, 8)}`;
+  await withFixtureClient(async (client) => {
+    await client.query("BEGIN");
+    try {
+      await client.query("INSERT INTO accounts (id, household_id, name, type, currency) VALUES ($1, $2, 'Synthetic custody', 'checking', 'ZMW')",
+        [accountId, fixture.householdId]);
+      await client.query("INSERT INTO securities (id, symbol, name, type, currency, current_price) VALUES ($1, $2, $3, 'stock', 'ZMW', 12.5)",
+        [securityId, `S${securityId.slice(0, 8)}`, securityName]);
+      await client.query("INSERT INTO holdings (id, household_id, security_id, account_id, quantity, cost_basis) VALUES ($1, $2, $3, $4, 4, 40)",
+        [randomUUID(), fixture.householdId, securityId, accountId]);
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+  });
+  return { fixture, securityName };
+}
+
+async function openInvestments(page: Page, fixture: CompletionFixture) {
+  await signInAs(page, fixture);
+  await page.goto("/investments");
+  await expect(page).toHaveURL(/\/investments(?:[?#]|$)/);
+  await expect(page.getByRole("heading", { name: "Investments", level: 1 })).toBeVisible({ timeout: 30_000 });
+}
+
+test.describe("Investments with no holdings", () => {
+  test("shows the empty state and its call to action", async ({ page }) => {
+    await openInvestments(page, await createCompletionFixture());
+    await expect(page.getByRole("heading", { name: "No Holdings Yet" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /add your first holding/i })).toBeVisible();
   });
 
-  test("shows the Investments heading and either holdings or the empty state", async ({
-    page,
-  }) => {
-    await expect(
-      page.getByRole("heading", { name: "Investments", level: 1 }),
-    ).toBeVisible();
+  test("opens the add-holding dialog at the security search step", async ({ page }) => {
+    await openInvestments(page, await createCompletionFixture());
+    // Waiting for the empty state first means the entry button is the settled
+    // one; while the holdings query loads, a different "Add Holding" renders.
+    await expect(page.getByRole("heading", { name: "No Holdings Yet" })).toBeVisible();
+    await page.getByRole("button", { name: "Add Your First Holding", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: /add investment holding/i });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByPlaceholder(/search securities/i)).toBeVisible();
+    await expect(dialog.getByRole("button", { name: /add new security/i })).toBeVisible();
+  });
+});
 
-    const emptyState = page.getByRole("heading", { name: "No Holdings Yet" });
-    const holdingsTab = page.getByRole("tab", { name: "Holdings" });
+test.describe("Investments with a holding", () => {
+  test("lists the holding in the holdings table", async ({ page }) => {
+    const { fixture, securityName } = await householdWithHolding();
+    await openInvestments(page, fixture);
+    await expect(page.getByRole("tab", { name: "Holdings", selected: true })).toBeVisible();
+    // Inside the Holdings table only: one body row, and its name cell is exactly the seeded security.
+    const table = page.getByRole("table", { name: "Holdings", exact: true });
+    const row = table.locator("tbody tr");
+    await expect(row).toHaveCount(1);
+    await expect(row.getByText(securityName, { exact: true })).toBeVisible();
+    // Price, quantity and value in full, in kwacha (seed: 4 units at K12.50).
+    const cells = row.locator("td");
+    await expect(cells.nth(2)).toHaveText(/^K12\.50$/);
+    await expect(cells.nth(3)).toHaveText(/^4$/);
+    await expect(cells.nth(4)).toHaveText(/^K50\.00$/);
+    await expect(page.getByRole("heading", { name: "No Holdings Yet" })).toHaveCount(0);
+  });
 
-    const isEmpty = await emptyState.isVisible().catch(() => false);
-    if (isEmpty) {
-      await expect(
-        page.getByRole("button", { name: /add your first holding/i }),
-      ).toBeVisible();
-    } else {
-      await expect(holdingsTab).toBeVisible();
-      await expect(page.getByRole("tab", { name: "Performance" })).toBeVisible();
-      await expect(
-        page.getByRole("tab", { name: "Government (GRZ)" }),
-      ).toBeVisible();
+  test("switches between the investment tabs", async ({ page }) => {
+    await openInvestments(page, (await householdWithHolding()).fixture);
+    for (const name of ["Government (GRZ)", "Performance", "Holdings"]) {
+      await page.getByRole("tab", { name }).click();
+      await expect(page.getByRole("tab", { name, selected: true })).toBeVisible();
     }
-  });
-
-  test("opens the real add-holding dialog with the security search step", async ({
-    page,
-  }) => {
-    // The entry-point button depends on holdings state, and the page SWAPS
-    // between the two while the holdings query is in flight:
-    //
-    //   Investments.tsx renders the empty state only on `!isLoading &&
-    //   holdings.length === 0`, so DURING loading it falls through to the
-    //   populated branch and shows PortfolioSummary's "Add Holding". When the
-    //   query resolves to zero holdings it re-renders to the empty state and
-    //   that button unmounts, replaced by "Add Your First Holding".
-    //
-    // The old `pickVisible` + click raced that swap: it resolved "Add Holding"
-    // mid-load, then `click()` waited on a selector that no longer matched
-    // anything and burned the full 60s test timeout. That is the intermittent
-    // `investments.spec.ts:55` failure seen on main (2026-07-20, runs 14:52 and
-    // 18:30) while passing on faster runs.
-    //
-    // There is no DOM marker distinguishing "loading" from "populated" — both
-    // render the same tree — so there is nothing to wait on. Instead retry the
-    // whole open-the-dialog step: if a click lands mid-swap (or the dialog
-    // unmounts with its trigger), `toPass` re-resolves and tries again once the
-    // page has settled. Both buttons are wrapped in the same `AddHoldingModal`,
-    // so whichever wins opens the same dialog.
-    const dialog = page.getByRole("dialog", {
-      name: /add investment holding/i,
-    });
-
-    await expect(async () => {
-      await page
-        .getByRole("button", { name: /^add (your first )?holding$/i })
-        .first()
-        .click({ timeout: 5_000 });
-      await expect(dialog).toBeVisible({ timeout: 5_000 });
-    }).toPass({ timeout: 30_000 });
-
-    await expect(
-      dialog.getByPlaceholder(/search securities/i),
-    ).toBeVisible();
-    await expect(
-      dialog.getByRole("button", { name: /add new security/i }),
-    ).toBeVisible();
-  });
-
-  test("switches between investment tabs when holdings exist", async ({
-    page,
-  }) => {
-    const holdingsTab = page.getByRole("tab", { name: "Holdings" });
-    const hasHoldings = await holdingsTab.isVisible().catch(() => false);
-    test.skip(
-      !hasHoldings,
-      "test household has no holdings yet; empty state is covered separately",
-    );
-
-    await page.getByRole("tab", { name: "Government (GRZ)" }).click();
-    await expect(
-      page.getByRole("tab", { name: "Government (GRZ)", selected: true }),
-    ).toBeVisible();
-
-    await page.getByRole("tab", { name: "Performance" }).click();
-    await expect(
-      page.getByRole("tab", { name: "Performance", selected: true }),
-    ).toBeVisible();
   });
 });

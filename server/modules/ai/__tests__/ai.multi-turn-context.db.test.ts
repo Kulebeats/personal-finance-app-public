@@ -36,6 +36,7 @@ import {
   createTestHousehold,
 } from "../../../__tests__/fixtures";
 import { hashPassword } from "../../../auth";
+import { CURRENT_AI_CONSENT_VERSION } from "../ai.consent-policy";
 import { geminiClient, type GeminiCallOptions } from "../ai.gemini";
 
 const PASSWORD = "TestPassword123";
@@ -75,6 +76,7 @@ describe("AI multi-turn context (OPEN-3) — REAL DB", () => {
       currency: household.currency,
       aiConsentGiven,
       aiConsentDate: aiConsentGiven ? new Date() : null,
+      aiConsentVersion: CURRENT_AI_CONSENT_VERSION,
     });
     await db.insert(users).values({
       id: user.id,
@@ -325,7 +327,7 @@ describe("AI multi-turn context (OPEN-3) — REAL DB", () => {
     // Restore for any later tests / reruns.
     await db
       .update(households)
-      .set({ aiConsentGiven: true, aiConsentDate: new Date() })
+      .set({ aiConsentGiven: true, aiConsentDate: new Date(), aiConsentVersion: CURRENT_AI_CONSENT_VERSION })
       .where(eq(households.id, tenantA.householdId));
   });
 

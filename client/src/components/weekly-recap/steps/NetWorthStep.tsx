@@ -5,18 +5,25 @@ import WeeklyChart from "../components/WeeklyChart";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
+import { formatCapturedWorth, formatPreviousWorth } from "../formatCapturedWorth";
 
 export default function NetWorthStep() {
-  const { data, nextStep, prevStep, submitStepFeedback } = useWeeklyRecap();
+  const { data, isChecking, error, retry, nextStep, prevStep, submitStepFeedback } = useWeeklyRecap();
   const { formatCurrency } = useFormatters();
   const [feedbackGiven, setFeedbackGiven] = useState<
     "positive" | "negative" | null
   >(null);
 
-  if (!data) return null;
+  if (!data || isChecking || error) return <div role={error ? "alert" : "status"} className="space-y-4">
+    <p>{error ? "Unable to refresh net worth. Please try again." : "Checking current access to net worth…"}</p>
+    {error && <Button onClick={retry}>Retry</Button>}
+  </div>;
 
   const { netWorth } = data;
-  const isPositive = netWorth.change >= 0;
+  const isPositive = netWorth.change !== null && netWorth.change >= 0;
+  const formatWorth = (value: number) => formatCapturedWorth(value, netWorth.currency, formatCurrency);
+  const previousWorth = formatPreviousWorth(netWorth, formatCurrency);
+  const chartPoints = netWorth.series.filter(point => !point.currency || point.currency === netWorth.currency);
 
   const handleFeedback = (type: "positive" | "negative") => {
     setFeedbackGiven(type);
@@ -35,10 +42,16 @@ export default function NetWorthStep() {
       </div>
 
       <div className="flex flex-col items-center justify-center space-y-2">
-        <span className="text-4xl font-bold tracking-tighter">
-          {formatCurrency(netWorth.current)}
-        </span>
-        <div
+        {netWorth.current === null ? <p>Historical net worth is unavailable</p> : <>
+          <span className="text-4xl font-bold tracking-tighter">{formatCapturedWorth(netWorth.currentMoney?.amount ?? netWorth.current, netWorth.currentMoney?.currency ?? netWorth.currency, formatCurrency)}</span>
+          {netWorth.asOf && <p className="text-sm text-muted-foreground">Snapshot {netWorth.asOf}</p>}
+        </>}
+        {netWorth.change === null && previousWorth !== null && <p className="text-sm text-muted-foreground">
+          Previous snapshot {netWorth.previousAsOf}: {previousWorth}
+        </p>}
+        {netWorth.change === null ? <p className="text-sm text-muted-foreground">
+          {previousWorth === null ? "Previous period unavailable" : "Comparison unavailable"}
+        </p> : <div
           className={cn(
             "flex items-center gap-1 text-sm font-medium",
             isPositive ? "text-emerald-500" : "text-rose-500"
@@ -51,20 +64,22 @@ export default function NetWorthStep() {
           )}
           <span>
             {isPositive ? "+" : ""}
-            {formatCurrency(netWorth.change)} (
-            {netWorth.changePercent.toFixed(1)}%)
+            {formatWorth(netWorth.change)}
+            {netWorth.changePercent !== null && ` (${netWorth.changePercent.toFixed(1)}%)`}
           </span>
-        </div>
+        </div>}
       </div>
 
-      <div className="h-[200px] w-full">
+      {netWorth.current !== null && chartPoints.length > 0 && <div className="h-[200px] w-full">
         <WeeklyChart
-          data={netWorth.series}
+          data={chartPoints}
+          currency={netWorth.currency ?? undefined}
+          title="Captured net worth"
           color={
             isPositive ? "hsl(var(--chart-income))" : "hsl(var(--chart-expense))"
           }
         />
-      </div>
+      </div>}
 
       <div className="flex flex-col items-center gap-4 pt-4">
         <p className="text-sm text-foreground/70">

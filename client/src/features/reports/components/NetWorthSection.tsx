@@ -23,9 +23,11 @@ interface NetWorthDataPoint {
 interface NetWorthSectionProps {
   data: Array<{ id: string; data: NetWorthDataPoint[] }>;
   isLoading: boolean;
+  /** The report's base currency (the series values are in it); null until it is known. */
+  currency: string | null;
 }
 
-export function NetWorthSection({ data, isLoading }: NetWorthSectionProps) {
+export function NetWorthSection({ data, isLoading, currency }: NetWorthSectionProps) {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -74,7 +76,7 @@ export function NetWorthSection({ data, isLoading }: NetWorthSectionProps) {
         <ChartTooltip
           content={
             <ChartTooltipContent
-              formatter={(value) => formatCurrency(Number(value))}
+              formatter={(value) => formatCurrency(Number(value), currency)}
             />
           }
         />

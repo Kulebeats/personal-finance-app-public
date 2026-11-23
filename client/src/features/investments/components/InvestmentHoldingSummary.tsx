@@ -1,7 +1,7 @@
 type InvestmentHoldingSummaryProps = {
   securitySymbol: string;
   securityName: string;
-  currentQuantity: number;
+  currentQuantity: string;
 };
 
 export function InvestmentHoldingSummary({
@@ -16,7 +16,7 @@ export function InvestmentHoldingSummary({
       <div className="text-sm mt-1">
         <span className="text-muted-foreground">Current Holdings:</span>{" "}
         <span className="font-medium">
-          {currentQuantity.toLocaleString()} shares
+          {currentQuantity} shares
         </span>
       </div>
     </div>

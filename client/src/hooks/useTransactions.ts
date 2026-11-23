@@ -5,7 +5,11 @@
  * Uses the API client for server-backed data.
  */
 
+import { userErrorMessage } from "@/lib/errorCopy";
+import { useEffect } from "react";
 import {
+  focusManager,
+  onlineManager,
   useQuery,
   useMutation,
   useQueryClient,
@@ -26,14 +30,16 @@ import { useToast } from "@/hooks/use-toast";
 import { accountKeys } from "./useAccounts";
 import { invalidateReportsForChange } from "./use-reports";
 
+type TransactionSummaryFilters = Omit<ListTransactionsParams, "startDate" | "endDate" | "limit" | "offset">;
+
 // Query keys
 export const transactionKeys = {
   all: ["transactions"] as const,
   list: (params?: ListTransactionsParams) =>
     [...transactionKeys.all, "list", params] as const,
   detail: (id: string) => [...transactionKeys.all, "detail", id] as const,
-  summary: (startDate: string, endDate: string) =>
-    [...transactionKeys.all, "summary", startDate, endDate] as const,
+  summary: (startDate: string, endDate: string, filters: TransactionSummaryFilters = {}) =>
+    [...transactionKeys.all, "summary", startDate, endDate, filters] as const,
 };
 
 /**
@@ -56,9 +62,11 @@ export function useTransactions(
  */
 export function useInfiniteTransactions(
   params?: Omit<ListTransactionsParams, "offset">,
+  enabled = true,
 ) {
   return useInfiniteQuery({
     queryKey: [...transactionKeys.all, "infinite", params],
+    enabled,
     queryFn: ({ pageParam = 0 }) =>
       transactionsApi.list({
         ...params,
@@ -95,19 +103,39 @@ export function useTransaction(id: string) {
 export function useTransactionSummary(
   startDate: string,
   endDate: string,
-  options?: { ownerUserId?: string | null; type?: string; accountId?: string },
+  filters: TransactionSummaryFilters = {},
+  enabled = true,
 ) {
-  return useQuery({
-    queryKey: transactionKeys.summary(startDate, endDate),
-    queryFn: () =>
-      transactionsApi.getSummary({
-        startDate,
-        endDate,
-        ...options,
-      }),
-    enabled: !!startDate && !!endDate,
-    staleTime: 60_000, // 1 minute
+  const client = useQueryClient();
+  const queryKey = transactionKeys.summary(startDate, endDate, filters);
+  const canRead = enabled && !!startDate && !!endDate;
+  const result = useQuery({
+    queryKey,
+    queryFn: ({ signal }) => transactionsApi.getSummary({ startDate, endDate, ...filters }, signal),
+    enabled: canRead,
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
+  const query = client.getQueryCache().find({ queryKey, exact: true });
+  useEffect(() => {
+    if (!canRead || !query) return;
+    const refresh = () => {
+      // TanStack normally joins an in-flight GET on focus. It may predate the
+      // privacy change, even when this is the very first read for this key.
+      const match = { queryKey: query.queryKey, exact: true };
+      void client.cancelQueries(match);
+      void client.refetchQueries(match);
+    };
+    const unsubscribeFocus = focusManager.subscribe(focused => { if (focused) refresh(); });
+    const unsubscribeOnline = onlineManager.subscribe(online => { if (online) refresh(); });
+    return () => { unsubscribeFocus(); unsubscribeOnline(); };
+  }, [canRead, client, query]);
+  // Another household member can change the amount or withdraw access.
+  // A cached result cannot stand in for the new read, including when offline.
+  const current = canRead && result.fetchStatus === "idle" && result.isSuccess;
+  return { ...result, data: current ? result.data : undefined };
 }
 
 /**
@@ -130,8 +158,6 @@ export function useCreateTransaction() {
       queryClient.invalidateQueries({ queryKey: accountKeys.all });
       queryClient.invalidateQueries({ queryKey: ["budgets"] });
       queryClient.invalidateQueries({ queryKey: ["categories"] });
-      // Reports use staleTime: Infinity - without this, Reports pages and
-      // dashboard widgets show permanently stale numbers (audit v2 B2).
       invalidateReportsForChange(queryClient, "transaction");
 
       if (result.isDuplicate) {
@@ -149,7 +175,7 @@ export function useCreateTransaction() {
     onError: (error: Error) => {
       toast({
         title: "Failed to create transaction",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -172,10 +198,7 @@ export function useCreateTransfer() {
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: transactionKeys.all });
       queryClient.invalidateQueries({ queryKey: accountKeys.all });
-      // A transfer writes two ledger transactions and moves balances between
-      // two accounts, so both report buckets need invalidating (audit v2 B2).
       invalidateReportsForChange(queryClient, "transaction");
-      invalidateReportsForChange(queryClient, "account");
 
       if (result.isDuplicate) {
         toast({
@@ -192,7 +215,7 @@ export function useCreateTransfer() {
     onError: (error: Error) => {
       toast({
         title: "Failed to create transfer",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -218,7 +241,6 @@ export function useUpdateTransfer() {
       queryClient.invalidateQueries({ queryKey: ["budgets"] });
       queryClient.invalidateQueries({ queryKey: ["categories"] });
       invalidateReportsForChange(queryClient, "transaction");
-      invalidateReportsForChange(queryClient, "account");
       toast({
         title: "Transfer updated",
         description: "The transfer has been updated.",
@@ -227,7 +249,7 @@ export function useUpdateTransfer() {
     onError: (error: Error) => {
       toast({
         title: "Failed to update transfer",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -244,16 +266,17 @@ export function useUpdateTransaction() {
   return useMutation({
     mutationFn: ({ id, data }: { id: string; data: UpdateTransactionInput }) =>
       transactionsApi.update(id, data),
-    onSuccess: (updatedTransaction) => {
+    onSuccess: async (updatedTransaction) => {
       queryClient.setQueryData(
         transactionKeys.detail(updatedTransaction.id),
         updatedTransaction,
       );
-      queryClient.invalidateQueries({ queryKey: transactionKeys.list() });
+      queryClient.invalidateQueries({ queryKey: [...transactionKeys.all, "list"] });
       queryClient.invalidateQueries({ queryKey: accountKeys.all });
       queryClient.invalidateQueries({ queryKey: ["budgets"] });
       queryClient.invalidateQueries({ queryKey: ["categories"] });
       invalidateReportsForChange(queryClient, "transaction");
+      await queryClient.invalidateQueries({ queryKey: [...transactionKeys.all, "infinite"] });
       toast({
         title: "Transaction updated",
         description: `${updatedTransaction.name} has been updated.`,
@@ -270,7 +293,7 @@ export function useUpdateTransaction() {
       } else {
         toast({
           title: "Failed to update transaction",
-          description: error.message,
+          description: userErrorMessage(error, "Please try again."),
           variant: "destructive",
         });
       }
@@ -305,7 +328,7 @@ export function useReviewTransaction() {
     onError: (error: Error) => {
       toast({
         title: "Failed to update review status",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -323,7 +346,7 @@ export function useDeleteTransaction() {
     mutationFn: (id: string) => transactionsApi.delete(id),
     onSuccess: (_, id) => {
       queryClient.removeQueries({ queryKey: transactionKeys.detail(id) });
-      queryClient.invalidateQueries({ queryKey: transactionKeys.list() });
+      queryClient.invalidateQueries({ queryKey: transactionKeys.all });
       queryClient.invalidateQueries({ queryKey: accountKeys.all });
       queryClient.invalidateQueries({ queryKey: ["budgets"] });
       queryClient.invalidateQueries({ queryKey: ["categories"] });
@@ -336,7 +359,7 @@ export function useDeleteTransaction() {
     onError: (error: Error) => {
       toast({
         title: "Failed to delete transaction",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { FormProvider } from "react-hook-form";
+import { FormProvider, type FieldErrors } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Loader2, User, Phone, Wallet } from "lucide-react";
@@ -7,6 +7,7 @@ import { SettingsCard } from "@/features/settings/components/SettingsCard";
 import { useProfileForm } from "./useProfileForm";
 import { toast } from "sonner";
 import { useProfile } from "@/hooks/use-settings";
+import type { ProfileFormData } from "@/features/settings/schemas/profileSchema";
 
 // Sub-components
 import { ProfilePersonalFields } from "./components/ProfilePersonalFields";
@@ -14,23 +15,51 @@ import { ContactFields } from "./components/ContactFields";
 import { FinancialProfileFields } from "./components/FinancialProfileFields";
 import { ProfileCompletenessWidget } from "./components/ProfileCompletenessWidget";
 
+function errorFields(errors: FieldErrors<ProfileFormData>): string[] {
+  const fields: string[] = [];
+  for (const [name, error] of Object.entries(errors)) {
+    if (!error) continue;
+    if ("type" in error) {
+      fields.push(name);
+    } else {
+      for (const [childName, childError] of Object.entries(error)) {
+        if (childError && typeof childError === "object" && "type" in childError) {
+          fields.push(`${name}.${childName}`);
+        }
+      }
+    }
+  }
+  return fields;
+}
+
 export function ProfileForm() {
   const { form, isLoading, isSubmitting, onSubmit } = useProfileForm();
   const { data: profile } = useProfile();
-  const {
-    formState: { errors },
-  } = form;
   const [activeTab, setActiveTab] = useState("personal");
+  const [focusField, setFocusField] = useState<string | null>(null);
+  const formRef = React.useRef<HTMLFormElement>(null);
+
+  React.useEffect(() => {
+    if (!focusField) return;
+    const timer = window.setTimeout(() => {
+      const control = formRef.current?.elements.namedItem(focusField)
+        ?? formRef.current?.elements.namedItem(focusField.split(".").pop() ?? "");
+      if (control instanceof HTMLElement) control.focus();
+      else formRef.current?.querySelector<HTMLButtonElement>('[role="tab"][data-state="active"]')?.focus();
+      setFocusField(null);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [activeTab, focusField]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const success = await onSubmit();
-      if (success) {
+      const result = await onSubmit();
+      if (result.saved) {
         toast.success("Profile updated successfully");
       } else {
         // Find which tab has errors and switch to it
-        const errorFields = Object.keys(errors);
+        const invalidFields = errorFields(result.errors);
 
         // Map fields to tabs
         const fieldToTab: Record<string, string> = {
@@ -51,17 +80,20 @@ export function ProfileForm() {
           riskTolerance: "financial",
         };
 
-        const firstErrorField = errorFields[0];
-        const targetTab =
-          fieldToTab[firstErrorField] ||
-          (firstErrorField.startsWith("socialLinks") ? "personal" : null);
+        const firstErrorField = invalidFields[0];
+        const targetTab = firstErrorField
+          ? fieldToTab[firstErrorField]
+            || (firstErrorField.startsWith("socialLinks.") ? "personal" : null)
+            || (firstErrorField.startsWith("address.") ? "contact" : null)
+          : null;
 
         if (targetTab) {
           setActiveTab(targetTab);
+          setFocusField(firstErrorField);
         }
 
         // Generate a more helpful error message
-        const missingFieldNames = errorFields.map((field) => {
+        const missingFieldNames = invalidFields.map((field) => {
           // simple mapping to user friendly names
           const names: Record<string, string> = {
             firstName: "First Name",
@@ -79,12 +111,14 @@ export function ProfileForm() {
         });
 
         toast.error("Profile update failed", {
-          description: `Please fix errors in: ${missingFieldNames.join(", ")}`,
+          description: missingFieldNames.length
+            ? `Please fix errors in: ${missingFieldNames.join(", ")}`
+            : "Review the required fields and try again.",
         });
       }
     } catch (error) {
       toast.error("Failed to update profile", {
-        description: "An unexpected error occurred. Please try again.",
+        description: "We could not confirm whether your changes were saved. Refresh your profile before trying again.",
       });
     }
   };
@@ -97,14 +131,13 @@ export function ProfileForm() {
         "lastName",
         "birthday",
         "gender",
-        "nrc",
         "socialLinks.email",
       ]);
 
       if (!valid) {
         toast.error("Please fill in all mandatory fields before proceeding.", {
           description:
-            "First Name, Last Name, DOB, Gender, NRC, and Email are required.",
+            "First Name, Last Name, DOB, Gender, and Email are required.",
         });
         return;
       }
@@ -143,7 +176,9 @@ export function ProfileForm() {
       }
     >
       <FormProvider {...form}>
-        <form id="profile-form" onSubmit={handleSubmit} className="space-y-6">
+        <form ref={formRef} id="profile-form" onSubmit={handleSubmit} className="space-y-6">
+          {/* Locked while saving: the reply resets the form, so an edit typed in flight would be lost. */}
+          <fieldset disabled={isSubmitting} aria-busy={isSubmitting} className="m-0 min-w-0 border-0 p-0">
           <Tabs
             value={activeTab}
             onValueChange={handleTabChange}
@@ -182,6 +217,7 @@ export function ProfileForm() {
               <FinancialProfileFields form={form} />
             </TabsContent>
           </Tabs>
+          </fieldset>
         </form>
       </FormProvider>
     </SettingsCard>

@@ -1,4 +1,11 @@
 import { defineConfig, devices } from "@playwright/test";
+import { prepareTestEnvironment } from "./server/testing/test-target.mjs";
+
+const environment = prepareTestEnvironment();
+if (environment.mode !== "database" || !environment.target?.server) {
+  throw new Error("Playwright requires PFA_TEST_MODE=database and an explicit owned server origin");
+}
+const origin = environment.target.server.origin;
 
 /**
  * Playwright E2E Test Configuration
@@ -14,7 +21,8 @@ export default defineConfig({
   workers: process.env.CI ? 1 : 2,
   reporter: "html",
   use: {
-    baseURL: "http://localhost:5000",
+    baseURL: origin,
+    serviceWorkers: "block",
     trace: "on-first-retry",
     screenshot: "only-on-failure",
   },
@@ -39,7 +47,7 @@ export default defineConfig({
   ],
 
   webServer: {
-    command: "npm run dev",
+    command: "node --import tsx server/testing/browser-server.ts",
     env: {
       ...process.env,
       NODE_ENV: "test",
@@ -49,8 +57,8 @@ export default defineConfig({
       SMTP_PASS: "",
       SMTP_FROM: "",
     },
-    url: "http://localhost:5000",
-    reuseExistingServer: !process.env.CI,
+    url: `${origin}/__test/identity`,
+    reuseExistingServer: false,
     timeout: 120 * 1000,
   },
 });

@@ -1,226 +1,135 @@
-import {
-  QueryClient,
-  QueryFunction,
-  QueryCache,
-  MutationCache,
-} from "@tanstack/react-query";
+import { userErrorMessage } from "@/lib/errorCopy";
+import { QueryClient, type QueryFunction, QueryCache, MutationCache } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { getCsrfToken, clearCsrfToken } from "./csrf";
+import { assertOperationLifetime, captureOperationLifetime, StaleOperationError, type OperationLifetime } from "./operation-lifetime";
+import { requestStepUp } from "./api";
+import { protectedFetch } from "./protected-fetch";
 
-/** An Error carrying the HTTP status code that produced it. */
-export type HttpError = Error & { status?: number };
+export type HttpError = Error & { status?: number; code?: string };
 
-/**
- * Routes that are legitimately reachable while unauthenticated. Background
- * queries on these pages 401 by design (there is no session yet) - the
- * mid-session 401 handler below must not redirect from here, or a login
- * failure / a forgot-password page background query would bounce the user
- * in a loop back to /login.
- */
-const PUBLIC_PATHS = [
-  "/login",
-  "/forgot-password",
-  "/reset-password",
-  "/verify-email",
-  // Household invite page: signed-out visitors land here from the email.
-  "/invite",
-];
-
-function isPublicPath(): boolean {
-  if (typeof window === "undefined") return true;
-  const path = window.location.pathname;
-  return PUBLIC_PATHS.some(
-    (publicPath) => path === publicPath || path.startsWith(`${publicPath}/`),
-  );
+export async function throwIfResNotOk(res: Response): Promise<void> {
+  if (res.ok) return;
+  const text = (await res.text()) || res.statusText;
+  let body: { error?: string | { message?: string; code?: string }; message?: string } | undefined;
+  try { body = JSON.parse(text); } catch { /* Preserve the raw non-JSON failure. */ }
+  const detail = typeof body?.error === "object" ? body.error : undefined;
+  const error = new Error(detail?.message || (typeof body?.error === "string" ? body.error : body?.message) || `${res.status}: ${text}`) as HttpError;
+  error.status = res.status;
+  error.code = detail?.code;
+  throw error;
 }
 
-// Guards against firing more than one redirect while navigation is in
-// flight - harmless if it fires twice, but keeps things tidy.
-let sessionExpiredHandled = false;
-
-/**
- * Handle an auth 401 surfaced from ANY query or mutation, not just the
- * cached profile query (Layout.tsx already redirects on a profile-query
- * 401; this is the same recovery applied consistently everywhere else so a
- * mid-session 401 on other data/mutations doesn't fail silently and leave
- * the user staring at a broken page).
- *
- * Scoped to authenticated contexts only: on a public page (login,
- * forgot-password, reset-password, verify-email) a 401 is expected and
- * must NOT trigger a redirect, or it creates a redirect loop.
- */
-function handleAuthExpired(): void {
-  if (isPublicPath() || sessionExpiredHandled) return;
-  sessionExpiredHandled = true;
-
-  clearCsrfToken();
-  queryClient.clear();
-  window.location.assign("/login");
-}
-
-/**
- * 401 codes that mean "this action needs re-authentication", NOT "the session
- * is gone". A cancelled step-up dialog surfaces STEP_UP_REQUIRED (api.ts); the
- * session is still valid, so it must not sign the user out.
- */
-const SESSION_PRESERVING_401_CODES = ["STEP_UP_REQUIRED"];
-
-function isUnauthorizedError(error: unknown): boolean {
-  const code = (error as { code?: unknown } | null)?.code;
-  if (typeof code === "string" && SESSION_PRESERVING_401_CODES.includes(code)) {
-    return false;
-  }
-  const status = (error as HttpError | null)?.status;
-  if (status === 401) return true;
-  // Fallback for call sites that don't attach `.status` (older Error(`${res.status}: ...`) shape).
-  const message = error instanceof Error ? error.message : "";
-  return /^401\b/.test(message);
-}
-
-async function throwIfResNotOk(res: Response) {
-  if (!res.ok) {
-    const text = (await res.text()) || res.statusText;
-    const fail = (message: string): never => {
-      const error = new Error(message) as HttpError;
-      error.status = res.status;
-      throw error;
-    };
-    // Try to parse JSON error message if possible
-    try {
-      const json = JSON.parse(text);
-      if (json.error && typeof json.error === "string") {
-        fail(json.error);
-      }
-      if (json.message) {
-        fail(json.message);
-      }
-      if (json.error?.message) {
-        fail(json.error.message);
-      }
-    } catch (e) {
-      // Ignore JSON parse error, fall back to text
-    }
-    fail(`${res.status}: ${text}`);
-  }
-}
-
-const MUTATING_METHODS = ["POST", "PUT", "PATCH", "DELETE"];
-
-// The server enforces double-submit CSRF (csrf-csrf) on mutating routes, so a
-// 403 body is inspected for the CSRF error code (clone() keeps the original
-// body readable for throwIfResNotOk).
-async function readErrorCode(res: Response): Promise<string | undefined> {
-  try {
-    const body: unknown = await res.clone().json();
-    if (body && typeof body === "object" && "error" in body) {
-      const error = (body as { error?: { code?: unknown } }).error;
-      if (error && typeof error.code === "string") {
-        return error.code;
-      }
-    }
-  } catch {
-    // Non-JSON 403 body — nothing to inspect.
-  }
-  return undefined;
-}
-
-export async function apiRequest(
-  method: string,
-  url: string,
-  data?: unknown | undefined,
-): Promise<Response> {
-  const isMutating = MUTATING_METHODS.includes(method.toUpperCase());
-
-  const send = async (): Promise<Response> => {
-    const headers: Record<string, string> = data
-      ? { "Content-Type": "application/json" }
-      : {};
-    if (isMutating) {
-      headers["x-csrf-token"] = await getCsrfToken();
-    }
-    return fetch(url, {
-      method,
-      headers,
-      body: data ? JSON.stringify(data) : undefined,
-      credentials: "include",
-    });
+export async function apiRequest(method: string, url: string, data?: unknown, operation = captureOperationLifetime()): Promise<Response> {
+  const isMutating = ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase());
+  const send = async () => {
+    assertOperationLifetime(operation);
+    const headers: Record<string, string> = data ? { "Content-Type": "application/json" } : {};
+    if (isMutating) headers["x-csrf-token"] = await getCsrfToken();
+    assertOperationLifetime(operation);
+    return protectedFetch(url, { method, headers, body: data ? JSON.stringify(data) : undefined, credentials: "include" }, operation);
   };
-
   let res = await send();
-
-  // Mirror apiCall (lib/api.ts): a stale CSRF token self-heals — drop the
-  // cached token on any 403 and retry the mutation once with a freshly
-  // fetched one when the server says the token was invalid.
+  const errorBody = async (response: Response) => response.clone().json().catch(() => null);
   if (isMutating && res.status === 403) {
-    clearCsrfToken();
-    if ((await readErrorCode(res)) === "CSRF_INVALID") {
-      res = await send();
+    const body = await errorBody(res);
+    assertOperationLifetime(operation);
+    if (body?.error?.code === "CSRF_INVALID") { clearCsrfToken(); res = await send(); }
+  }
+  if (res.status === 401) {
+    const body = await errorBody(res);
+    assertOperationLifetime(operation);
+    if (body?.error?.code === "STEP_UP_REQUIRED") {
+      assertOperationLifetime(operation);
+      if (await requestStepUp(body.level ?? "SETTINGS")) { assertOperationLifetime(operation); res = await send(); }
     }
   }
-
+  assertOperationLifetime(operation);
   await throwIfResNotOk(res);
   return res;
 }
 
-type UnauthorizedBehavior = "returnNull" | "throw";
-export const getQueryFn: <T>(options: {
-  on401: UnauthorizedBehavior;
-}) => QueryFunction<T> =
-  ({ on401: unauthorizedBehavior }) =>
-  async ({ queryKey }) => {
-    const res = await fetch(queryKey.join("/") as string, {
-      credentials: "include",
-    });
-
-    if (unauthorizedBehavior === "returnNull" && res.status === 401) {
-      return null;
-    }
-
+export const getQueryFn: <T>(options: { on401: "returnNull" | "throw"; operation?: OperationLifetime | null }) => QueryFunction<T> =
+  ({ on401, operation = captureOperationLifetime() }) => async ({ queryKey, signal }) => {
+    assertOperationLifetime(operation);
+    const res = await protectedFetch(queryKey.join("/"), { credentials: "include", signal }, operation);
+    assertOperationLifetime(operation);
+    if (on401 === "returnNull" && res.status === 401) return null;
     await throwIfResNotOk(res);
-    return await res.json();
+    return res.json();
   };
 
-export const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      queryFn: getQueryFn({ on401: "throw" }),
-      refetchInterval: false,
-      refetchOnWindowFocus: false,
-      staleTime: Infinity,
-      retry: false,
+const retiredClients = new WeakSet<QueryClient>();
+type ClientMutationOptions = NonNullable<Parameters<QueryClient["defaultMutationOptions"]>[0]>;
+
+/** Bind every observer option update, including rerenders during onMutate. */
+class LifetimeQueryClient extends QueryClient {
+  private readonly boundOptions = new WeakSet<object>();
+
+  constructor(config: ConstructorParameters<typeof QueryClient>[0], private readonly operation?: OperationLifetime | null) { super(config); }
+
+  override defaultMutationOptions<T extends ClientMutationOptions>(options?: T): T {
+    const resolved = super.defaultMutationOptions(options);
+    const operation = this.operation;
+    if (!operation || this.boundOptions.has(resolved)) return resolved;
+    const original = resolved.mutationFn;
+    const active = () => operation.active && !retiredClients.has(this);
+    const bound: T = {
+      ...resolved,
+      mutationFn: original ? (variables, context) => { assertOperationLifetime(operation); return original(variables, context); } : undefined,
+      onSuccess: (...args) => active() ? resolved.onSuccess?.(...args) : undefined,
+      onError: (...args) => active() ? resolved.onError?.(...args) : undefined,
+      onSettled: (...args) => active() ? resolved.onSettled?.(...args) : undefined,
+    };
+    this.boundOptions.add(bound);
+    return bound;
+  }
+}
+
+export function retireDataClient(client: QueryClient): void {
+  retiredClients.add(client);
+  void client.cancelQueries();
+  client.clear();
+}
+
+/**
+ * NEW-28: how long fetched data counts as fresh. Each member's own writes
+ * invalidate their queries, but nothing tells this browser about another
+ * member's write, so data must go stale: a partner's shared transaction then
+ * shows on the next visit or when the window regains focus.
+ */
+export const DATA_STALE_TIME_MS = 30_000;
+
+/**
+ * A failed save with no code or status to say more, e.g. a success reply the
+ * client rejected as malformed or contradictory: the draft is kept for retry.
+ */
+export const MUTATION_FAILED_COPY = "Your change may not have been saved. Check it and try again.";
+
+export function createDataQueryClient(onBoundaryError?: (withdraw: boolean) => void, operation?: OperationLifetime | null): QueryClient {
+  const onError = (error: unknown, mutation = false) => {
+    if (retiredClients.has(client) || error instanceof StaleOperationError) return;
+    const failure = error as HttpError;
+    if (onBoundaryError && ((failure.status === 401 && !["STEP_UP_REQUIRED", "INVALID_CREDENTIALS"].includes(failure.code || "")) || ["EMAIL_VERIFICATION_REQUIRED", "MFA_ENROLMENT_REQUIRED", "HOUSEHOLD_NOT_FOUND", "SESSION_CONTEXT_CHANGED"].includes(failure.code || ""))) {
+      onBoundaryError(true);
+      return;
+    }
+    // UX-01: with no session boundary this is a public page (e.g. /invite/:code). A query's 401 there
+    // only means "signed out", which the page shows itself; a public form's failure still toasts.
+    if (!onBoundaryError && !mutation && failure.status === 401) return;
+    if (failure.status === 403) onBoundaryError?.(false);
+    toast.error(mutation ? "Action failed" : "Error loading data", { description: userErrorMessage(error, mutation ? MUTATION_FAILED_COPY : "An unknown error occurred") });
+  };
+  const client = new LifetimeQueryClient({
+    defaultOptions: {
+      queries: { queryFn: getQueryFn({ on401: "throw", operation }), refetchInterval: false, refetchOnWindowFocus: true, staleTime: DATA_STALE_TIME_MS, retry: false },
+      mutations: { retry: false },
     },
-    mutations: {
-      retry: false,
-    },
-  },
-  queryCache: new QueryCache({
-    onError: (error) => {
-      if (isUnauthorizedError(error)) {
-        handleAuthExpired();
-        return;
-      }
-      const errorMessage =
-        error instanceof Error ? error.message : "An unknown error occurred";
-      // Avoid showing toasts for 403 as it usually reflects an expected
-      // authorization boundary (private items, step-up gating, etc).
-      if (!errorMessage.includes("403")) {
-        toast.error("Error loading data", {
-          description: errorMessage,
-        });
-      }
-    },
-  }),
-  mutationCache: new MutationCache({
-    onError: (error) => {
-      if (isUnauthorizedError(error)) {
-        handleAuthExpired();
-        return;
-      }
-      const errorMessage =
-        error instanceof Error ? error.message : "An unknown error occurred";
-      toast.error("Action failed", {
-        description: errorMessage,
-      });
-    },
-  }),
-});
+    queryCache: new QueryCache({ onError: error => onError(error) }),
+    mutationCache: new MutationCache({ onError: error => onError(error, true) }),
+  }, operation);
+  return client;
+}
+
+/** Compatibility for isolated consumers. App always creates its own lifetime clients. */
+export const queryClient = createDataQueryClient();

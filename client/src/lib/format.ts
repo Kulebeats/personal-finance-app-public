@@ -28,20 +28,10 @@ export function formatCurrency(
   const absAmount = Math.abs(amount);
   const symbol = getCurrencySymbol(currency);
 
-  // Format the number based on locale
-  let formatted: string;
-  if (numberFormat === "EU") {
-    // European format: 1.000,00
-    formatted = absAmount.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ".").replace(".", ",");
-    const parts = formatted.split(",");
-    formatted = parts[0].replace(/\./g, ".") + "," + parts[1];
-  } else {
-    // US format: 1,000.00
-    formatted = absAmount.toLocaleString("en-US", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    });
-  }
+  const formatted = absAmount.toLocaleString(numberFormat === "EU" ? "de-DE" : "en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 
   // Add currency symbol
   const sign = amount < 0 ? "-" : "";

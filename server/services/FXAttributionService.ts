@@ -1,200 +1,141 @@
+import Decimal from "decimal.js";
 import { db } from "../db";
-import {
-  holdings,
-  securities,
-  fxRates,
-  taxLots,
-  type Holding,
-  type Security,
-} from "@shared/schema";
-import { eq, and, desc, inArray } from "drizzle-orm";
+import { fxRates } from "@shared/schema";
+import { eq, and, desc } from "drizzle-orm";
 import { getLatestFxRates } from "../core/calculations";
 import { CalculationError } from "../core/calculations/errors";
+import { HttpError } from "../core/errors";
+import { Money, toMoneyDto } from "../core/money";
+import type { MoneyDto } from "@shared/money";
+import type { HouseholdContext } from "../middleware/householdGuard";
+import { valueVisibleHoldings, type HoldingReadSession } from "../modules/investments/investmentHoldingRead";
 import { logger } from "../utils/logger";
 
-interface AttributionResult {
+/** Attribution is reported in ZMW: the stored acquisition base (costBasisZmw) is ZMW. */
+const BASE_CURRENCY = "ZMW";
+const CENTS = 2;
+
+export interface AttributionResult {
   holdingId: string;
   securityName: string;
   symbol: string;
   currency: string;
 
-  // Values in HOME currency (e.g. ZMW)
-  currentValue: number;
-  costBasis: number;
-  totalGain: number;
+  // Amounts are ZMW MoneyDto decimal strings, never JSON numbers (defect 10).
+  currentValue: MoneyDto;
+  costBasis: MoneyDto;
+  totalGain: MoneyDto;
 
   // Attribution
-  assetReturn: number; // Gain due to price change (in local currency, converted)
-  fxReturn: number; // Gain due to FX change
+  assetReturn: MoneyDto; // Gain due to price change, at the acquisition rate
+  fxReturn: MoneyDto; // Gain due to the rate moving since acquisition
   totalReturnPercent: number;
   assetReturnPercent: number;
   fxReturnPercent: number;
 }
 
+/**
+ * NEW-21 / INV-04: a foreign holding with a cost but no stored ZMW acquisition
+ * base cannot be attributed. Its native cost is never reported as ZMW.
+ */
+export class AttributionBasisUnavailable extends HttpError {
+  readonly statusCode = 422;
+  readonly code = "FINANCIAL_DATA_UNAVAILABLE";
+  constructor() { super("FX attribution is unavailable because a holding has no recorded ZMW cost basis."); }
+}
+
+type VisibleRow = Parameters<Parameters<typeof valueVisibleHoldings>[3]>[0][number];
+
+const cents = (value: Decimal) => value.toDecimalPlaces(CENTS, Decimal.ROUND_HALF_UP);
+/** A cent-rounded ZMW amount as its response DTO: a decimal string, never a number. */
+const zmwDto = (value: Decimal): MoneyDto => toMoneyDto(cents(value), BASE_CURRENCY);
+// decimal.js isPositive() is true for +0, so a zero (gifted) basis would divide by zero.
+const percentOf = (part: Decimal, whole: Decimal) =>
+  whole.greaterThan(0) ? cents(part.div(whole).times(100)).toNumber() : 0;
+
+function currentRate(currency: string, rates: Map<string, number>): Decimal {
+  if (currency === BASE_CURRENCY) return new Decimal(1);
+  const rate = rates.get(currency);
+  // SCP-321: a missing rate fails closed (422 via the holding read), never 1.
+  if (rate === undefined) {
+    logger.error("Missing FX rate for attribution", { fromCurrency: currency, toCurrency: BASE_CURRENCY });
+    throw new CalculationError("MISSING_FX_RATE", { from: currency, to: BASE_CURRENCY });
+  }
+  return new Decimal(rate);
+}
+
+/** The ZMW cost of the remaining position: the writers' stored base, never the native figure. */
+function baseCost(row: VisibleRow, costLocal: Money): Money {
+  if (row.security.currency === BASE_CURRENCY) return new Money(costLocal.amount, BASE_CURRENCY);
+  if (row.holding.costBasisZmw !== null) return new Money(row.holding.costBasisZmw, BASE_CURRENCY);
+  if (costLocal.isZero()) return Money.zero(BASE_CURRENCY);
+  throw new AttributionBasisUnavailable();
+}
+
+function attribute(row: VisibleRow, rates: Map<string, number>): AttributionResult {
+  const { holding, security } = row;
+  const currency = security.currency;
+  const quantity = new Decimal(holding.quantity);
+  const fx = currentRate(currency, rates);
+  const costLocal = new Money(holding.costBasis ?? "0", currency);
+  const costBase = baseCost(row, costLocal);
+  const valueLocal = new Money(security.currentPrice ?? "0", currency).multiply(quantity);
+  const exactValue = valueLocal.amount.times(fx);
+  // The acquisition rate the stored base implies; with no cost, the gain is all asset return.
+  const acquisitionFx = costLocal.isPositive() ? costBase.amount.div(costLocal.amount)
+    : holding.acquisitionFxRate !== null ? new Decimal(holding.acquisitionFxRate) : fx;
+  const exactGain = exactValue.minus(costBase.amount);
+  const exactAsset = valueLocal.subtract(costLocal).amount.times(acquisitionFx);
+  // Amounts round half-up once from exact Decimal (#302), and the FX return is
+  // the residual, so asset + FX equals the total to the cent.
+  const valueBase = cents(exactValue);
+  const totalGain = valueBase.minus(costBase.amount);
+  const assetReturn = cents(exactAsset);
+  return {
+    holdingId: holding.id,
+    securityName: security.name,
+    symbol: security.symbol,
+    currency,
+    currentValue: zmwDto(valueBase),
+    costBasis: zmwDto(costBase.amount),
+    totalGain: zmwDto(totalGain),
+    assetReturn: zmwDto(assetReturn),
+    fxReturn: zmwDto(totalGain.minus(assetReturn)),
+    // Percentages come from the exact values, not the rounded cents (#302).
+    totalReturnPercent: percentOf(exactGain, costBase.amount),
+    assetReturnPercent: percentOf(exactAsset, costBase.amount),
+    fxReturnPercent: percentOf(exactGain.minus(exactAsset), costBase.amount),
+  };
+}
+
+function attributeVisible(caller: HouseholdContext, session: HoldingReadSession,
+  filters: { holdingId?: string }): Promise<AttributionResult[]> {
+  return valueVisibleHoldings(caller, session, filters, async rows => {
+    const open = rows.filter(row => !new Decimal(row.holding.quantity).isZero());
+    const currencies = Array.from(new Set(open.map(row => row.security.currency).filter(c => c !== BASE_CURRENCY)));
+    const rates = await getLatestFxRates(currencies, BASE_CURRENCY, caller.householdId);
+    return open.map(row => attribute(row, rates));
+  });
+}
+
 export class FXAttributionService {
   /**
-   * Calculate attribution for a specific holding or all holdings
+   * FX attribution for the caller's visible holdings (Rule 11): Shared accounts
+   * and the caller's own private ones, from the same read as the holdings list,
+   * valued at the household's price.
    */
-  async calculateAttribution(
-    householdId: string,
-    baseCurrency: string = "ZMW"
-  ): Promise<AttributionResult[]> {
-    // Fetch holdings with security details
-    const userHoldings = await db.query.holdings.findMany({
-      where: eq(holdings.householdId, householdId),
-      with: {
-        security: true,
-      },
-    });
-
-    const results: AttributionResult[] = [];
-
-    const holdingIds = userHoldings.map((holding) => holding.id);
-    const lotRows = holdingIds.length
-      ? await db
-          .select()
-          .from(taxLots)
-          .where(inArray(taxLots.holdingId, holdingIds))
-      : [];
-
-    const lotsByHolding = new Map<string, typeof lotRows>();
-    for (const lot of lotRows) {
-      const list = lotsByHolding.get(lot.holdingId) || [];
-      list.push(lot);
-      lotsByHolding.set(lot.holdingId, list);
-    }
-
-    const currencies = Array.from(
-      new Set(
-        userHoldings
-          .map((holding) => holding.security?.currency || baseCurrency)
-          .filter(Boolean)
-      )
-    );
-    // Use centralized calculation engine for FX rates
-    const fxRatesMap = await getLatestFxRates(currencies, baseCurrency);
-
-    for (const holding of userHoldings) {
-      if (!holding.security) continue;
-
-      const qty = Number(holding.quantity);
-      if (qty === 0) continue;
-
-      const sec = holding.security;
-      const price = Number(sec.currentPrice || 0);
-      // SCP-321 follow-up: a missing rate FAILS CLOSED (never silently 1, which
-      // corrupts FX attribution). Self-currency stays at the legitimate 1.
-      let currentFx: number;
-      if (sec.currency === baseCurrency) {
-        currentFx = 1;
-      } else {
-        const resolved = fxRatesMap.get(sec.currency);
-        if (resolved === undefined) {
-          logger.error("Missing FX rate for attribution", {
-            householdId,
-            fromCurrency: sec.currency,
-            toCurrency: baseCurrency,
-            holdingId: holding.id,
-          });
-          throw new CalculationError(
-            "MISSING_FX_RATE",
-            { from: sec.currency, to: baseCurrency, householdId },
-            `Exchange rate unavailable for ${sec.currency} -> ${baseCurrency}`,
-          );
-        }
-        currentFx = resolved;
-      }
-
-      const lots = lotsByHolding.get(holding.id) || [];
-      const costBasisLocalFromLots = lots.reduce(
-        (sum, lot) => sum + Number(lot.costBasis),
-        0
-      );
-      const costBasisBaseFromLots = lots.reduce((sum, lot) => {
-        const base = lot.costBasisZmw
-          ? Number(lot.costBasisZmw)
-          : lot.acquisitionFxRate
-          ? Number(lot.costBasis) * Number(lot.acquisitionFxRate)
-          : 0;
-        return sum + base;
-      }, 0);
-
-      const costBasisLocal =
-        costBasisLocalFromLots > 0
-          ? costBasisLocalFromLots
-          : Number(holding.costBasis || 0);
-      const costBasisBase =
-        costBasisBaseFromLots > 0
-          ? costBasisBaseFromLots
-          : Number(holding.costBasisZmw || costBasisLocal);
-
-      // 1. Current Value
-      const currentValueLocal = qty * price;
-      const currentValueBase = currentValueLocal * currentFx;
-
-      // 2. Total Gain (Base)
-      const totalGainBase = currentValueBase - costBasisBase;
-      const totalReturnPercent =
-        costBasisBase > 0 ? (totalGainBase / costBasisBase) * 100 : 0;
-
-      // 3. Asset Return Component (Base)
-      // Gain due to price change, ignoring FX change (use Original FX)
-      // Original FX = costBasisBase / costBasisLocal (if costBasisLocal > 0)
-      const acquisitionFx =
-        costBasisLocal > 0
-          ? costBasisBase / costBasisLocal
-          : holding.acquisitionFxRate
-          ? Number(holding.acquisitionFxRate)
-          : 1;
-
-      // Asset Gain (Local)
-      const assetGainLocal = currentValueLocal - costBasisLocal;
-
-      // Asset Gain (Base) = Asset Gain (Local) * Acquisition FX
-      // This isolates the performance of the asset itself in its native currency terms, converted at the rate we bought it.
-      const assetReturnBase = assetGainLocal * acquisitionFx;
-
-      // 4. FX Return Component (residual)
-      // Total = Asset(Base) + FX(Base)
-      // So FX = Total - Asset
-      const fxReturnBase = totalGainBase - assetReturnBase;
-
-      // Percentages of the TOTAL RETURN? Or Percent of Cost Basis?
-      // Usually Percent of Cost Basis decomposed.
-      const assetReturnPercent =
-        costBasisBase > 0 ? (assetReturnBase / costBasisBase) * 100 : 0;
-      const fxReturnPercent =
-        costBasisBase > 0 ? (fxReturnBase / costBasisBase) * 100 : 0;
-
-      results.push({
-        holdingId: holding.id,
-        securityName: sec.name,
-        symbol: sec.symbol,
-        currency: sec.currency,
-        currentValue: Number(currentValueBase.toFixed(2)),
-        costBasis: Number(costBasisBase.toFixed(2)),
-        totalGain: Number(totalGainBase.toFixed(2)),
-        assetReturn: Number(assetReturnBase.toFixed(2)),
-        fxReturn: Number(fxReturnBase.toFixed(2)),
-        totalReturnPercent: Number(totalReturnPercent.toFixed(2)),
-        assetReturnPercent: Number(assetReturnPercent.toFixed(2)),
-        fxReturnPercent: Number(fxReturnPercent.toFixed(2)),
-      });
-    }
-
-    return results;
+  async calculateAttribution(caller: HouseholdContext, session: HoldingReadSession): Promise<AttributionResult[]> {
+    return attributeVisible(caller, session, {});
   }
 
   /**
-   * Calculate attribution for a single holding
+   * One visible holding's attribution; another member's private holding is not
+   * found. A-11: only the requested holding is read, priced and converted.
    */
-  async calculateAttributionForHolding(
-    householdId: string,
-    holdingId: string,
-    baseCurrency: string = "ZMW"
-  ): Promise<AttributionResult | null> {
-    const list = await this.calculateAttribution(householdId, baseCurrency);
-    return list.find((h) => h.holdingId === holdingId) || null;
+  async calculateAttributionForHolding(caller: HouseholdContext, session: HoldingReadSession,
+    holdingId: string): Promise<AttributionResult | null> {
+    const [result] = await attributeVisible(caller, session, { holdingId });
+    return result ?? null;
   }
 
   /**

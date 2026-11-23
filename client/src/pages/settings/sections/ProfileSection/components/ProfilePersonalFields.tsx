@@ -14,6 +14,7 @@ import { BirthdayPicker } from "./BirthdayPicker";
 import { OccupationSelect } from "./OccupationSelect";
 import { BioField } from "./BioField";
 import { SocialLinksFields } from "./SocialLinksFields";
+import { NrcField } from "./NrcField";
 import type { ProfileFormData } from "@/features/settings/schemas/profileSchema";
 import type { UserProfile } from "@/hooks/use-settings";
 
@@ -177,45 +178,7 @@ export function ProfilePersonalFields({
         />
       </div>
 
-      {/* NRC (National Registration Card) */}
-      <div className="pt-2">
-        <Controller
-          name="nrc"
-          control={control}
-          render={({ field }) => (
-            <FormField
-              label="National Registration Card (NRC)"
-              required
-              error={errors.nrc?.message as string}
-              htmlFor="nrc"
-              tooltip="Optional - Your NRC number."
-            >
-              <Input
-                {...field}
-                value={field.value || ""}
-                id="nrc"
-                onChange={(e) => {
-                  let value = e.target.value.replace(/[^\d]/g, ""); // Remove non-digits
-                  if (value.length > 9) value = value.slice(0, 9); // Max 9 digits
-
-                  // Format as 123456/78/9
-                  if (value.length > 6) {
-                    value = value.slice(0, 6) + "/" + value.slice(6);
-                  }
-                  if (value.length > 9) {
-                    value = value.slice(0, 9) + "/" + value.slice(9);
-                  }
-
-                  field.onChange(value);
-                }}
-                placeholder="123456/78/9"
-                maxLength={11}
-                className="input-glass transition-all focus:scale-[1.01] focus:shadow-md"
-              />
-            </FormField>
-          )}
-        />
-      </div>
+      <NrcField control={control} errors={errors} />
 
       {/* Bio Section */}
       <div className="pt-4 border-t">

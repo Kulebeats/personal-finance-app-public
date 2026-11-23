@@ -8,7 +8,6 @@ vi.mock("@/hooks/useInvestments", () => ({
   useHoldings: vi.fn(),
   usePortfolioSummary: vi.fn(),
   useInvestmentPerformance: vi.fn(),
-  useRefreshMarketData: vi.fn(),
 }));
 
 // Mock use-format
@@ -36,9 +35,6 @@ describe("useInvestmentsData", () => {
     (investmentHooks.useInvestmentPerformance as any).mockReturnValue({
       data: [],
     });
-    (investmentHooks.useRefreshMarketData as any).mockReturnValue({
-      mutate: vi.fn(),
-    });
 
     const { result } = renderHook(() => useInvestmentsData(), {
       wrapper: TestWrapper,
@@ -55,17 +51,17 @@ describe("useInvestmentsData", () => {
     const mockHoldings = [
       {
         id: "1",
-        currentValue: 1000,
+        currentValue: { amount: "1000.00", currency: "ZMW" },
         security: { type: "stock", symbol: "A" },
       },
       {
         id: "2",
-        currentValue: 500,
+        currentValue: { amount: "500.00", currency: "ZMW" },
         security: { type: "bond", symbol: "B" },
       },
       {
         id: "3",
-        currentValue: 500,
+        currentValue: { amount: "500.00", currency: "ZMW" },
         security: { type: "stock", symbol: "C" },
       },
     ];
@@ -75,7 +71,7 @@ describe("useInvestmentsData", () => {
       isLoading: false,
     });
     (investmentHooks.usePortfolioSummary as any).mockReturnValue({
-      data: { totalValue: 2000 },
+      data: { totalValue: { amount: "2000.00", currency: "ZMW" } },
       isLoading: false,
     });
     (investmentHooks.useInvestmentPerformance as any).mockReturnValue({

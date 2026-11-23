@@ -41,6 +41,7 @@ import {
   accounts,
   transactions,
   auditLogs,
+  outboxEvents,
 } from "@shared/schema";
 import {
   getTestApp,
@@ -49,6 +50,8 @@ import {
 } from "../../../__tests__/fixtures";
 import { hashPassword } from "../../../auth";
 import { transactionService } from "../service";
+import { transactionRepository } from "../../../repositories/TransactionRepository";
+import { withTransaction } from "../../../utils/withTransaction";
 
 describe("Transaction CREATE/DELETE audit lives at the service layer (P6a) — REAL DB", () => {
   let app: Express;
@@ -119,6 +122,7 @@ describe("Transaction CREATE/DELETE audit lives at the service layer (P6a) — R
 
   afterAll(async () => {
     try {
+      await db.delete(outboxEvents).where(eq(outboxEvents.householdId, householdId));
       await db.delete(auditLogs).where(eq(auditLogs.householdId, householdId));
       await db
         .delete(transactions)
@@ -169,6 +173,23 @@ describe("Transaction CREATE/DELETE audit lives at the service layer (P6a) — R
     });
   });
 
+  // FIN-05: the posting receipt is the last line. Below the service check, a
+  // posting in another currency is refused, never relabelled as the account's.
+  describe("Repository create below the service currency check", () => {
+    it("refuses a posting in a currency other than the account's: no row, no balance change", async () => {
+      const balanceOf = async () => (await db.select({ balance: accounts.balance }).from(accounts).where(eq(accounts.id, accountId)))[0].balance;
+      const before = await balanceOf();
+      const name = "FIN-05 mismatched-currency posting";
+
+      await expect(withTransaction(tx => transactionRepository.createWithinTransaction(tx, {
+        householdId, ownerUserId: userId, accountId, name, amount: "42.00", currency: "USD", type: "expense", date: "2026-03-01",
+      }, { createActor: { householdId, userId } }))).rejects.toMatchObject({ statusCode: 400, message: "Transaction currency must match the locked account currency" });
+
+      expect(await db.select().from(transactions).where(and(eq(transactions.householdId, householdId), eq(transactions.name, name)))).toEqual([]);
+      expect(await balanceOf()).toBe(before);
+    });
+  });
+
   describe("Service-layer delete (bypasses the controller)", () => {
     it("writes a DELETE auditLogs row even when called directly from the service", async () => {
       const { transaction } = await transactionService.createTransaction(
@@ -197,8 +218,14 @@ describe("Transaction CREATE/DELETE audit lives at the service layer (P6a) — R
     });
   });
 
+  const eventsFor = (id: string) => db.select({
+    eventType: outboxEvents.eventType,
+    aggregateType: outboxEvents.aggregateType,
+    payload: outboxEvents.payload,
+  }).from(outboxEvents).where(and(eq(outboxEvents.householdId, householdId), eq(outboxEvents.aggregateId, id)));
+
   describe("HTTP controller path writes exactly ONE row (no double-audit)", () => {
-    it("POST /api/transactions writes exactly one CREATE row", async () => {
+    it("POST /api/transactions writes one CREATE audit row and one created event", async () => {
       const res = await request(app)
         .post("/api/transactions")
         .set("Cookie", authCookie)
@@ -214,9 +241,13 @@ describe("Transaction CREATE/DELETE audit lives at the service layer (P6a) — R
       const txnId: string = res.body.data.id;
       const rows = await auditRowsFor(txnId, "CREATE");
       expect(rows).toHaveLength(1);
+      expect(await eventsFor(txnId)).toEqual([{
+        eventType: "transaction.created", aggregateType: "transaction",
+        payload: expect.objectContaining({ id: txnId, accountId, type: "expense" }),
+      }]);
     });
 
-    it("DELETE /api/transactions/:id writes exactly one DELETE row", async () => {
+    it("DELETE /api/transactions/:id writes one DELETE audit row and one deleted event", async () => {
       const createRes = await request(app)
         .post("/api/transactions")
         .set("Cookie", authCookie)
@@ -238,6 +269,12 @@ describe("Transaction CREATE/DELETE audit lives at the service layer (P6a) — R
 
       const rows = await auditRowsFor(txnId, "DELETE");
       expect(rows).toHaveLength(1);
+      const events = await eventsFor(txnId);
+      expect(events).toHaveLength(2);
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ eventType: "transaction.created" }),
+        { eventType: "transaction.deleted", aggregateType: "transaction", payload: { id: txnId } },
+      ]));
     });
   });
 });

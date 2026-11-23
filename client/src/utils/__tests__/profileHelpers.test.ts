@@ -3,8 +3,6 @@ import {
   calculateAge,
   formatPhonePreview,
   isValidZambianNumber,
-  calculateProfileCompleteness,
-  getProgressColor,
 } from "../profileHelpers";
 
 describe("profileHelpers", () => {
@@ -55,7 +53,19 @@ describe("profileHelpers", () => {
     it("should validate Zambian mobile numbers", () => {
       expect(isValidZambianNumber("+260971234567")).toBe(true);
       expect(isValidZambianNumber("+260961234567")).toBe(true);
-      expect(isValidZambianNumber("+260771234567")).toBe(false); // This should be false based on implementation
+    });
+
+    it("accepts the 07x mobile prefixes the provider badge recognises", () => {
+      expect(isValidZambianNumber("+260770000001")).toBe(true); // Airtel 077
+      expect(isValidZambianNumber("+260761234567")).toBe(true); // MTN 076
+      expect(isValidZambianNumber("+260751234567")).toBe(true); // Zamtel 075
+      expect(isValidZambianNumber("+260981234567")).toBe(true); // Zed Mobile 098
+      expect(isValidZambianNumber("+260211234567")).toBe(true); // Lusaka landline
+    });
+
+    it("rejects 260 numbers with an unknown prefix", () => {
+      expect(isValidZambianNumber("+260711234567")).toBe(false);
+      expect(isValidZambianNumber("+260911234567")).toBe(false);
     });
 
     it("should reject invalid Zambian numbers", () => {
@@ -67,152 +77,6 @@ describe("profileHelpers", () => {
     it("should handle non-Zambian numbers", () => {
       expect(isValidZambianNumber("+1234567890")).toBe(false);
       expect(isValidZambianNumber("+44123456789")).toBe(false);
-    });
-  });
-
-  describe("calculateProfileCompleteness", () => {
-    it("should calculate 0% for empty profile", () => {
-      const emptyProfile = {
-        id: "1",
-        username: "test",
-        email: "test@example.com",
-        fullName: null,
-        firstName: null,
-        lastName: null,
-        displayName: null,
-        birthday: null,
-        birthdayHideYear: false,
-        gender: null,
-        phoneNumber: null,
-        phoneNumberMobile: null,
-        phoneNumberWork: null,
-        phoneNumberHome: null,
-        address: null,
-        occupation: null,
-        occupationCustom: false,
-        company: null,
-        timezone: null,
-        profilePictureUrl: null,
-        bannerUrl: null,
-        bio: null,
-        socialLinks: null,
-        nrc: null,
-        annualIncome: null,
-        incomeFrequency: null,
-        employmentStatus: null,
-        investmentGoal: null,
-        riskTolerance: null,
-        salaryRangeEncrypted: null,
-        profileCompleteness: 0,
-        createdAt: "2023-01-01",
-        updatedAt: "2023-01-01",
-        lastLoginAt: null,
-      };
-
-      const result = calculateProfileCompleteness(emptyProfile);
-      expect(result.percentage).toBe(0);
-      expect(result.suggestions.length).toBeGreaterThan(0);
-    });
-
-    it("should calculate higher percentage for filled profile", () => {
-      const filledProfile = {
-        id: "1",
-        username: "test",
-        email: "test@example.com",
-        fullName: "John Doe",
-        firstName: "John",
-        lastName: "Doe",
-        displayName: "Johnny",
-        birthday: "1990-01-01",
-        birthdayHideYear: false,
-        gender: "male",
-        phoneNumber: "+260971234567",
-        phoneNumberMobile: "+260971234567",
-        phoneNumberWork: null,
-        phoneNumberHome: null,
-        address: { city: "Lusaka", country: "Zambia" },
-        occupation: "Software Engineer",
-        occupationCustom: false,
-        company: "Tech Corp",
-        timezone: "Africa/Lusaka",
-        profilePictureUrl: "https://example.com/pic.jpg",
-        bannerUrl: null,
-        bio: null,
-        socialLinks: null,
-        nrc: null,
-        annualIncome: "50000",
-        incomeFrequency: "monthly",
-        employmentStatus: "employed",
-        investmentGoal: "moderate",
-        riskTolerance: "medium",
-        salaryRangeEncrypted: "encrypted_range",
-        profileCompleteness: 0,
-        createdAt: "2023-01-01",
-        updatedAt: "2023-01-01",
-        lastLoginAt: null,
-      };
-
-      const result = calculateProfileCompleteness(filledProfile);
-      expect(result.percentage).toBeGreaterThan(70);
-      expect(result.suggestions.length).toBeLessThan(3);
-    });
-
-    it("should provide relevant suggestions for missing fields", () => {
-      const partialProfile = {
-        id: "1",
-        username: "test",
-        email: "test@example.com",
-        fullName: "John Doe",
-        firstName: null,
-        lastName: null,
-        displayName: null,
-        birthday: null,
-        birthdayHideYear: false,
-        gender: null,
-        phoneNumber: null,
-        phoneNumberMobile: null,
-        phoneNumberWork: null,
-        phoneNumberHome: null,
-        address: null,
-        occupation: null,
-        occupationCustom: false,
-        company: null,
-        timezone: null,
-        profilePictureUrl: null,
-        bannerUrl: null,
-        bio: null,
-        socialLinks: null,
-        nrc: null,
-        annualIncome: null,
-        incomeFrequency: null,
-        employmentStatus: null,
-        investmentGoal: null,
-        riskTolerance: null,
-        salaryRangeEncrypted: null,
-        profileCompleteness: 0,
-        createdAt: "2023-01-01",
-        updatedAt: "2023-01-01",
-        lastLoginAt: null,
-      };
-
-      const result = calculateProfileCompleteness(partialProfile);
-      expect(result.suggestions).toContain("Add your phone number to enable notifications");
-      expect(result.suggestions.length).toBeLessThanOrEqual(2);
-    });
-  });
-
-  describe("getProgressColor", () => {
-    it("should return correct colors for different percentages", () => {
-      expect(getProgressColor(0)).toBe("bg-red-500");
-      expect(getProgressColor(25)).toBe("bg-red-500");
-      expect(getProgressColor(50)).toBe("bg-yellow-500");
-      expect(getProgressColor(75)).toBe("bg-yellow-500");
-      expect(getProgressColor(100)).toBe("bg-green-500");
-    });
-
-    it("should handle edge cases", () => {
-      expect(getProgressColor(-1)).toBe("bg-red-500");
-      expect(getProgressColor(101)).toBe("bg-green-500");
     });
   });
 });

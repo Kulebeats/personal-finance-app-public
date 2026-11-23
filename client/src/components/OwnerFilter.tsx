@@ -6,7 +6,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useHouseholdMembers, useProfile } from "@/hooks/use-settings";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
 import { Users } from "lucide-react";
 
@@ -14,18 +14,21 @@ interface OwnerFilterProps {
   value: string | null | "all"; // null = Shared, "all" = All, string = userId
   onChange: (value: string | null | "all") => void;
   className?: string;
+  currentUserId?: string;
+  allLabel?: string;
+  mineLabel?: string;
+  ariaLabel?: string;
 }
 
-export function OwnerFilter({ value, onChange, className }: OwnerFilterProps) {
+export function OwnerFilter({ value, onChange, className, currentUserId, allLabel = "All Transactions", mineLabel = "My Transactions", ariaLabel = "Filter by owner" }: OwnerFilterProps) {
   const { data: members = [] } = useHouseholdMembers();
   const { data: profile } = useProfile();
+  const ownId = currentUserId ?? profile?.id;
 
   const sortedMembers = [...members].sort((a, b) => {
-    if (a.userId === profile?.id) return -1;
-    if (b.userId === profile?.id) return 1;
-    return (a.user?.fullName || a.user?.username || "").localeCompare(
-      b.user?.fullName || b.user?.username || ""
-    );
+    if (a.userId === ownId) return -1;
+    if (b.userId === ownId) return 1;
+    return a.name.localeCompare(b.name);
   });
 
   return (
@@ -35,13 +38,14 @@ export function OwnerFilter({ value, onChange, className }: OwnerFilterProps) {
         onChange(val === "shared" ? null : (val as "all" | string))
       }
     >
-      <SelectTrigger className={cn("w-[200px]", className)}>
+      <SelectTrigger className={cn("w-[200px]", className)} aria-label={ariaLabel}>
         <SelectValue placeholder="Filter by owner" />
       </SelectTrigger>
       <SelectContent>
         {/* 1. Mine */}
+        {ownId && !sortedMembers.some(member => member.userId === ownId) && <SelectItem value={ownId}>{mineLabel}</SelectItem>}
         {sortedMembers
-          .filter((m) => m.userId === profile?.id)
+          .filter((m) => m.userId === ownId)
           .map((member) => (
             <SelectItem
               key={member.userId}
@@ -50,15 +54,11 @@ export function OwnerFilter({ value, onChange, className }: OwnerFilterProps) {
             >
               <div className="flex items-center gap-2">
                 <Avatar className="h-5 w-5">
-                  <AvatarImage
-                    src={member.user?.profilePictureUrl || undefined}
-                  />
                   <AvatarFallback className="text-[9px]">
-                    {member.user?.username?.substring(0, 2).toUpperCase() ||
-                      "U"}
+                    {member.name.substring(0, 2).toUpperCase() || "U"}
                   </AvatarFallback>
                 </Avatar>
-                <span>My Transactions</span>
+                <span>{mineLabel}</span>
               </div>
             </SelectItem>
           ))}
@@ -74,9 +74,9 @@ export function OwnerFilter({ value, onChange, className }: OwnerFilterProps) {
         </SelectItem>
 
         {/* 3. Partner / Others - only show if there are linked accounts */}
-        {sortedMembers.filter((m) => m.userId !== profile?.id).length > 0 &&
+        {sortedMembers.filter((m) => m.userId !== ownId).length > 0 &&
           sortedMembers
-            .filter((m) => m.userId !== profile?.id)
+            .filter((m) => m.userId !== ownId)
             .map((member) => (
               <SelectItem
                 key={member.userId}
@@ -85,21 +85,17 @@ export function OwnerFilter({ value, onChange, className }: OwnerFilterProps) {
               >
                 <div className="flex items-center gap-2">
                   <Avatar className="h-5 w-5">
-                    <AvatarImage
-                      src={member.user?.profilePictureUrl || undefined}
-                    />
                     <AvatarFallback className="text-[9px]">
-                      {member.user?.username?.substring(0, 2).toUpperCase() ||
-                        "U"}
+                      {member.name.substring(0, 2).toUpperCase() || "U"}
                     </AvatarFallback>
                   </Avatar>
-                  <span>{member.user?.fullName || member.user?.username}</span>
+                  <span>{member.name}</span>
                 </div>
               </SelectItem>
             ))}
 
         {/* 4. All */}
-        <SelectItem value="all">All Transactions</SelectItem>
+        <SelectItem value="all">{allLabel}</SelectItem>
       </SelectContent>
     </Select>
   );

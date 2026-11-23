@@ -1,3 +1,4 @@
+import { ProtectedImage } from "@/components/session/ProtectedImage";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -114,7 +115,7 @@ export function StepTargets({
               >
                 <div className="w-10 h-10 rounded-lg bg-muted overflow-hidden shrink-0 relative">
                   {goal.imageUrl ? (
-                    <img
+                    <ProtectedImage
                       src={goal.imageUrl}
                       alt=""
                       className="w-full h-full object-cover"
@@ -158,7 +159,7 @@ export function StepTargets({
           {/* Large image preview with customize button */}
           <div className="relative rounded-xl overflow-hidden bg-muted aspect-video max-h-[200px]">
             {data.imageUrl ? (
-              <img
+              <ProtectedImage
                 src={data.imageUrl}
                 alt="Goal cover"
                 className="w-full h-full object-cover"

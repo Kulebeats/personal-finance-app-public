@@ -130,6 +130,19 @@ export const moneyValueToDecimal = (
 };
 
 /**
+ * A money value averaged over `periods`, in decimal, rounded half up to the cent.
+ * Returns a number for display only; `periods` below 1 counts as 1.
+ */
+export const averageMoneyValue = (
+  value: MoneyValue | number | null | undefined,
+  periods: number,
+): number =>
+  moneyValueToDecimal(value)
+    .dividedBy(Math.max(periods, 1))
+    .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
+    .toNumber();
+
+/**
  * Subtract one money value from another with Decimal precision.
  * Intended for derived figures (remaining, net) that must keep decimal accuracy.
  */
@@ -201,7 +214,9 @@ export const isZero = (value: MoneyValue | number): boolean => {
 };
 
 /**
- * Format currency for display
+ * Format currency for display, to that currency's own minor units: Intl
+ * resolves them per currency (K 42.50, JP¥4,250, KWD 12.500), never rounding
+ * to whole units and never forcing two decimals on every currency.
  */
 export const formatCurrency = (
   amount: MoneyValue | number,
@@ -214,12 +229,15 @@ export const formatCurrency = (
   if (isNaN(numericAmount)) {
     return "-";
   }
+  // FIN-05: a server amount whose unit is unknown carries `currency: null`.
+  // Show the number without inventing a currency symbol.
+  if (!resolvedCurrency) {
+    return formatAmount(numericAmount);
+  }
 
   return new Intl.NumberFormat(locale, {
     style: "currency",
     currency: resolvedCurrency,
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
   }).format(numericAmount);
 };
 

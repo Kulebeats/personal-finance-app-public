@@ -4,7 +4,10 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useQueryClient } from "@tanstack/react-query";
-import { executeImport } from "../importApi";
+import { assertOperationLifetime, captureOperationLifetime } from "@/lib/operation-lifetime";
+import { invalidateImportQueries } from "@/lib/invalidate-import-queries";
+import { executeImport, referenceDisplaysFor, type ImportExecutionResult } from "../importApi";
+import { previewImportDates } from "../datePreview";
 
 type ProgressStage =
   | "uploading"
@@ -17,25 +20,50 @@ export function ProgressModal() {
   const {
     parsedData,
     mapping,
+    dateFormat,
     categoryMapping,
     importStrategy,
     targetAccountId,
+    batchId,
+    skipRowOrdinals,
+    reviewedRemovals,
+    previewCandidates,
+    previewCurrency,
+    file,
     closeWizard,
     setStep,
   } = useImportWizard();
 
   const [stage, setStage] = useState<ProgressStage>("uploading");
-  const [result, setResult] = useState<{
-    imported: number;
-    skipped: number;
-    deleted: number;
-  } | null>(null);
+  const [result, setResult] = useState<ImportExecutionResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
   useEffect(() => {
+    const operation = captureOperationLifetime();
     const execute = async () => {
       try {
+        const preview = previewImportDates(parsedData?.rows ?? [], mapping.date, dateFormat);
+        if (preview.hasErrors || !preview.rows.length) throw new Error("Resolve date errors before importing");
+        const payload = {
+          targetAccountId,
+          strategy: importStrategy,
+          mapping: { ...mapping },
+          dateFormat,
+          categoryMapping: { ...categoryMapping },
+          rows: preview.rows,
+          cellIssues: parsedData?.cellIssues ?? [],
+          referenceDisplays: referenceDisplaysFor(parsedData, mapping),
+          // NEW-17: retries of this wizard run replay the recorded batch instead of importing twice.
+          batchId,
+          skipRowOrdinals: [...skipRowOrdinals],
+          reviewedRemovals: [...reviewedRemovals],
+          postRows: previewCandidates.filter(candidate => !skipRowOrdinals.includes(candidate.ordinal)),
+          // R2-01: a skip names the candidate it was reviewed against, like a post.
+          skipRows: previewCandidates.filter(candidate => skipRowOrdinals.includes(candidate.ordinal)),
+          previewCurrency,
+          fileName: file?.name,
+        };
         // Fake stages for visual feedback
         setStage("uploading");
         await new Promise((r) => setTimeout(r, 600));
@@ -46,19 +74,14 @@ export function ProgressModal() {
         setStage("importing");
 
         // Real API call — through apiCall so it carries x-csrf-token.
-        const data = await executeImport({
-          targetAccountId,
-          strategy: importStrategy,
-          mapping,
-          categoryMapping,
-          rows: parsedData?.rows,
+        assertOperationLifetime(operation);
+        const data = await executeImport(payload).finally(async () => {
+          // A lost response or post-commit failure can leave durable rows.
+          await invalidateImportQueries(queryClient, operation);
+          assertOperationLifetime(operation);
         });
         setResult(data);
         setStage("complete");
-
-        // Invalidate queries to refresh UI
-        queryClient.invalidateQueries({ queryKey: ["/api/transactions"] });
-        queryClient.invalidateQueries({ queryKey: ["/api/accounts"] });
       } catch (err) {
         console.error(err);
         setError((err as Error).message);
@@ -114,9 +137,19 @@ export function ProgressModal() {
               <span className="font-bold">{result?.imported}</span>
             </div>
             <div className="flex justify-between text-muted-foreground">
-              <span>Skipped (Duplicates):</span>
+              <span>Already imported:</span>
+              <span>{result?.duplicate}</span>
+            </div>
+            <div className="flex justify-between text-muted-foreground">
+              <span>Skipped (you marked as duplicates):</span>
               <span>{result?.skipped}</span>
             </div>
+            {result?.failed ? (
+              <div className="flex justify-between text-destructive">
+                <span>Rows with errors:</span>
+                <span>{result.failed}</span>
+              </div>
+            ) : null}
             {result?.deleted ? (
               <div className="flex justify-between text-destructive">
                 <span>Deleted (Overwritten):</span>

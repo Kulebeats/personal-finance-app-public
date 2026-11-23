@@ -6,15 +6,16 @@
  * @module modules/accounts/accounts.routes
  */
 
+import { requireCapability } from "../../core/authz/requireCapability";
 import { Router } from "express";
 import { householdGuard } from "../../middleware/householdGuard";
 import { requireRole } from "../../middleware/validateEntity";
 import { asyncHandler } from "../../utils/errorHandler";
 import {
-  generalLimiter,
   analyticsLimiter,
   uploadLimiter,
 } from "../../middleware/rateLimit";
+import { reconcile } from "./accounts.reconciliation.controller";
 import { accountsController } from "./accounts.controller";
 import { requireStepUp } from "../../middleware/requireStepUp";
 
@@ -27,7 +28,7 @@ router.use(householdGuard);
 // LIST & SUMMARY - TODO-041: Rate limited
 // ============================================================================
 
-router.get("/", generalLimiter, asyncHandler(accountsController.list));
+router.get("/", asyncHandler(accountsController.list));
 router.get(
   "/summary",
   analyticsLimiter,
@@ -35,6 +36,7 @@ router.get(
 );
 router.get(
   "/summary/export",
+  requireCapability("financial.export"),
   analyticsLimiter,
   asyncHandler(accountsController.exportSummary),
 );
@@ -54,22 +56,19 @@ router.get(
 // CRUD - TODO-041: Rate limited
 // ============================================================================
 
-router.get("/:id", generalLimiter, asyncHandler(accountsController.getById));
+router.get("/:id", asyncHandler(accountsController.getById));
 router.post(
   "/",
-  generalLimiter,
   requireRole("member"),
   asyncHandler(accountsController.create),
 );
 router.put(
   "/:id",
-  generalLimiter,
   requireRole("member"),
   asyncHandler(accountsController.update),
 );
 router.delete(
   "/:id",
-  generalLimiter,
   requireRole("member"),
   requireStepUp("DESTRUCTIVE"),
   asyncHandler(accountsController.remove),
@@ -79,21 +78,19 @@ router.delete(
 // BALANCE OPERATIONS - HIGH-006: Added rate limiting
 // ============================================================================
 
+router.post("/:id/reconcile", requireCapability("financial.write"), requireStepUp("FINANCIAL"), asyncHandler(reconcile));
 router.post(
   "/:id/adjust-balance",
-  generalLimiter,
   requireRole("member"),
   asyncHandler(accountsController.adjustBalance),
 );
 router.post(
   "/:id/archive",
-  generalLimiter,
   requireRole("member"),
   asyncHandler(accountsController.archive),
 );
 router.post(
   "/:id/unarchive",
-  generalLimiter,
   requireRole("member"),
   asyncHandler(accountsController.unarchive),
 );
@@ -109,6 +106,7 @@ router.get(
 );
 router.get(
   "/:id/balance-history/export",
+  requireCapability("financial.export"),
   analyticsLimiter,
   asyncHandler(accountsController.exportBalanceHistory),
 );
@@ -125,6 +123,7 @@ router.post(
 
 router.get(
   "/:id/transactions/export",
+  requireCapability("financial.export"),
   analyticsLimiter,
   asyncHandler(accountsController.exportTransactions),
 );
@@ -141,7 +140,6 @@ router.post(
 
 router.patch(
   "/:id/settings",
-  generalLimiter,
   requireRole("member"),
   asyncHandler(accountsController.updateSettings),
 );

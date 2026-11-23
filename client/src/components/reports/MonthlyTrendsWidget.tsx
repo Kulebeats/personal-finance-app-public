@@ -7,11 +7,7 @@ import { useFormatters } from "@/contexts/SettingsContext";
 import { AggregationLevel } from "./AggregationFilter";
 import { toMoneyNumber } from "@/lib/money";
 import { MonthlyTrendsChart } from "./MonthlyTrendsChart";
-
-function parseLocalDate(isoDate: string): Date {
-  const [year, month, day] = isoDate.split("-").map(Number);
-  return new Date(year, month - 1, day);
-}
+import { groupByPeriod, sumField } from "./annualPeriods";
 
 interface MonthlyTrendsWidgetProps {
   aggregation?: AggregationLevel;
@@ -27,78 +23,16 @@ export default function MonthlyTrendsWidget({
   const [chartType, setChartType] = useState<ChartType>("bar");
   const { formatCurrency } = useFormatters();
 
-  const rawData = useMemo(
-    () =>
-      data?.monthly.map((month) => {
-        const date = parseLocalDate(month.periodStart);
-        return {
-          date,
-          monthIdx: date.getMonth(), // 0-11
-          monthLabel: date.toLocaleDateString("en-US", { month: "short" }),
-          income: toMoneyNumber(month.income),
-          expenses: toMoneyNumber(month.expenses),
-          savings: toMoneyNumber(month.savingsContributions),
-        };
-      }) ?? [],
-    [data]
-  );
-
-  // Client-side aggregation
+  // R12.3: buckets come from each month's periodStart; sums are Decimal-exact.
   const chartData = useMemo(() => {
-    if (rawData.length === 0) return [];
-
-    if (aggregation === "monthly") {
-      return rawData.map((d) => ({
-        label: d.monthLabel,
-        income: d.income,
-        expenses: d.expenses,
-        savings: d.savings,
-      }));
-    }
-
-    if (aggregation === "quarterly") {
-      const quarters = ["Q1", "Q2", "Q3", "Q4"];
-      return quarters.map((q, i) => {
-        const monthsInQuarter = rawData.filter(
-          (d) => Math.floor(d.monthIdx / 3) === i
-        );
-        return {
-          label: q,
-          income: monthsInQuarter.reduce((sum, d) => sum + d.income, 0),
-          expenses: monthsInQuarter.reduce((sum, d) => sum + d.expenses, 0),
-          savings: monthsInQuarter.reduce((sum, d) => sum + d.savings, 0),
-        };
-      });
-    }
-
-    if (aggregation === "biannual") {
-      const halves = ["H1", "H2"];
-      return halves.map((h, i) => {
-        const monthsInHalf = rawData.filter(
-          (d) => Math.floor(d.monthIdx / 6) === i
-        );
-        return {
-          label: h,
-          income: monthsInHalf.reduce((sum, d) => sum + d.income, 0),
-          expenses: monthsInHalf.reduce((sum, d) => sum + d.expenses, 0),
-          savings: monthsInHalf.reduce((sum, d) => sum + d.savings, 0),
-        };
-      });
-    }
-
-    if (aggregation === "annual") {
-      return [
-        {
-          label: `${year}`,
-          income: rawData.reduce((sum, d) => sum + d.income, 0),
-          expenses: rawData.reduce((sum, d) => sum + d.expenses, 0),
-          savings: rawData.reduce((sum, d) => sum + d.savings, 0),
-        },
-      ];
-    }
-
-    return [];
-  }, [rawData, aggregation, year]);
+    if (aggregation !== "monthly" && aggregation !== "quarterly" && aggregation !== "biannual" && aggregation !== "annual") return [];
+    return groupByPeriod(data?.monthly ?? [], aggregation).map((bucket) => ({
+      label: bucket.label,
+      income: toMoneyNumber(sumField(bucket, (m) => m.income)),
+      expenses: toMoneyNumber(sumField(bucket, (m) => m.expenses)),
+      savings: toMoneyNumber(sumField(bucket, (m) => m.savingsContributions)),
+    }));
+  }, [data, aggregation]);
 
   const lineData = useMemo(() => {
     if (!chartData.length) return [];

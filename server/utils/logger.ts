@@ -1,9 +1,10 @@
 import { Request, Response, NextFunction } from "express";
 import { randomUUID } from "crypto";
+import { redactSensitive, hashId } from "./log-redaction";
 
 /**
- * Structured Logger - Production-ready logging with PII redaction
- * Phase 0A.4 - Observability foundation
+ * Structured operational logging with bounded context redaction.
+ * Messages should be static event labels; diagnostic values belong in context.
  */
 
 // Extend Express Request to include requestId
@@ -16,6 +17,21 @@ declare global {
 }
 
 type LogLevel = "info" | "warn" | "error" | "debug";
+
+// Only exact source-declared static mount names may prefix a route template.
+// Dynamic baseUrl/originalUrl/path values never become operational labels.
+const staticMounts = new Set(["/api/auth", "/api/settings/security", "/api/settings", "/api/household", "/api/accounts",
+  "/api/import", "/api/categories", "/api/merchants", "/api/tags", "/api/rules", "/api/reports", "/api/transactions",
+  "/api/budgets", "/api/goals", "/api/recurring", "/api/receipts", "/api/notifications", "/api/investments/notifications",
+  "/api/investments/tax", "/api/investments/pension", "/api/investments/recurring", "/api/investments/market",
+  "/api/investments/grz/calculate", "/api/investments/grz", "/api/investments", "/api/grz", "/api/investments/analytics",
+  "/api/weekly-recap", "/api/ai", "/api/filter-presets", "/api/cron", "/api/admin"]);
+export function safeRouteTemplate(req: Pick<Request, "route" | "baseUrl">): string {
+  const template: unknown = req.route?.path;
+  if (typeof template !== "string") return "unmatched";
+  const mount = staticMounts.has(req.baseUrl) ? req.baseUrl : req.baseUrl ? "mounted" : "";
+  return `${mount}${template.replace(/\*/g, ":wildcard")}`;
+}
 
 interface LogContext {
   requestId?: string;
@@ -33,44 +49,6 @@ interface LogContext {
 }
 
 /**
- * Hash sensitive IDs for logging (prevents PII exposure)
- */
-function hashId(id: string | undefined): string | undefined {
-  if (!id) return undefined;
-  // Simple hash for logging - just show first 8 chars
-  return id.substring(0, 8) + "...";
-}
-
-/**
- * Redact sensitive fields from objects
- */
-function redactSensitive(
-  obj: Record<string, unknown>
-): Record<string, unknown> {
-  const sensitiveFields = [
-    "password",
-    "passwordHash",
-    "secret",
-    "token",
-    "sessionToken",
-    "nrc",
-    "salaryRange",
-    "annualIncome",
-    "phoneNumber",
-    "phoneNumberMobile",
-    "email",
-  ];
-
-  const redacted = { ...obj };
-  for (const field of sensitiveFields) {
-    if (field in redacted) {
-      redacted[field] = "[REDACTED]";
-    }
-  }
-  return redacted;
-}
-
-/**
  * Create structured log entry
  */
 function createLogEntry(
@@ -80,25 +58,12 @@ function createLogEntry(
   error?: Error
 ): string {
   const entry = {
+    ...redactSensitive(context ?? {}),
     timestamp: new Date().toISOString(),
     level,
     message,
-    requestId: context?.requestId,
-    householdId: hashId(context?.householdId),
-    userId: hashId(context?.userId),
-    route: context?.route,
-    method: context?.method,
-    duration: context?.duration,
-    statusCode: context?.statusCode,
-    ...(error && {
-      error: {
-        name: error.name,
-        message: error.message,
-        stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
-      },
-    }),
+    ...(error && { error: redactSensitive({ error }).error }),
   };
-
   // Remove undefined values
   const cleaned = Object.fromEntries(
     Object.entries(entry).filter(([, v]) => v !== undefined)
@@ -134,12 +99,12 @@ export const logger = {
    */
   request(req: Request, message: string, extra?: Record<string, unknown>) {
     this.info(message, {
+      ...extra,
       requestId: req.requestId,
       householdId: req.householdContext?.householdId,
       userId: req.householdContext?.userId,
-      route: req.path,
+      route: safeRouteTemplate(req),
       method: req.method,
-      ...extra,
     });
   },
 
@@ -153,7 +118,7 @@ export const logger = {
         requestId: req.requestId,
         householdId: req.householdContext?.householdId,
         userId: req.householdContext?.userId,
-        route: req.path,
+        route: safeRouteTemplate(req),
         method: req.method,
       },
       error
@@ -184,7 +149,7 @@ export function requestIdMiddleware(
 
     logger[level]("Request completed", {
       requestId: req.requestId,
-      route: req.path,
+      route: safeRouteTemplate(req),
       method: req.method,
       statusCode: res.statusCode,
       duration,

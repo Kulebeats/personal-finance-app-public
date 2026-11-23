@@ -145,7 +145,7 @@ describe("AI Consent REAL-DB HTTP Integration (packet R4)", () => {
       const res = await request(app)
         .post("/api/ai/consent")
         .set("Cookie", authCookie)
-        .send({ consentGiven: true })
+        .send({ consentGiven: true, consentVersion: "v2.0" })
         .expect(200);
 
       expect(res.body.consentGiven).toBe(true);

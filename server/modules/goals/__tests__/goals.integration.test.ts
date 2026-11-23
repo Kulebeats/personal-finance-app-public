@@ -28,8 +28,11 @@ const {
 } = vi.hoisted(() => ({
   mockGoalService: {
     getGoals: vi.fn(),
+    getGoalsForViewer: vi.fn(),
     getGoalById: vi.fn(),
     getGoalWithProgress: vi.fn(),
+    // #235 M1: write responses re-read the redacted goal.
+    getViewerGoal: vi.fn(async (id: string): Promise<Record<string, unknown>> => ({ id, currency: "ZMW", targetAmount: "1000.00", currentAmount: null, progressAvailability: "unavailable" })),
     createGoal: vi.fn(),
     updateGoal: vi.fn(),
     deleteGoal: vi.fn(),
@@ -62,7 +65,8 @@ const {
     updateAssignment: vi.fn(),
     removeAssignment: vi.fn(),
     getAssignments: vi.fn(),
-    getAllAssignments: vi.fn(),
+    getVisibleAssignments: vi.fn(),
+    getAssignmentsForHousehold: vi.fn(),
     getAvailableFunds: vi.fn(),
   },
   mockGoalDebtService: {
@@ -129,6 +133,16 @@ vi.mock("../../../services/BusinessAuditService", () => ({
 // It is NOT a service mock, so it must be intercepted here, otherwise the
 // controller issues a real db.select against households with the non-UUID
 // householdId from the mocked middleware ("house-123") and throws a uuid error.
+// The controllers show each goal as the member may see it; these goals are
+// all visible, so the viewer mapping passes them through.
+vi.mock("../../../services/goal/GoalViewerProgress", () => ({
+  toViewerGoals: vi.fn(async (_actor: unknown, goalList: unknown[]) => goalList),
+  toViewerGoal: vi.fn((goal: unknown) => goal),
+  readGoalSourceVisibility: vi.fn(async (_actor: unknown, ids: string[]) => new Map(ids.map((id) => [
+    id, { progressVisible: true, linkedAccountVisible: true, debtAccountVisible: true },
+  ]))),
+}));
+
 vi.mock("../../../repositories/HouseholdRepository", () => ({
   householdRepository: {
     findById: vi
@@ -217,7 +231,11 @@ describe("Goals Integration Tests", () => {
         expect(res.body.success).toBe(true);
         expect(res.body.data.name).toBe("Emergency Fund");
         expect(res.body.data.type).toBe("save_up");
-        expect(mockBusinessAuditService.logCreate).toHaveBeenCalled();
+        // FIN-13: the service writes the CREATE row inside the goal's transaction.
+        expect(mockGoalService.createGoal).toHaveBeenCalledWith(
+          expect.any(Object), "house-123", "user-123", expect.objectContaining({ userId: "user-123" }), { ipAddress: "127.0.0.1" },
+        );
+        expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
       });
 
       it("should create a pay-down goal successfully", async () => {
@@ -331,7 +349,7 @@ describe("Goals Integration Tests", () => {
           },
         ];
 
-        mockGoalService.getGoals.mockResolvedValue(mockGoals);
+        mockGoalService.getGoalsForViewer.mockResolvedValue(mockGoals);
 
         const res = await request(app).get("/api/goals").expect(200);
 
@@ -340,23 +358,23 @@ describe("Goals Integration Tests", () => {
       });
 
       it("should filter goals by type", async () => {
-        mockGoalService.getGoals.mockResolvedValue([]);
+        mockGoalService.getGoalsForViewer.mockResolvedValue([]);
 
         await request(app).get("/api/goals?type=save_up").expect(200);
 
-        expect(mockGoalService.getGoals).toHaveBeenCalledWith(
-          "house-123",
+        expect(mockGoalService.getGoalsForViewer).toHaveBeenCalledWith(
+          { householdId: "house-123", userId: "user-123", role: "admin" },
           expect.objectContaining({ type: "save_up" }),
         );
       });
 
       it("should filter goals by status", async () => {
-        mockGoalService.getGoals.mockResolvedValue([]);
+        mockGoalService.getGoalsForViewer.mockResolvedValue([]);
 
         await request(app).get("/api/goals?status=on_track").expect(200);
 
-        expect(mockGoalService.getGoals).toHaveBeenCalledWith(
-          "house-123",
+        expect(mockGoalService.getGoalsForViewer).toHaveBeenCalledWith(
+          { householdId: "house-123", userId: "user-123", role: "admin" },
           expect.objectContaining({ status: "on_track" }),
         );
       });
@@ -379,6 +397,9 @@ describe("Goals Integration Tests", () => {
 
         expect(res.body.success).toBe(true);
         expect(res.body.data.id).toBe("goal-1");
+        expect(mockGoalService.getGoalWithProgress).toHaveBeenCalledWith(
+          "goal-1", { householdId: "house-123", userId: "user-123", role: "admin" },
+        );
       });
 
       it("should return 404 for non-existent goal", async () => {
@@ -409,6 +430,7 @@ describe("Goals Integration Tests", () => {
 
         mockGoalService.getGoalById.mockResolvedValue(existingGoal);
         mockGoalService.updateGoal.mockResolvedValue(updatedGoal);
+        mockGoalService.getViewerGoal.mockResolvedValue(updatedGoal);
 
         const res = await request(app)
           .put("/api/goals/goal-1")
@@ -420,7 +442,10 @@ describe("Goals Integration Tests", () => {
 
         expect(res.body.success).toBe(true);
         expect(res.body.data.name).toBe("Updated Name");
-        expect(mockBusinessAuditService.logUpdate).toHaveBeenCalled();
+        expect(mockGoalService.updateGoal).toHaveBeenCalledWith(
+          "goal-1", { name: "Updated Name", targetAmount: "2000.00", currency: "ZMW" }, "house-123", "user-123",
+          { householdId: "house-123", userId: "user-123", role: "admin" }, { ipAddress: "127.0.0.1" },
+        );
       });
     });
 
@@ -438,7 +463,9 @@ describe("Goals Integration Tests", () => {
         const res = await request(app).delete("/api/goals/goal-1").expect(200);
 
         expect(res.body.success).toBe(true);
-        expect(mockBusinessAuditService.logDelete).toHaveBeenCalled();
+        // FIN-13: the service writes the DELETE row inside the deletion's transaction.
+        expect(mockGoalService.deleteGoal).toHaveBeenCalledWith("goal-1", "house-123", { userId: "user-123", ipAddress: "127.0.0.1" });
+        expect(mockBusinessAuditService.logDelete).not.toHaveBeenCalled();
       });
     });
   });
@@ -582,6 +609,28 @@ describe("Goals Integration Tests", () => {
       });
     });
 
+    describe("GET /api/goals/assignments - Household Assignments", () => {
+      it("passes the verified actor and preserves the assignment Money DTO", async () => {
+        mockGoalAccountAssignmentService.getAssignmentsForHousehold.mockResolvedValue([{
+          id: "assign-1", goalId: "goal-1", accountId: "acc-1",
+          partialAmount: "11.11", accountBalance: "988.89", accountCurrency: "ZMW",
+          goalName: "Test Goal", goalType: "save_up", goalCurrency: "ZMW",
+        }]);
+
+        const res = await request(app).get("/api/goals/assignments").expect(200);
+
+        expect(mockGoalAccountAssignmentService.getAssignmentsForHousehold).toHaveBeenCalledWith({
+          householdId: "house-123", userId: "user-123", role: "admin",
+        });
+        expect(res.body.data).toMatchObject([{
+          id: "assign-1", goalId: "goal-1", accountId: "acc-1",
+          partialAmount: { amount: "11.11", currency: "ZMW" },
+          accountBalance: { amount: "988.89", currency: "ZMW" },
+          goalName: "Test Goal", goalType: "save_up", goalCurrency: "ZMW",
+        }]);
+      });
+    });
+
     describe("GET /api/goals/:id/assignments - List Assignments", () => {
       it("should list assignments for goal", async () => {
         const mockAssignments = [
@@ -593,7 +642,7 @@ describe("Goals Integration Tests", () => {
           },
         ];
 
-        mockGoalAccountAssignmentService.getAssignments.mockResolvedValue(
+        mockGoalAccountAssignmentService.getVisibleAssignments.mockResolvedValue(
           mockAssignments,
         );
 
@@ -603,6 +652,9 @@ describe("Goals Integration Tests", () => {
 
         expect(res.body.success).toBe(true);
         expect(res.body.data).toHaveLength(1);
+        expect(mockGoalAccountAssignmentService.getVisibleAssignments).toHaveBeenCalledWith(
+          "goal-1", { householdId: "house-123", userId: "user-123", role: "admin" },
+        );
       });
     });
 
@@ -653,6 +705,7 @@ describe("Goals Integration Tests", () => {
             id: "goal-2",
             currentAmount: "1000.00",
           },
+          visibility: new Map(),
         };
 
         mockGoalTransferService.transfer.mockResolvedValue(mockResult);
@@ -669,7 +722,12 @@ describe("Goals Integration Tests", () => {
 
         expect(res.body.success).toBe(true);
         expect(res.body.data.transfer).toBeDefined();
-        expect(mockBusinessAuditService.logCreate).toHaveBeenCalled();
+        // A-06: the amount reaches the service with its currency.
+        expect(mockGoalTransferService.transfer).toHaveBeenCalledWith(
+          expect.any(String), expect.any(String),
+          expect.objectContaining({ amount: { amount: "500.00", currency: "ZMW" } }),
+          expect.anything(), "127.0.0.1",
+        );
       });
 
       it("should reject transfer to same goal", async () => {
@@ -698,7 +756,7 @@ describe("Goals Integration Tests", () => {
         // Error response validation - 400/404 status is sufficient
       });
 
-      it("should create audit log entry for transfer", async () => {
+      it("leaves the transfer audit row to the service transaction (A-23)", async () => {
         const mockResult = {
           transfer: {
             id: "transfer-audit",
@@ -708,6 +766,7 @@ describe("Goals Integration Tests", () => {
           },
           fromGoal: { id: "goal-1" },
           toGoal: { id: "goal-2" },
+          visibility: new Map(),
         };
 
         mockGoalTransferService.transfer.mockResolvedValue(mockResult);
@@ -722,11 +781,11 @@ describe("Goals Integration Tests", () => {
           })
           .expect(201);
 
-        expect(mockBusinessAuditService.logCreate).toHaveBeenCalledWith(
-          expect.objectContaining({
-            entityType: "goal_transfer",
-          }),
+        // The real row is asserted in completion-astra.goals-wave1.realdb.
+        expect(mockGoalTransferService.transfer).toHaveBeenCalledWith(
+          expect.any(String), expect.any(String), expect.anything(), expect.anything(), "127.0.0.1",
         );
+        expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
       });
     });
 
@@ -738,6 +797,7 @@ describe("Goals Integration Tests", () => {
             fromGoalId: "goal-1",
             toGoalId: "goal-2",
             amount: "500.00",
+            amountVisible: true,
           },
         ];
 
@@ -758,6 +818,7 @@ describe("Goals Integration Tests", () => {
             fromGoalId: "goal-1",
             toGoalId: "goal-2",
             amount: "500.00",
+            amountVisible: true,
           },
         ];
 
@@ -858,6 +919,10 @@ describe("Goals Integration Tests", () => {
             transactionId: "tx-1",
             goalId: "goal-1",
             linkType: "contribution",
+            amount: "25.00",
+            sourceAmount: "25.00",
+            sourceCurrency: "ZMW",
+            appliedDelta: "25.00",
             transaction: { id: "tx-1", name: "Savings Deposit" },
           },
         ];
@@ -876,6 +941,10 @@ describe("Goals Integration Tests", () => {
 
         expect(res.body.success).toBe(true);
         expect(Array.isArray(res.body.data)).toBe(true);
+        expect(mockTransactionGoalLinkService.getLinkedTransactions).toHaveBeenCalledWith(
+          "goal-1",
+          { householdId: "house-123", userId: "user-123", role: "admin" },
+        );
       });
     });
   });
@@ -955,6 +1024,7 @@ describe("Goals Integration Tests", () => {
         };
 
         mockGoalService.completeGoal.mockResolvedValue(mockGoal);
+        mockGoalService.getViewerGoal.mockResolvedValue(mockGoal);
 
         const res = await request(app)
           .post("/api/goals/goal-1/complete")
@@ -973,6 +1043,7 @@ describe("Goals Integration Tests", () => {
         };
 
         mockGoalService.setArchived.mockResolvedValue(mockGoal);
+        mockGoalService.getViewerGoal.mockResolvedValue(mockGoal);
 
         const res = await request(app)
           .post("/api/goals/goal-1/archive")
@@ -992,6 +1063,7 @@ describe("Goals Integration Tests", () => {
         };
 
         mockGoalService.setArchived.mockResolvedValue(mockGoal);
+        mockGoalService.getViewerGoal.mockResolvedValue(mockGoal);
 
         const res = await request(app)
           .post("/api/goals/goal-1/unarchive")
@@ -1135,6 +1207,11 @@ describe("Goals Integration Tests", () => {
 
         expect(res.body.success).toBe(true);
         expect(Array.isArray(res.body.data)).toBe(true);
+        expect(mockGoalActivityLogService.getActivity).toHaveBeenCalledWith(
+          "goal-1",
+          { householdId: "house-123", userId: "user-123", role: "admin" },
+          { limit: 10, offset: 0 },
+        );
       });
     });
   });
@@ -1144,7 +1221,7 @@ describe("Goals Integration Tests", () => {
   // ============================================================================
 
   describe("Audit Logging", () => {
-    it("should create exactly one audit entry per goal creation", async () => {
+    it("leaves the goal creation's single audit row to the service transaction", async () => {
       const mockGoal = {
         id: "goal-audit",
         name: "Audit Test",
@@ -1163,31 +1240,40 @@ describe("Goals Integration Tests", () => {
         })
         .expect(201);
 
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalledTimes(1);
+      // FIN-13: the real service writes exactly one CREATE row inside its transaction;
+      // the controller must not add a second, post-commit row.
+      expect(mockGoalService.createGoal).toHaveBeenCalledWith(
+        expect.any(Object), "house-123", "user-123", expect.any(Object), { ipAddress: "127.0.0.1" },
+      );
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
 
-    it("should create exactly one audit entry per goal update", async () => {
-      const existingGoal = { id: "goal-1", name: "Original" };
+    it("lets the goal writer audit a relink without a second controller audit", async () => {
+      const existingGoal = { id: "goal-1", name: "Original", type: "investment" };
       const updatedGoal = { ...existingGoal, name: "Updated" };
       mockGoalService.getGoalById.mockResolvedValue(existingGoal);
       mockGoalService.updateGoal.mockResolvedValue(updatedGoal);
+      mockGoalService.getViewerGoal.mockResolvedValue(updatedGoal);
 
       await request(app)
         .put("/api/goals/goal-1")
-        .send({ name: "Updated" })
+        .send({ name: "Updated", linkedAccountId: null })
         .expect(200);
 
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledTimes(1);
+      expect(mockGoalService.updateGoal).toHaveBeenCalledExactlyOnceWith(
+        "goal-1", { name: "Updated", linkedAccountId: null }, "house-123", "user-123",
+        { householdId: "house-123", userId: "user-123", role: "admin" }, { ipAddress: "127.0.0.1" },
+      );
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
 
-    it("should create audit entry for goal deletion", async () => {
-      const existingGoal = { id: "goal-1", name: "Delete Me" };
-      mockGoalService.getGoalById.mockResolvedValue(existingGoal);
+    it("leaves the goal deletion's single audit row to the service transaction", async () => {
       mockGoalService.deleteGoal.mockResolvedValue(undefined);
 
       await request(app).delete("/api/goals/goal-1").expect(200);
 
-      expect(mockBusinessAuditService.logDelete).toHaveBeenCalledTimes(1);
+      expect(mockGoalService.deleteGoal).toHaveBeenCalledWith("goal-1", "house-123", { userId: "user-123", ipAddress: "127.0.0.1" });
+      expect(mockBusinessAuditService.logDelete).not.toHaveBeenCalled();
     });
   });
 
@@ -1208,6 +1294,7 @@ describe("Goals Integration Tests", () => {
         };
 
         mockGoalService.completeGoal.mockResolvedValue(mockGoal);
+        mockGoalService.getViewerGoal.mockResolvedValue(mockGoal);
 
         const res = await request(app)
           .post("/api/goals/goal-over/complete")
@@ -1228,6 +1315,7 @@ describe("Goals Integration Tests", () => {
         };
 
         mockGoalService.setArchived.mockResolvedValue(mockGoal);
+        mockGoalService.getViewerGoal.mockResolvedValue(mockGoal);
 
         const res = await request(app)
           .post("/api/goals/goal-completed/archive")
@@ -1246,6 +1334,7 @@ describe("Goals Integration Tests", () => {
         };
 
         mockGoalService.setArchived.mockResolvedValue(mockGoal);
+        mockGoalService.getViewerGoal.mockResolvedValue(mockGoal);
 
         const res = await request(app)
           .post("/api/goals/goal-completed/unarchive")

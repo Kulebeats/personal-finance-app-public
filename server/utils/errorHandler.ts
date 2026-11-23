@@ -9,6 +9,7 @@ import {
   ConflictError,
   RateLimitError,
 } from "../core/errors";
+import { MISSING_FX_RATE_STATUS, logMissingFxRate, missingFxRateBody } from "../core/errors/missingFxRate";
 
 export {
   ValidationError,
@@ -148,9 +149,17 @@ export function apiErrorMiddleware(
     return;
   }
 
-  // Log the full error for debugging using structured logger
-  const context = `${req.method} ${req.path}`;
-  const sanitizedMessage = handleApiError(err, context, req);
+  // R12: a missing exchange rate is missing financial data (422 naming the pair).
+  const missingRate = missingFxRateBody(err);
+  if (missingRate) {
+    logMissingFxRate(req, missingRate);
+    res.status(MISSING_FX_RATE_STATUS).json(missingRate);
+    return;
+  }
+
+  // Message text is not redacted. requestError supplies the source route
+  // template and safe error identity; raw paths/parameters never form labels.
+  const sanitizedMessage = handleApiError(err, "API request failed", req);
 
   // Handle specific error types with V7 compliant envelope
   if (err instanceof ValidationError) {

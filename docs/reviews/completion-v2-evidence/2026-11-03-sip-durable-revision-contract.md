@@ -1,0 +1,35 @@
+# Durable SIP authorization revision contract
+
+This technical amendment preserves the approved stale-write guarantee and the owner's seven-field completed-proof retention decision. Independent Astra review found that `max(surviving grants)+1` is not a lifetime-of-plan revision after actor purge. UUID pointer comparison fixes replacement identity but still misses NULL → grant → purge → NULL. The earlier pointer-pair-only proposal is withdrawn before implementation; expectedRevision semantics are not weakened.
+
+## Required operational state
+
+Add nonpersonal `recurring_investments.authorization_revision` (`authorizationRevision` in Drizzle), INTEGER NOT NULL DEFAULT0 with nonnegative validation, to the unreleased0028 candidate. Legacy rows receive0 and no inferred actor or grant. This counter belongs to the surviving operational plan, not the completed-proof table. Plan deletion removes it; actor/grant purge preserves it. Exactly seven completed-proof columns remain.
+
+A newly inserted plan must have NULL current pointer and counter0. Under the plan lock, every real new grant uses stored counter+1; the pointer and counter change atomically. Current-pointer FK additionally binds the grant's revision using its corresponding unique identity. Clearing a pointer preserves the counter. An unchanged pointer forbids counter changes. A different nonnull pointer requires exactly OLD+1 and the matching grant revision. Use NULL-safe comparisons and reject integer overflow before computing the increment. Ordinary schedule updates remain valid. Application overflow produces a bounded explicit conflict/refusal.
+
+Reconfirmation compares expectedRevision with the stored plan counter even when its pointer is NULL. Thus stale legacy(null,0) cannot match a later cleared(null,1), and the next grant becomes2. No expectedAuthorizationId or exposed grant UUID is needed for this fix. The normalized version1 request digest is over the flat tuple `[1,"reconfirm",planId,expectedRevision,"sip",accountId,securityId,amount2dp,currency,frequency,initialExecutionDate]`; this is operational intent, separate from the retained-proof digest. Golden serialization tests must pin the chosen shape.
+
+An extant current grant preserves its original initial-date declaration. When no current grant survives, require explicit displayed current next-date declaration for the new grant; do not reconstruct authority or terms from retained financial proof. Reconfirmation does not activate an inactive plan, reset the next date or book a missed purchase. Full executable readiness remains a separate required check; authorization_recorded is not ready.
+
+## Evidence and fixture boundaries
+
+API draft test-only5f43ddb4 is preserved, unexecuted and pending this schema contract. ABA tests may create real signed grants and then use one explicitly synthetic scoped transaction to mark the synthetic author erased, clear the affected pointer while preserving its counter, purge affected operational records under normal guards and restore the flag. Failure rolls back the entire fixture transaction. No fake SID, fabricated grant/proof or trigger bypass. This simulates storage/API race states; actual eraseAccount execution/races remain required and unproven.
+
+The schema lane owns SQL, mapping and direct guard tests in capital-sip-adverse-sql-nov03; API lane owns create/reconfirm tests and later wiring in capital-sip-authorization-nov03. Test-first commits, independent exact SQL/mapping/metadata review and fresh/populated runtime evidence are required before acceptance. No new migration has been applied for this counter. Previously verified71945942/40a and a766/39y evidence remain unchanged and limited to their exact revisions.
+
+The prepared40b rehearsal at e957d498 and its ignored artifacts remain preserved but HELD UNEXECUTED, avoiding an obsolete DDL rehearsal before the counter revision. No bootstrap, seed or upgrade was run for40b. Its source preparation clearance does not clear future revised inputs.
+
+## Verified counter storage and reconfirmation baseline
+
+Independent Astra accepted counter SQL/mapping `fbe7ef64`, offline metadata40c, and metadata adoption `b9eac721272c09ae31656588f0ad6f73fa6f8af5`. SQL SHA256 is `4bfd0c24ba8c8d9b6eba229202684f166da578951f5cdfa2cd931609903de08f`; snapshot SHA256 is `8F4A7434158400F35C19B5F5572C6D87E82C6618A3F474EA50F273E61A8F39F0`. The journal and prior migration history remain unchanged; only the reviewed snapshot was adopted, never generated SQL.
+
+Root full guard run40d passed **77/77**, exit0 at clean b9eac721, fresh marked OID1864828 with29 migrations and all sixprimary/ninescope PRE/POST counterszero. All19 original artifact hashes and four supplemental readback hashes matched independent review. Read-only repeatable-read catalog evidence confirmed persisted4BFD migration hash, all ten function bodies byte-for-byte, counter integerNOTNULL/default0, nonnegative check, revision-bound pointer FK, enabled revision trigger and exactly seven proof columns. These are direct-SQL mechanics, not signed authority, actual erasure-service or populated-upgrade acceptance. Raw receipts: `C:/Users/USER/.codex/worktrees/capital-sip-adverse-sql-nov03/personal-finance-app/.local/astra-sip-counter40d` and sibling `astra-sip-counter40d-readback`.
+
+The API lane composed both schema dependencies, the reviewed create-counter prerequisite4fc66913 and metadata into frozen `fd84aa1dec9807cb895a1504533fa9275c667786`. Snapshot checkout CRLF mismatch was preserved locally, then exact reviewed LF bytes restored for that file only; clean source and8F4A hash were verified before execution.
+
+Root unfiltered reconfirmation baseline40e ran **33 cases:17 passed,16 failed**, exit1, fresh marked OID1867927/29migrations/all6+9PREPOSTzero. Independent Astra verified all19 hashes and exact source/runtime/SQL/snapshot/journal pins. Original17 API controls still pass; private executor remains failing. The15 new failures are ten absent-authorize-route404s, four missing DTO assertions and one generic fallback404-envelope mismatch. No hidden-plan existence disclosure was demonstrated.
+
+Reachability matters: the second ABA case actually creates a signed grant, performs the approved synthetic purge and verifies NULL/counter1 before stopping at replacement-route404; the first stops before initial reconfirmation. Ended SID401 and unchanged state pass before a fresh valid SID reaches404. Concurrency sends two404 calls; audit rollback/retry and persisted reconfirm digest assertions are not reached. The fixed literal digest oracle passes. Raw: `C:/Users/USER/.codex/worktrees/capital-sip-authorization-nov03/personal-finance-app/.local/astra-sip-reconfirm-red40e`.
+
+Sol is now implementing the reviewed reconfirmation route/delegates/DTOs. The schema lane prepares counter-aware populated rehearsal40f, preserving held40b. Full combined source integration, populated migration preservation, executor/proof, actual erasure, full readiness and UI acceptance remain open. No unchanged passing checks are scheduled for repetition.

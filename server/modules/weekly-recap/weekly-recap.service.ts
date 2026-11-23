@@ -8,17 +8,22 @@
 
 import { analyticsService } from "../../services/AnalyticsService";
 import { recurringService } from "../../services/RecurringService";
+import { householdRepository } from "../../repositories/HouseholdRepository";
+import { can } from "../../core/authz/capabilities";
+import { ForbiddenError } from "../../core/errors";
+import type { HouseholdContext } from "../../middleware/householdGuard";
 import { logger } from "../../utils/logger";
 import { Money } from "../../core/money";
 import type { MoneyDto } from "@shared/money";
 import type { RecurringTransaction } from "@shared/schema";
 import type { ReportsSpendingBreakdownResponse } from "@shared/reports";
+import { readRecipientWorth } from "./recap-worth.reader";
+import { addDays } from "./recap-week";
+import { getWeeklyRecapSettings } from "../../repositories/UserDisplayPreferences";
 import type {
   WeeklyRecapData,
   SpendingData,
-  NetWorthData,
   RecurringData,
-  TrendDirection,
   CategorySpending,
   UpcomingRecurring,
 } from "@shared/weekly-recap";
@@ -60,22 +65,36 @@ const sumAmounts = (amounts: string[], currency = "ZMW"): Money => {
   }, Money.zero(currency));
 };
 
-// Internal type for Money-based calculations
-interface NetWorthDataInternal {
-  current: Money;
-  series: Array<{ date: string; value: number }>;
+function formatRecurringBills(rules: RecurringTransaction[]): RecurringData {
+  const totalAmountMoney = sumAmounts(
+    rules.map(bill => bill.amount || "0")
+  );
+
+  return {
+    // CONTRACT-003: Use "dueDate" instead of "date"
+    // CONTRACT-004: Convert amount to number instead of string
+    upcoming: rules.map(bill => ({
+      id: bill.id,
+      name: bill.name,
+      amount: toMoney(bill.amount).toNumber(), // Convert to number
+      dueDate: bill.nextDueDate, // Renamed from "date" to "dueDate"
+      frequency: bill.frequency,
+    })),
+    count: rules.length,
+    totalAmount: totalAmountMoney.toNumber(),
+  };
 }
 
 // Re-export for external use
 export type { WeeklyRecapData as WeeklyRecap };
 
-/**
- * Helper to calculate trend direction from change values.
- */
-function calculateTrend(change: number): TrendDirection {
-  if (change > 0.5) return "up";
-  if (change < -0.5) return "down";
-  return "steady";
+/** Check the same explicit recipient before projection and at publication. */
+export async function requireRecapRecipient(householdId: string, userId: string): Promise<HouseholdContext> {
+  const membership = await householdRepository.findMember(householdId, userId);
+  if (!membership || !can(membership.role, "financial.read")) {
+    throw new ForbiddenError("Weekly recap access denied");
+  }
+  return { householdId, userId, role: membership.role };
 }
 
 class WeeklyRecapService {
@@ -88,45 +107,25 @@ class WeeklyRecapService {
     from: string,
     to: string
   ): Promise<WeeklyRecapData> {
-    // Calculate previous week for comparison
-    const fromDate = new Date(from);
-    const prevWeekStart = new Date(fromDate);
-    prevWeekStart.setDate(prevWeekStart.getDate() - 7);
-    const prevWeekEnd = new Date(fromDate);
-    prevWeekEnd.setDate(prevWeekEnd.getDate() - 1);
-    const prevFrom = prevWeekStart.toISOString().split("T")[0];
-    const prevTo = prevWeekEnd.toISOString().split("T")[0];
+    const recipient = await requireRecapRecipient(householdId, userId);
+    // OPS-007: the saved toggles decide which sections this recap holds.
+    const settings = await getWeeklyRecapSettings(userId);
+    const sections = { goals: settings.includeGoals, recurring: settings.includeRecurring };
+
+    // The comparison week is the seven dates before this one (NEW-31).
+    const prevFrom = addDays(from, -7);
+    const prevTo = addDays(from, -1);
 
     // Fetch all data in parallel
     const [
-      netWorthData,
-      prevNetWorthData,
       spendingData,
       prevSpendingData,
       upcomingBills,
     ] = await Promise.all([
-      this.getNetWorthInternal(householdId, userId, from, to),
-      this.getNetWorthInternal(householdId, userId, prevFrom, prevTo),
       this.getSpendingInternal(householdId, userId, from, to),
       this.getSpendingInternal(householdId, userId, prevFrom, prevTo),
-      this.getUpcomingRecurring(householdId, from, to),
+      sections.recurring ? this.getUpcomingRecurring(recipient, from, to) : formatRecurringBills([]),
     ]);
-
-    // Calculate net worth change using Money class for precision
-    const currentNetWorth = netWorthData.current;
-    const previousNetWorth = prevNetWorthData.current;
-    const netWorthChange = currentNetWorth.subtract(previousNetWorth);
-
-    // Calculate percentage change using Money for safe comparison
-    // FIX Money Rule 1: Keep Money through calculation
-    let netWorthChangePercent = 0;
-    if (!previousNetWorth.isZero()) {
-      // Keep Money through calculation, convert only at final step
-      netWorthChangePercent = netWorthChange
-        .divide(previousNetWorth.abs().toString())
-        .multiply("100")
-        .toNumber();
-    }
 
     // Calculate spending change percentage
     let spendingChangePercent = 0;
@@ -136,16 +135,6 @@ class WeeklyRecapService {
           prevSpendingData.total) *
         100;
     }
-
-    // Build net worth response with trend (CONTRACT-005 fix)
-    const netWorthResponse: NetWorthData = {
-      current: currentNetWorth.toNumber(),
-      previous: previousNetWorth.toNumber(),
-      change: netWorthChange.toNumber(),
-      changePercent: Number(netWorthChangePercent.toFixed(2)),
-      series: netWorthData.series,
-      trend: calculateTrend(netWorthChangePercent),
-    };
 
     // Build spending response with aligned field names (CONTRACT-001, CONTRACT-002, CONTRACT-005)
     const spendingResponse: SpendingData = {
@@ -165,51 +154,17 @@ class WeeklyRecapService {
       trend: [],
     };
 
+    await requireRecapRecipient(householdId, userId);
+    // Run after other assembly: both periods share the current account audience.
+    const netWorthResponse = await readRecipientWorth(householdId, userId, from, to);
     return {
       weekStart: from,
       weekEnd: to,
       netWorth: netWorthResponse,
       spending: spendingResponse,
       recurring: upcomingBills,
+      sections,
     };
-  }
-
-  /**
-   * Get net worth data for a date range (internal version returning Money)
-   */
-  private async getNetWorthInternal(
-    householdId: string,
-    userId: string,
-    from: string,
-    to: string
-  ): Promise<NetWorthDataInternal> {
-    try {
-      const result = await analyticsService.getNetWorth(householdId, userId, {
-        from,
-        to,
-      });
-
-      // Extract current value from latest using Money class
-      const current = toMoney(result.latest?.netWorth);
-
-      // Extract series data - flatten the nested data structure
-      // Series data is for display only, so toNumber() is acceptable here
-      const series = (result.series || [])
-        .flatMap((s) =>
-          (s.data || []).map((d) => ({
-            date: d.x,
-            value: toMoney(d.y).toNumber(),
-          }))
-        );
-
-      return {
-        current,
-        series,
-      };
-    } catch (error) {
-      logger.warn("Failed to fetch net worth for weekly recap", { error });
-      return { current: Money.zero(), series: [] };
-    }
   }
 
   // Internal type for spending data before transformation
@@ -262,8 +217,11 @@ class WeeklyRecapService {
 
       return { total, categories };
     } catch (error) {
+      // OPS-006: never report a spending total of 0 for a week whose spending
+      // could not be read. A missing rate reaches the error handler as the
+      // 422 MISSING_FX_RATE answer, exactly as the emailed digest refuses.
       logger.warn("Failed to fetch spending for weekly recap", { error });
-      return { total: 0, categories: [] };
+      throw error;
     }
   }
 
@@ -271,7 +229,7 @@ class WeeklyRecapService {
    * Get upcoming recurring transactions
    */
   private async getUpcomingRecurring(
-    householdId: string,
+    recipient: HouseholdContext,
     from: string,
     to: string
   ): Promise<RecurringData> {
@@ -284,7 +242,7 @@ class WeeklyRecapService {
       );
 
       const upcoming = await recurringService.getUpcomingBills(
-        householdId,
+        recipient,
         Math.max(7, daysAhead)
       );
 
@@ -294,28 +252,12 @@ class WeeklyRecapService {
         return billDate >= from && billDate <= to;
       });
 
-      const totalAmountMoney = sumAmounts(
-        filtered.map((bill: RecurringTransaction) => bill.amount || "0")
-      );
-
-      return {
-        // CONTRACT-003: Use "dueDate" instead of "date"
-        // CONTRACT-004: Convert amount to number instead of string
-        upcoming: filtered.map((bill: RecurringTransaction) => ({
-          id: bill.id,
-          name: bill.name,
-          amount: toMoney(bill.amount).toNumber(), // Convert to number
-          dueDate: bill.nextDueDate, // Renamed from "date" to "dueDate"
-          frequency: bill.frequency,
-        })),
-        count: filtered.length,
-        totalAmount: totalAmountMoney.toNumber(),
-      };
+      return formatRecurringBills(filtered);
     } catch (error) {
       logger.warn("Failed to fetch upcoming recurring for weekly recap", {
         error,
       });
-      return { upcoming: [], count: 0, totalAmount: 0 };
+      throw error;
     }
   }
 }

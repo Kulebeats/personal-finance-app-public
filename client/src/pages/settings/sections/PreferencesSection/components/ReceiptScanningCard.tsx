@@ -9,14 +9,11 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { Separator } from "@/components/ui/separator";
-import { UserPreferences } from "@/hooks/use-settings";
+import type { UserPreferences, UpdatePersonalPreference } from "@/hooks/use-settings";
 
 interface ReceiptScanningCardProps {
-  preferences?: UserPreferences;
-  onUpdate: (
-    key: keyof UserPreferences,
-    value: UserPreferences[keyof UserPreferences]
-  ) => void;
+  preferences: UserPreferences;
+  onUpdate: UpdatePersonalPreference;
 }
 
 export function ReceiptScanningCard({
@@ -74,10 +71,11 @@ export function ReceiptScanningCard({
           </div>
           <Slider
             id="ocr-threshold"
-            min={50}
-            max={95}
-            step={5}
-            value={[preferences?.ocrConfidenceThreshold || 70]}
+            aria-label="OCR Confidence Threshold"
+            min={0}
+            max={100}
+            step={1}
+            value={[preferences.ocrConfidenceThreshold]}
             onValueChange={(value) =>
               onUpdate("ocrConfidenceThreshold", value[0])
             }

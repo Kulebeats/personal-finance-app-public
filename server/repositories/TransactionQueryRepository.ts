@@ -18,17 +18,26 @@ import {
   gte,
   lte,
   inArray,
+  getTableColumns,
 } from "drizzle-orm";
 import { db } from "../db";
+import { postedTransactionPredicate } from "./postedTransactionPredicate";
+import { providerFlowRate } from "./reports/providerFxQuote";
 import {
   transactions,
   accounts,
+  householdMembers,
   merchants,
   categories,
   transactionTags,
   type Transaction,
 } from "@shared/schema";
 import type { TransactionWithNames } from "./TransactionRepository";
+import type { HouseholdContext } from "../middleware/householdGuard";
+import { can } from "../core/authz/capabilities";
+import { visibleTransactionPredicate } from "../core/authz/transaction-visibility";
+import type { TransactionType } from "../utils/withTransaction";
+import { couponCashDescriptionFields } from "../services/grz/couponCashDescription";
 
 /**
  * Transaction Query Repository
@@ -66,8 +75,12 @@ export class TransactionQueryRepository {
        * before limit/offset so invisible rows cannot consume page slots.
        */
       visibleToUserId?: string;
+      includeSplits?: boolean;
+      summaryCurrency?: string;
     },
+    tx?: TransactionType,
   ): Promise<TransactionWithNames[]> {
+    const cashDescription = couponCashDescriptionFields();
     const conditions = [eq(transactions.householdId, householdId)];
 
     if (!options?.includeDeleted) {
@@ -95,7 +108,7 @@ export class TransactionQueryRepository {
     }
 
     if (!options?.includePending) {
-      conditions.push(eq(transactions.isPending, false));
+      conditions.push(postedTransactionPredicate);
     }
 
     if (options?.ownerUserId !== undefined) {
@@ -108,7 +121,7 @@ export class TransactionQueryRepository {
 
     // Merchant filter
     if (options?.merchantId) {
-      conditions.push(eq(transactions.merchantId, options.merchantId));
+      conditions.push(eq(cashDescription.merchantId, options.merchantId));
     }
 
     // Amount range filters (applied to absolute amount value)
@@ -130,11 +143,11 @@ export class TransactionQueryRepository {
     if (options?.search) {
       const searchPattern = `%${options.search}%`;
       const searchCondition = or(
-        sql`LOWER(${transactions.name}) LIKE LOWER(${searchPattern})`,
-        sql`LOWER(${transactions.originalName}) LIKE LOWER(${searchPattern})`,
-        sql`LOWER(${transactions.notes}) LIKE LOWER(${searchPattern})`,
+        sql`LOWER(${cashDescription.name}) LIKE LOWER(${searchPattern})`,
+        sql`LOWER(${cashDescription.originalName}) LIKE LOWER(${searchPattern})`,
+        sql`LOWER(${cashDescription.notes}) LIKE LOWER(${searchPattern})`,
         // Subquery to search merchant name
-        sql`${transactions.merchantId} IN (
+        sql`${cashDescription.merchantId} IN (
           SELECT ${merchants.id} FROM ${merchants}
           WHERE ${merchants.householdId} = ${householdId}
           AND LOWER(${merchants.name}) LIKE LOWER(${searchPattern})
@@ -190,12 +203,27 @@ export class TransactionQueryRepository {
         ? transactions.date
         : sortBy === "amount"
           ? transactions.amount
-          : transactions.name; // "description" maps to name column
+          : cashDescription.name;
 
     // Query transactions with dynamic sorting
     // Secondary sort by createdAt for stable ordering when primary sort values are equal
-    const baseQuery = db
-      .select()
+    // Read the displayed allocations with the parent's version and visibility in
+    // one statement. Keep decimal amounts as strings through JSON decoding.
+    const executor = tx ?? db;
+    const baseQuery = executor
+      .select({ ...getTableColumns(transactions), ...cashDescription,
+        ...(options?.summaryCurrency ? {
+          summaryRate: sql<string | null>`CASE WHEN ${transactions.type} IN ('income', 'expense')
+            AND ${transactions.isExcludedFromReports} IS NOT TRUE AND ${transactions.amount} <> 0
+            THEN (${providerFlowRate(sql`${transactions.currency}`, options.summaryCurrency, sql`${transactions.date}`, sql`transaction_timestamp()`)})::text END`,
+        } : {}),
+        ...(options?.includeSplits ? {
+        splits: sql<NonNullable<TransactionWithNames["splits"]>>`COALESCE((SELECT jsonb_agg(jsonb_build_object(
+          'id', s.id, 'amount', s.amount::text, 'categoryId', s.category_id,
+          'merchantId', s.merchant_id, 'notes', s.notes, 'displayOrder', s.display_order
+        ) ORDER BY s.display_order, s.id) FROM transaction_splits s
+          WHERE s.transaction_id = "transactions"."id"), '[]'::jsonb)`,
+      } : {}) })
       .from(transactions)
       .where(and(...conditions))
       .orderBy(orderFn(sortColumn), desc(transactions.createdAt));
@@ -208,7 +236,7 @@ export class TransactionQueryRepository {
       : queryWithLimit;
 
     const txns = await queryWithOffset;
-    if (txns.length === 0) return [];
+    if (options?.summaryCurrency || txns.length === 0) return txns;
 
     // Batch fetch denormalized names
     const merchantIds = Array.from(
@@ -227,23 +255,23 @@ export class TransactionQueryRepository {
     const [merchantResults, categoryResults, accountResults] =
       await Promise.all([
         merchantIds.length > 0
-          ? db
+          ? executor
               .select({
                 id: merchants.id,
                 name: merchants.name,
                 logoUrl: merchants.logoUrl,
               })
               .from(merchants)
-              .where(inArray(merchants.id, merchantIds))
+              .where(and(eq(merchants.householdId, householdId), inArray(merchants.id, merchantIds)))
           : Promise.resolve([]),
         categoryIds.length > 0
-          ? db
+          ? executor
               .select({ id: categories.id, name: categories.name })
               .from(categories)
-              .where(inArray(categories.id, categoryIds))
+              .where(and(eq(categories.householdId, householdId), inArray(categories.id, categoryIds)))
           : Promise.resolve([]),
         accountIds.length > 0
-          ? db
+          ? executor
               .select({ id: accounts.id, name: accounts.name })
               .from(accounts)
               .where(inArray(accounts.id, accountIds))
@@ -301,8 +329,11 @@ export class TransactionQueryRepository {
       tagIds?: string[];
       // R-07: Allow pending preference to be passed through
       includePending?: boolean;
+      includeSplits?: boolean;
+      summaryCurrency?: string;
     },
-  ): Promise<Transaction[]> {
+    tx?: TransactionType,
+  ): Promise<TransactionWithNames[]> {
     return await this.findByHousehold(householdId, {
       ...options,
       includeDeleted: false,
@@ -310,7 +341,7 @@ export class TransactionQueryRepository {
       includePending: options?.includePending ?? true,
       ownerUserId: options?.ownerUserId,
       visibleToUserId: userId,
-    });
+    }, tx);
   }
 
   /**
@@ -325,6 +356,8 @@ export class TransactionQueryRepository {
       merchantId?: string;
       categoryId?: string;
     },
+    actor?: HouseholdContext,
+    tx?: TransactionType,
   ): Promise<Transaction[]> {
     const endDate = options?.endDate || new Date().toISOString().split("T")[0];
     let startDate = options?.startDate;
@@ -342,6 +375,33 @@ export class TransactionQueryRepository {
       eq(transactions.isRecurring, false),
     ];
 
+    // The signed endpoint filters every reference and the current member role
+    // in SQL before the detector groups amounts, names, and counts. The role
+    // gate matches requireRole("member") on the endpoint. Existing trusted
+    // household-only callers retain their prior behavior.
+    if (actor) {
+      conditions.push(visibleTransactionPredicate(actor));
+      conditions.push(can(actor.role, "financial.write")
+        ? sql`exists (select 1 from ${householdMembers} where ${and(
+          eq(householdMembers.householdId, actor.householdId),
+          eq(householdMembers.userId, actor.userId),
+          inArray(householdMembers.role, ["owner", "admin", "member"]),
+        )})`
+        : sql`false`);
+      conditions.push(sql`(${transactions.merchantId} is null or exists (
+        select 1 from ${merchants} where ${and(
+          eq(merchants.id, transactions.merchantId),
+          eq(merchants.householdId, actor.householdId),
+        )}
+      ))`);
+      conditions.push(sql`(${transactions.categoryId} is null or exists (
+        select 1 from ${categories} where ${and(
+          eq(categories.id, transactions.categoryId),
+          eq(categories.householdId, actor.householdId),
+        )}
+      ))`);
+    }
+
     if (startDate) {
       conditions.push(gte(transactions.date, startDate));
     }
@@ -358,11 +418,11 @@ export class TransactionQueryRepository {
       conditions.push(eq(transactions.categoryId, options.categoryId));
     }
 
-    return await db
+    return await (tx ?? db)
       .select()
       .from(transactions)
       .where(and(...conditions))
-      .orderBy(desc(transactions.date));
+      .orderBy(desc(transactions.date), transactions.id);
   }
 }
 

@@ -3,11 +3,11 @@ import { CalendarDays, ArrowRight } from "lucide-react";
 import { useFormatters } from "@/contexts/SettingsContext";
 import { useUpcomingBills } from "@/hooks/useRecurring";
 import { useLocation } from "wouter";
-import { sumMoneyValues, toMoneyNumber } from "@/lib/money";
+import { formatInOwnUnit, sumInCurrency } from "@/features/recurring/recurringTotals";
 import { WidgetErrorState } from "./WidgetErrorState";
 
 export default function RecurringExpensesWidget() {
-  const { formatCurrency } = useFormatters();
+  const { formatCurrency, currency } = useFormatters();
   const [, setLocation] = useLocation();
   const {
     data: upcomingBills = [],
@@ -27,8 +27,8 @@ export default function RecurringExpensesWidget() {
     );
   }
 
-  const totalUpcomingDecimal = sumMoneyValues(upcomingBills.map((bill) => bill.amount));
-  const totalUpcoming = totalUpcomingDecimal.toNumber();
+  // FIN-05: only bills proven in the display currency are added to its total.
+  const upcoming = sumInCurrency(upcomingBills.map((bill) => bill.amount), currency);
 
   return (
     <Card className="col-span-1 shadow-sm border-border/50 bg-card hover:shadow-md transition-shadow duration-300">
@@ -36,7 +36,7 @@ export default function RecurringExpensesWidget() {
         <CardTitle className="text-base font-semibold text-foreground">Upcoming Bills</CardTitle>
         <button
           onClick={() => setLocation("/recurring")}
-          className="text-primary text-xs font-medium hover:underline flex items-center gap-1"
+          className="text-primary text-xs font-medium hover:underline flex items-center gap-1 max-md:min-h-11"
         >
             View All <ArrowRight className="w-3 h-3" />
         </button>
@@ -80,7 +80,7 @@ export default function RecurringExpensesWidget() {
                     </div>
                   </div>
                   <div className="text-sm font-semibold text-foreground">
-                    {formatCurrency(toMoneyNumber(bill.amount))}
+                    {formatInOwnUnit(bill.amount, formatCurrency)}
                   </div>
                 </button>
               );
@@ -89,9 +89,16 @@ export default function RecurringExpensesWidget() {
         <div className="mt-6 pt-4 border-t border-border flex justify-between text-xs">
             <span className="text-muted-foreground">Total upcoming (7 days)</span>
             <span className="font-semibold text-foreground">
-              {formatCurrency(totalUpcoming)}
+              {formatInOwnUnit(upcoming.total, formatCurrency)}
             </span>
         </div>
+        {upcoming.excludedCount > 0 && (
+          <p className="mt-1 text-xs text-muted-foreground">
+            {upcoming.excludedCount === 1
+              ? `1 bill is not included because its amount is not confirmed in ${currency}.`
+              : `${upcoming.excludedCount} bills are not included because their amounts are not confirmed in ${currency}.`}
+          </p>
+        )}
       </CardContent>
     </Card>
   );

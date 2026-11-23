@@ -10,6 +10,12 @@
  * UNIQUE at schema level and is what makes re-running the same CSV a no-op
  * rather than a duplicate-ledger event. Changing this derivation silently
  * invalidates every previously-imported row's key. Treat it as frozen.
+ *
+ * NEW-17 (D13) migration: new imports no longer WRITE this key. They write the
+ * v2 identity in `identity.ts` (provider reference, else batch fingerprint plus
+ * row ordinal). Rows already in the ledger keep this v1 key; there is no
+ * backfill. The preview still derives it so a row imported by the old engine
+ * is shown as a strong duplicate candidate instead of being re-imported unseen.
  */
 import { createHash } from "crypto";
 import type { ImportOptions, ParsedImportRow } from "./types";
@@ -18,12 +24,17 @@ import type { ImportOptions, ParsedImportRow } from "./types";
 const HEX_DIGITS = "0123456789abcdef";
 
 /**
- * In-batch/period dedupe key. Keyed on date+type+amount only: the same
- * amount on the same day is treated as the same transaction regardless of
- * merchant or notes, matching what the "prioritize_coppercoin" mode requires.
+ * Duplicate-CANDIDATE key. Keyed on date+type+amount only: a ledger row with
+ * the same amount on the same day is offered for review in the preview. Since
+ * NEW-17 it never decides on its own that a row is a duplicate.
  */
 export function importRowKey(row: ParsedImportRow): string {
-  return `${row.dateString}_${row.type}_${row.amount.toString()}`;
+  return ledgerDedupeKey(row.dateString, row.type, row.amount);
+}
+
+/** The same key for a stored ledger row. */
+export function ledgerDedupeKey(dateString: string, type: string, amount: { toString(): string }): string {
+  return `${dateString}_${type}_${amount.toString()}`;
 }
 
 /**

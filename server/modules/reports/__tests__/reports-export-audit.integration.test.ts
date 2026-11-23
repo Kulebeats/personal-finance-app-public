@@ -9,7 +9,7 @@ import request from "supertest";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Express } from "express";
 import { db } from "../../../db";
-import { eq, and } from "drizzle-orm";
+import { eq, and, or } from "drizzle-orm";
 import {
   dataExports,
   accounts,
@@ -112,7 +112,7 @@ describe("Reports CSV Export DPA Audit (SCP-336)", () => {
 
   afterAll(async () => {
     try {
-      await db.delete(auditLogs).where(eq(auditLogs.householdId, householdId));
+      await db.delete(auditLogs).where(or(eq(auditLogs.householdId, householdId), eq(auditLogs.userId, userId)));
       await db.delete(dataExports).where(eq(dataExports.householdId, householdId));
       await db.delete(accounts).where(eq(accounts.householdId, householdId));
       await db
@@ -193,7 +193,7 @@ describe("Reports CSV Export DPA Audit (SCP-336)", () => {
       );
     expect(row).toBeDefined();
     expect(row.userId).toBe(userId);
-    expect(row.householdId).toBe(householdId);
+    expect(row.householdId).toBeNull();
 
     const details = row.details as Record<string, unknown>;
     expect(details.reportType).toBe("transactions");

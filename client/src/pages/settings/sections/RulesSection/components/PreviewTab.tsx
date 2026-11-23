@@ -3,17 +3,13 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { format } from "date-fns";
 import type { RuleCondition } from "../types";
-import type { RulePreviewTransaction } from "@/hooks/use-settings";
+import { RULE_PREVIEW_LIMIT, type RulePreviewResult } from "@/hooks/use-settings";
 
 interface PreviewTabProps {
   enabledConditions: RuleCondition[];
   previewMutation: {
     isPending: boolean;
-    data?: {
-      matchCount: number;
-      totalScanned: number;
-      transactions: RulePreviewTransaction[];
-    };
+    data?: RulePreviewResult;
   };
   categories: Array<{ id: string; name: string }>;
 }
@@ -44,7 +40,7 @@ export function PreviewTab({
     );
   }
 
-  if (previewMutation.data?.matchCount === 0) {
+  if (previewMutation.data?.count === 0) {
     return (
       <div className="text-center py-12 space-y-2" role="status" aria-live="polite">
         <p className="font-medium text-rose-500">No matches found</p>
@@ -52,29 +48,33 @@ export function PreviewTab({
           Try adjusting your conditions or changing the logic to "ANY".
         </p>
         <p className="text-xs text-muted-foreground pt-2">
-          Scanned {previewMutation.data.totalScanned} recent transactions.
+          Scanned {previewMutation.data.totalChecked} recent transactions.
         </p>
       </div>
     );
   }
 
   if (previewMutation.data) {
+    // The server stops collecting at the limit, so a count at the limit is a lower bound.
+    const isCapped = previewMutation.data.count >= RULE_PREVIEW_LIMIT;
     return (
       <div className="space-y-4">
         <div className="flex items-center justify-between sticky top-0 bg-background/95 backdrop-blur py-2 z-10 border-b mb-4">
           <div className="text-sm font-medium" role="status" aria-live="polite" aria-atomic="true">
-            Found {previewMutation.data.matchCount} matching{" "}
-            {previewMutation.data.matchCount === 1
+            Found {previewMutation.data.count}
+            {isCapped ? "+" : ""} matching{" "}
+            {previewMutation.data.count === 1
               ? "transaction"
               : "transactions"}
+            {isCapped ? ` (showing the first ${previewMutation.data.count})` : ""}
           </div>
           <div className="text-xs text-muted-foreground">
-            Scanned {previewMutation.data.totalScanned} recent
+            Scanned {previewMutation.data.totalChecked} recent
           </div>
         </div>
 
         <div className="space-y-2" role="region" aria-label="Matching transactions list">
-          {previewMutation.data.transactions.map((txn) => (
+          {previewMutation.data.matchingTransactions.map((txn) => (
             <div
               key={txn.id}
               className="flex items-center justify-between p-3 rounded-lg border bg-accent/10 hover:bg-accent/20 transition-colors"

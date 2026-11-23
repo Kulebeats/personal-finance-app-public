@@ -1,15 +1,16 @@
 /**
  * BudgetEditModal Component
  *
- * Modal for editing a category budget amount.
+ * Modal for editing a category budget amount. A real dialog (BudgetDialogShell);
+ * it opens with focus in the amount field.
  */
 
-import { useState, useEffect } from "react";
-import { X } from "lucide-react";
-import { Card } from "@/components/ui/card";
+import { useState, useEffect, useId, useRef } from "react";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import type { BudgetEditData, ApplyScope } from "../types";
+import { BudgetDialogShell } from "./BudgetDialogShell";
+import type { DialogOpener } from "../hooks/useDialogOpener";
 
 interface BudgetEditModalProps {
   isOpen: boolean;
@@ -18,6 +19,11 @@ interface BudgetEditModalProps {
   defaultApplyScope: ApplyScope;
   onSave: (payload: BudgetEditData & { applyScope: ApplyScope }) => void;
   isSaving: boolean;
+  /**
+   * The control that opened it, recorded by the parent (useDialogOpener):
+   * this modal renders nothing until it has data, so it mounts already open.
+   */
+  opener?: DialogOpener;
 }
 
 export function BudgetEditModal({
@@ -27,9 +33,12 @@ export function BudgetEditModal({
   defaultApplyScope,
   onSave,
   isSaving,
+  opener,
 }: BudgetEditModalProps) {
   const [amount, setAmount] = useState("");
   const [applyScope, setApplyScope] = useState<ApplyScope>(defaultApplyScope);
+  const amountRef = useRef<HTMLInputElement>(null);
+  const idPrefix = useId();
 
   useEffect(() => {
     if (!data) return;
@@ -37,9 +46,9 @@ export function BudgetEditModal({
     setApplyScope(defaultApplyScope);
   }, [data, defaultApplyScope]);
 
-  if (!isOpen || !data) return null;
+  if (!data) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     onSave({
       ...data,
@@ -57,22 +66,29 @@ export function BudgetEditModal({
   );
 
   return (
-    <div className="fixed inset-0 bg-black/30 z-50 flex items-center justify-center">
-      <Card className="w-full max-w-md bg-card shadow-lg overflow-hidden">
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-border">
-          <h2 className="text-lg font-bold text-foreground">Edit Budget</h2>
-          <button
-            onClick={onClose}
-            aria-label="Close dialog"
-            className="p-1 hover:bg-muted rounded"
-          >
-            <X className="w-5 h-5" />
+    <BudgetDialogShell
+      isOpen={isOpen}
+      onClose={onClose}
+      title="Edit Budget"
+      description={`Set the ${data.categoryName} budget for ${periodLabel} and choose which months it applies to.`}
+      isLocked={isSaving}
+      className="max-w-md"
+      onOpenAutoFocus={(event) => { event.preventDefault(); amountRef.current?.focus(); }}
+      onSubmit={handleSubmit}
+      opener={opener}
+      footer={
+        <>
+          <button type="button" onClick={onClose} disabled={isSaving}
+            className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors disabled:opacity-60">
+            Cancel
           </button>
-        </div>
-
-        {/* Form */}
-        <form onSubmit={handleSubmit}>
+          <button type="submit" disabled={isSaving}
+            className="px-6 py-2 text-sm font-bold bg-orange-500 text-white rounded-md hover:bg-orange-600 transition-colors disabled:opacity-60">
+            {isSaving ? "Saving..." : "Save"}
+          </button>
+        </>
+      }
+    >
           <div className="p-6 space-y-6">
             {/* Category Info */}
             <div>
@@ -87,27 +103,28 @@ export function BudgetEditModal({
 
             {/* Amount Input */}
             <div>
-              <Label htmlFor="amount" className="text-sm font-medium">
+              <Label htmlFor={`${idPrefix}-amount`} className="text-sm font-medium">
                 Budget Amount
               </Label>
               <input
-                id="amount"
+                ref={amountRef}
+                id={`${idPrefix}-amount`}
                 type="number"
                 step="0.01"
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 className="mt-2 w-full px-3 py-2 rounded-md border border-border bg-background dark:bg-card focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm"
                 placeholder="0.00"
-                autoFocus
               />
             </div>
 
             {/* Apply Scope */}
             <div>
-              <Label className="text-sm font-medium mb-3 block">
+              <p id={`${idPrefix}-scope`} className="text-sm font-medium mb-3">
                 Apply changes to
-              </Label>
+              </p>
               <RadioGroup
+                aria-labelledby={`${idPrefix}-scope`}
                 value={applyScope}
                 onValueChange={(v) => setApplyScope(v as ApplyScope)}
               >
@@ -132,27 +149,6 @@ export function BudgetEditModal({
               </RadioGroup>
             </div>
           </div>
-
-          {/* Footer */}
-          <div className="p-4 border-t border-border flex justify-end gap-3 bg-muted/10">
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={isSaving}
-              className="px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors disabled:opacity-60"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isSaving}
-              className="px-6 py-2 text-sm font-bold bg-orange-500 text-white rounded-md hover:bg-orange-600 transition-colors disabled:opacity-60"
-            >
-              {isSaving ? "Saving..." : "Save"}
-            </button>
-          </div>
-        </form>
-      </Card>
-    </div>
+    </BudgetDialogShell>
   );
 }

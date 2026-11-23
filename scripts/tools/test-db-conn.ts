@@ -1,15 +1,3 @@
-import { pool } from "./server/db";
-
-async function testConnection() {
-  try {
-    console.log("Testing database connection...");
-    const res = await pool.query("SELECT NOW() as time");
-    console.log("Connection successful:", res.rows[0]);
-    process.exit(0);
-  } catch (err) {
-    console.error("Connection failed:", err);
-    process.exit(1);
-  }
-}
-
-testConnection();
+// Retained only to fail closed: no application imports, dotenv, connection or writes.
+console.error("DEPRECATED UNSAFE TEST ENTRYPOINT: use PFA_TEST_MODE=database with explicit TEST_DATABASE_URL, TEST_RUN_ID and TEST_TARGET_MANIFEST; then run node scripts/protected-test-tool.mjs diagnose|fixture. Fixture creation also requires TEST_FIXTURE_PASSWORD and creates only run-scoped synthetic identities.");
+process.exitCode = 1;

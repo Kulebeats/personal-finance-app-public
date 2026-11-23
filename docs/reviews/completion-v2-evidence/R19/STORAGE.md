@@ -1,0 +1,41 @@
+# R19 inactive S3 adapter slice
+
+This is local foundation evidence only. The application does not instantiate this adapter, load its configuration at startup, route an upload through it, or use its probe for readiness. No schema, migration, consumer, real bucket, tracked upload, deployment or provider was changed. R19/R15 and durable application storage remain OPEN.
+
+## Identity and scope
+
+Implementation follows STORAGE-FOUNDATION.md and master v2.2 R19/R15. Worktree is capital-r19-foundation, native Windows ARM64 Node 24.22.0. Parent-owned dependency commit 9cbd4f9 was copied locally as a8e00e3; exact official @aws-sdk/client-s3 3.1152.0. Parent review counted 25 new lock entries, with no pre-existing dependency changes; installation counts describe a different observation. Own npm ci completed with 706 packages and five existing install-script approval warnings; no claim is made that every native install script ran. Storage tests do not require OCR/native image processing.
+
+New sources: server/core/storage.ts and storage/{config,s3,memory}.ts. Parent explicitly transferred the legacy import guard plus its focused tests after it falsely rejected the specified core/storage.ts interface. Other package/lock/guards remain parent-owned. Shared schema and migrations remain R01-owned.
+
+## Implemented boundary
+
+The backend interface has generated opaque purpose/UUID keys, SHA-256/size/media-type metadata and typed failures. Application consumers must reauthorize parent visibility and compare returned metadata to the future durable manifest; this low-level adapter is not user authorization or metadata persistence. MemoryObjectStore is explicitly a nonpersistent owned fixture.
+
+Configuration is pure and absent when unconfigured. It requires an explicit S3 driver, HTTPS endpoint, bucket, region and static credentials, rejects partial/unknown options, endpoint userinfo/query/fragment/path/port-zero and insecure transport, and never selects ambient AWS credentials. No client is constructed or request dispatched on module import. The production factory revalidates input, supplies explicit credentials/endpoint/region, one attempt, no region redirects or S3 Express session authentication, and a verifying HTTPS agent. Constructor inspection tests verify the actual SDK-selected credentials, attempt count and HTTPS agent policy without a connection. The local HTTP client is injected only in the owned test fixture; no production HTTP environment bypass exists.
+
+Put snapshots input identity/bytes, sends conditional create plus SHA-256, then reads back and verifies actual bytes, metadata and returned version before success. ETag is never a checksum. Existing key conflicts fail; failed/lost write acknowledgements and failed readback retain unknown outcome. Reads bound metadata/body size and hash, abort stalled streams, and destroy owned streams. Delete is idempotent for missing objects; failures remain typed for later durable retry. The whole operation has an outer deadline and forwards cancellation to the SDK; it does not return late success. Bucket probe is only bounded reachability/authorization via HeadBucket, not proof of write permissions or durability.
+
+Version returned by put is bound to its immediate readback. Later application version selection, all-version erasure, lifecycle reconciliation and durable cleanup identities require the separately owned manifest/consumer design; this adapter alone does not certify deletion of historical versions or erasure completeness. No storage manifests or ready states are written here.
+
+## Tests and bounded proof
+
+New contract tests initially failed collection because the new modules did not exist; this is recorded as scaffolding evidence, not a behavioral red count. Actual owned SDK corruption tests then exposed two behavioral failures: the SDK checksum stream throws a plain checksum-mismatch Error, which initially mapped to unavailable. That pinned SDK failure is now normalized to INTEGRITY without forwarding the raw message, with unknown write outcome retained. The legacy guard also reproduced a real static failure on six new source/test imports before target resolution was repaired.
+
+Protected focused command selects core/__tests__/completion-r19.storage.test.ts, completion-r19.s3.test.ts and completion-r19.s3-owned.test.ts. Final result: 3 files, 41 tests passed. Coverage includes explicit/partial/unknown configuration, no ambient credential selection, opaque keys, immutable bytes, corruption/missing metadata/size mismatch, version readback, typed 403/404/412/503 failures, idempotent deletion, no pre-aborted dispatch, deadline/caller abort, stale write-result rejection, and normal factory construction with no send.
+
+The actual SDK fixture is a process-owned numeric 127.0.0.1 ephemeral HTTP server with synthetic credentials and in-memory objects. The ordinary protected unit network guard remains installed; no test target or other endpoint is allowed. TLS/provider dispatch guard was not disabled. Fixture observes AWS4 Authorization header format, rejects any ACL header, validates incoming SHA-256 bytes/header/metadata, and supports PUT/GET/HEAD/DELETE/HeadBucket. The normal lifecycle observes nine requests, all with the expected synthetic signed-header form, one checked write and an intentionally unrelated ETag. This checks SDK serialization/header form; it is not independent cryptographic signature validation or a real S3 authorization claim.
+
+Actual local fault cases include forbidden/unavailable response with no automatic retry, tampered bytes/wrong checksum, hanging HTTP request, hanging response stream, caller cancellation after dispatch, and an object written with lost acknowledgement. The last case returns unknown, then a separate read reconciles the stored bytes; it never invents a successful upload. Clients, streams, sockets and listeners are closed after each fixture. No real filesystem upload or database record is used.
+
+The legacy import guard now resolves actual relative/file/absolute targets to server/storage(.ts/.js/.tsx/.jsx), retaining the exact importer allowlist. Core interface imports need no new allowlist exceptions. Four native Node guard tests pass across normalized paths, extensions, query/fragment, percent encoding, file URL, dynamic, require, side-effect and allowlisted cases. Fresh npm run check passes TypeScript and every repository guard. No broad suite was run by this worker.
+
+## Remaining gates
+
+Before consumer changes: obtain R01 metadata allocation and individual consumer locks; add pending/ready/delete_pending/reconciliation records and protected synthetic DB proofs. Migrate receipts, attachments and other file consumers only with canonical authorization/DTO contracts. Preserve all 30 tracked upload files until a reviewed source/target hash manifest and rollback plan authorize removal. Receipt-to-ledger behavior remains dependent on R08/R15, and export/erasure on R07.
+
+OI-01 still supplies real provider endpoints, credentials, CA/identity and operator. Under separate authorization, prove real service compatibility, checksums/conditional writes/versioning, private retrieval, outages, redeploy survival and operator alerts. Combined object plus PostgreSQL restore/rollback must meet RPO 24h / RTO 4h with erasure markers. OI-06 governs deployment/production enablement. The local adapter and owned fake prove none of those external gates, and Redis is not durable job/AI authority.
+
+## Review correction: configured import aliases
+
+Independent review proved the new guard's bare-specifier branch exempted configured TypeScript aliases which resolve to the legacy database module: @shared/../server/storage and @/../../server/storage. A focused regression returned exit 0 before repair. Bare specifiers now use installed TypeScript module resolution with the actual tsconfig and a resolution cache, while relative/file/absolute canonical checks remain. The fixture includes the real alias mappings and an actual legacy file; all three alias variants, including explicit .ts, now refuse. Final guard result: 5/5 pass; direct guard on the full worktree also passes. Core interface imports still need no added allowlist entries. Other logging changes remained uncommitted and separate from this correction.

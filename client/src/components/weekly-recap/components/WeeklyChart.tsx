@@ -8,9 +8,11 @@ import {
   Tooltip,
 } from "recharts";
 import { useFormatters } from "@/contexts/SettingsContext";
+import { formatCapturedWorth, snapshotCalendarDate } from "../formatCapturedWorth";
 
 interface WeeklyChartProps {
-  data: Array<{ date: string; value: number }>;
+  data: Array<{ date: string; value: number; currency?: string }>;
+  currency?: string;
   color?: string;
   height?: number;
   title?: string;
@@ -21,6 +23,7 @@ export default function WeeklyChart({
   color = "hsl(var(--chart-1))",
   height = 200,
   title = "Weekly financial data",
+  currency,
 }: WeeklyChartProps) {
   const { formatCurrency, formatDate } = useFormatters();
 
@@ -30,8 +33,9 @@ export default function WeeklyChart({
     const firstValue = data[0]?.value ?? 0;
     const lastValue = data[data.length - 1]?.value ?? 0;
     const trend = lastValue > firstValue ? "increased" : lastValue < firstValue ? "decreased" : "remained stable";
-    return `${title}. Values ${trend} from ${formatCurrency(firstValue)} to ${formatCurrency(lastValue)} over ${data.length} data points.`;
-  }, [data, formatCurrency, title]);
+    const first = data[0], last = data[data.length - 1];
+    return `${title}. Values ${trend} from ${formatCapturedWorth(firstValue, first.currency || currency, formatCurrency)} on ${formatDate(snapshotCalendarDate(first.date))} to ${formatCapturedWorth(lastValue, last.currency || currency, formatCurrency)} on ${formatDate(snapshotCalendarDate(last.date))} over ${data.length} data points.`;
+  }, [data, formatCurrency, formatDate, title, currency]);
 
   return (
     <div
@@ -50,7 +54,7 @@ export default function WeeklyChart({
           <XAxis
             dataKey="date"
             tickFormatter={(val) =>
-              new Date(val).toLocaleDateString(undefined, { weekday: "short" })
+              snapshotCalendarDate(val).toLocaleDateString(undefined, { weekday: "short" })
             }
             axisLine={false}
             tickLine={false}
@@ -64,8 +68,8 @@ export default function WeeklyChart({
               borderRadius: "var(--radius)",
               boxShadow: "var(--shadow-md)",
             }}
-            formatter={(val: number) => [formatCurrency(val), "Value"]}
-            labelFormatter={(label) => formatDate(label)}
+            formatter={(val: number, _name, item) => [formatCapturedWorth(val, item.payload?.currency || currency, formatCurrency), "Value"]}
+            labelFormatter={(label) => formatDate(snapshotCalendarDate(String(label)))}
           />
           <Area
             type="monotone"
@@ -88,8 +92,8 @@ export default function WeeklyChart({
         <tbody>
           {data.map((point, index) => (
             <tr key={index}>
-              <td>{formatDate(point.date)}</td>
-              <td>{formatCurrency(point.value)}</td>
+              <td>{formatDate(snapshotCalendarDate(point.date))}</td>
+              <td>{formatCapturedWorth(point.value, point.currency || currency, formatCurrency)}</td>
             </tr>
           ))}
         </tbody>

@@ -7,9 +7,24 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { parseMoneyInputDecimal, parseMoneyString } from "@/lib/money";
+import Decimal from "decimal.js";
+import { parseMoneyInputDecimal } from "@/lib/money";
+
+// A 15-digit gross amount times a percentage with four fractional digits
+// must stay exact until the single rounding of the withheld amount.
+const IncomeDecimal = Decimal.clone({ precision: 32 });
+
+export function calculateInvestmentIncome(grossAmount: string, rate: string) {
+  const gross = parseMoneyInputDecimal(grossAmount);
+  const percent = parseMoneyInputDecimal(rate);
+  if (!gross || gross.lte(0) || gross.gte("10000000000000") || gross.decimalPlaces() > 2 ||
+      !percent || percent.lt(0) || percent.gt(100) || percent.decimalPlaces() > 4) return null;
+  const withheld = new IncomeDecimal(gross).times(percent).dividedBy(100).toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+  return { gross, withheld, net: gross.minus(withheld) };
+}
 
 type InvestmentIncomeFormProps = {
+  income: ReturnType<typeof calculateInvestmentIncome>;
   grossAmount: string;
   onGrossAmountChange: (value: string) => void;
   whtRate: string;
@@ -23,6 +38,7 @@ type InvestmentIncomeFormProps = {
 };
 
 export function InvestmentIncomeForm({
+  income,
   grossAmount,
   onGrossAmountChange,
   whtRate,
@@ -34,18 +50,6 @@ export function InvestmentIncomeForm({
   formatCurrency,
   currency,
 }: InvestmentIncomeFormProps) {
-  const grossDecimal =
-    parseMoneyInputDecimal(grossAmount) ?? parseMoneyString(0);
-  const whtDecimal = (
-    parseMoneyInputDecimal(whtRate) ?? parseMoneyString(0)
-  ).dividedBy(100);
-  const whtAmountDecimal = grossDecimal.times(whtDecimal);
-  const netAmountDecimal = grossDecimal.minus(whtAmountDecimal);
-
-  const gross = grossDecimal.toNumber();
-  const whtAmount = whtAmountDecimal.toNumber();
-  const netAmount = netAmountDecimal.toNumber();
-
   return (
     <>
       <div className="space-y-2">
@@ -68,6 +72,7 @@ export function InvestmentIncomeForm({
             onValueChange={(value) => {
               if (value === "custom") {
                 onCustomWhtChange(true);
+                onWhtRateChange("");
               } else {
                 onCustomWhtChange(false);
                 onWhtRateChange(value);
@@ -75,11 +80,11 @@ export function InvestmentIncomeForm({
             }}
           >
             <SelectTrigger>
-              <SelectValue />
+              <SelectValue placeholder="Choose the recorded rate" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="0">0% (Exempt)</SelectItem>
-              <SelectItem value="15">15% (Standard)</SelectItem>
+              <SelectItem value="0">0%</SelectItem>
+              <SelectItem value="15">15%</SelectItem>
               <SelectItem value="20">20%</SelectItem>
               <SelectItem value="custom">Custom Rate</SelectItem>
             </SelectContent>
@@ -87,15 +92,16 @@ export function InvestmentIncomeForm({
         </div>
         {customWht && (
           <div className="space-y-2">
-            <Label>Custom Rate (%)</Label>
+            <Label htmlFor="investment-income-custom-rate">Custom Rate (%) · up to 4 decimal places</Label>
             <Input
+              id="investment-income-custom-rate"
               type="number"
               placeholder="15"
               value={whtRate}
               onChange={(event) => onWhtRateChange(event.target.value)}
               min="0"
               max="100"
-              step="0.1"
+              step="0.0001"
             />
           </div>
         )}
@@ -110,20 +116,20 @@ export function InvestmentIncomeForm({
         />
       </div>
 
-      {gross > 0 && (
+      {income && currency && (
         <div className="p-4 bg-muted/50 rounded-lg space-y-2">
           <div className="flex justify-between text-sm">
             <span className="text-muted-foreground">Gross Amount</span>
-            <span>{formatCurrency(gross, currency ?? undefined)}</span>
+            <span>{formatCurrency(income.gross.toNumber(), currency)}</span>
           </div>
           <div className="flex justify-between text-sm text-rose-600">
             <span>WHT Deducted ({whtRate}%)</span>
-            <span>-{formatCurrency(whtAmount, currency ?? undefined)}</span>
+            <span>-{formatCurrency(income.withheld.toNumber(), currency)}</span>
           </div>
           <div className="flex justify-between text-sm border-t pt-2">
             <span className="text-muted-foreground">Net Amount</span>
             <span className="font-bold text-emerald-600">
-              {formatCurrency(netAmount, currency ?? undefined)}
+              {formatCurrency(income.net.toNumber(), currency)}
             </span>
           </div>
         </div>

@@ -19,7 +19,6 @@ import * as fs from "fs";
 import { randomUUID } from "crypto";
 import { householdGuard } from "../../middleware/householdGuard";
 import { requireRole, validateEntity } from "../../middleware/validateEntity";
-import { generalLimiter } from "../../middleware/rateLimit";
 import { asyncHandler } from "../../utils/errorHandler";
 import { transactionsController } from "./transactions.controller";
 import { transactionsBulkController } from "./transactions.bulk.controller";
@@ -41,8 +40,6 @@ const ALLOWED_ATTACHMENT_MIME_TYPES = Object.keys(
 // All transaction routes require authentication and household membership
 router.use(householdGuard);
 
-// Apply rate limiting to all transaction routes (CLAUDE.md Section 12)
-router.use(generalLimiter);
 
 // ============================================================================
 // CORE TRANSACTION ENDPOINTS

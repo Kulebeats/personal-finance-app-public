@@ -68,8 +68,8 @@ check(
   "render.yaml must start the production backend",
 );
 check(
-  contains(render, "healthCheckPath: /healthz"),
-  "render.yaml must expose /healthz as the deploy health check",
+  contains(render, "healthCheckPath: /health/ready"),
+  "render.yaml must use the readiness endpoint /health/ready as the deploy health check",
 );
 check(
   contains(render, "fromDatabase:") && contains(render, "personal-finance-db"),
@@ -84,6 +84,14 @@ check(
 check(
   contains(render, "key: SESSION_SECRET") && contains(render, "generateValue: true"),
   "render.yaml must generate SESSION_SECRET",
+);
+check(
+  /- key: CRON_SECRET\r?\n\s+generateValue: true/.test(render),
+  "render.yaml must generate CRON_SECRET (without it every /api/cron request is refused)",
+);
+check(
+  /- key: SCHEDULER_ENABLED\r?\n\s+value: "true"/.test(render),
+  "render.yaml must run the in-process scheduler (SCHEDULER_ENABLED=true)",
 );
 check(
   contains(render, "key: CLIENT_URL") && contains(render, "key: APP_URL"),

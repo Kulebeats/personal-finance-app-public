@@ -237,8 +237,9 @@ describe("Reports Page Integration", () => {
     fireEvent.click(screen.getByText("Income"));
 
     await waitFor(() => {
-      expect(screen.getByText("$10,500")).toBeDefined(); // Total income
-      expect(screen.getByText("$6,200")).toBeDefined(); // Total expenses
+      // To the cent, in the amount's own currency (never rounded to whole units).
+      expect(screen.getByText("US$10,500.00")).toBeDefined(); // Total income
+      expect(screen.getByText("US$6,200.00")).toBeDefined(); // Total expenses
     });
   });
 

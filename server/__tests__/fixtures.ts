@@ -9,6 +9,7 @@ import { app } from "../app";
 import { registerRoutes } from "../routes";
 
 import { apiErrorMiddleware } from "../utils/errorHandler";
+import { apiNotFound } from "../middleware/apiNotFound";
 import { Request, Response, NextFunction } from "express";
 
 let routesRegistered = false;
@@ -20,6 +21,9 @@ let routesRegistered = false;
 export async function getTestApp() {
   if (!routesRegistered) {
     await registerRoutes(app);
+
+    // Unknown /api paths answer a JSON 404, as in app.ts
+    app.use("/api", apiNotFound);
 
     // Add error handling middleware to match app.ts
     app.use(apiErrorMiddleware);

@@ -1,0 +1,2 @@
+ALTER TABLE "transaction_create_owner_intents" ADD COLUMN "request_digest" text;--> statement-breakpoint
+ALTER TABLE "transaction_create_owner_intents" ADD CONSTRAINT "transaction_create_request_digest" CHECK ("transaction_create_owner_intents"."request_digest" IS NULL OR ("transaction_create_owner_intents"."operation" = 'ordinary' AND "transaction_create_owner_intents"."request_digest" ~ '^v1:[0-9a-f]{64}$'));

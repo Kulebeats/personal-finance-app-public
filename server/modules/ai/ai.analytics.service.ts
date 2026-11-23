@@ -13,33 +13,55 @@ import { db } from "../../db";
 import { Money } from "../../core/money";
 import {
   transactions,
-  goals,
-  budgets,
   accounts,
   recurringTransactions,
   categories,
   merchants,
 } from "@shared/schema";
 import { eq, and, gte, lte, desc, sql } from "drizzle-orm";
-import { subDays, subMonths, format } from "date-fns";
+import { format } from "date-fns";
+import { householdMonthRange, LEGACY_HOUSEHOLD_CALENDAR_ZONE, shiftCalendarDate } from "@shared/household-calendar";
 import type {
   SpendingByCategoryResult,
   GoalStatusResult,
+  GoalAssignmentResult,
   UpcomingRecurringResult,
   BudgetStatusResult,
   TopMerchantResult,
   MonthlyTrendResult,
+  CategoryTrendResult,
   RecentTransactionResult,
   AccountBalanceResult,
   QueryContext,
 } from "./ai.types";
 import { logger } from "../../utils/logger";
+import { readCurrentCategoryBudgetLimits } from "../../repositories/BudgetCurrentLimitRepository";
+import { readBudgetMoney } from "../../core/money/budget-denomination";
+import { visibleAccountPredicate } from "../../core/authz/transaction-visibility";
+import { couponCashDescriptionFields } from "../../services/grz/couponCashDescription";
+import { visibleRulePredicate } from "../../services/recurring/RecurringAudienceQuery";
+import { householdToday } from "../../services/householdCalendarToday";
 import {
+  requireFinancialReadActor,
   transactionPrivacyFilters,
-  goalPrivacyFilters,
   accountPrivacyFilters,
   recurringPrivacyFilters,
 } from "./ai.privacy-filters";
+import { readGoalAssignments, readGoalsStatus } from "./ai.goal-readers";
+import { projectCashFlow, type CashFlowPoint } from "./ai.cashflow-projection";
+import { readCategorySpending, readCategoryTrends, readMerchantSpending, readMonthlySummary } from "./ai.flow-analytics";
+
+function calendarMonth(date: string, offset = 0) {
+  // This is already a household calendar date. Use UTC only for date arithmetic.
+  return householdMonthRange(new Date(`${date}T00:00:00Z`), LEGACY_HOUSEHOLD_CALENDAR_ZONE, offset);
+}
+
+function monthsBefore(date: string, months: number): string {
+  const { from, to } = calendarMonth(date, -months);
+  const requestedDay = date.slice(8);
+  const lastDay = to.slice(8);
+  return `${from.slice(0, 8)}${requestedDay <= lastDay ? requestedDay : lastDay}`;
+}
 
 /**
  * AI Analytics Service Class
@@ -55,47 +77,7 @@ export class AIAnalyticsService {
     period: "7d" | "30d" | "90d" | "12m",
   ): Promise<SpendingByCategoryResult[]> {
     try {
-      const { householdId, currency, userId } = context;
-      const startDate = this.getPeriodStartDate(period);
-
-      const results = await db
-        .select({
-          categoryId: transactions.categoryId,
-          categoryName: categories.name,
-          total: sql<string>`SUM(${transactions.amount})`,
-          count: sql<number>`COUNT(*)::int`,
-        })
-        .from(transactions)
-        .innerJoin(accounts, eq(transactions.accountId, accounts.id))
-        .leftJoin(categories, eq(transactions.categoryId, categories.id))
-        .where(
-          and(
-            ...transactionPrivacyFilters(householdId, userId),
-            eq(transactions.type, "expense"),
-            gte(transactions.date, startDate),
-          ),
-        )
-        .groupBy(transactions.categoryId, categories.name)
-        .orderBy(desc(sql`SUM(${transactions.amount})`));
-
-      // Calculate total for percentage
-      const total = results.reduce(
-        (sum, r) => sum.add(Money.from(r.total, currency)),
-        Money.zero(currency),
-      );
-
-      return results.map((row) => ({
-        category: row.categoryName || "Uncategorized",
-        amount: Money.from(row.total, currency), // Use Money class
-        transactionCount: row.count,
-        // FIX Money Rule 1: Keep Money through calculation, convert only at end
-        percentOfTotal: total.isPositive()
-          ? Money.from(row.total, currency)
-              .divide(total.toString())
-              .multiply("100")
-              .toNumber()
-          : 0,
-      }));
+      return await readCategorySpending(context, await this.getPeriodRange(context, period));
     } catch (error) {
       logger.error("Failed to get spending by category", { error, context });
       throw error;
@@ -108,45 +90,7 @@ export class AIAnalyticsService {
    */
   async getGoalsStatus(context: QueryContext): Promise<GoalStatusResult[]> {
     try {
-      const { householdId, currency } = context;
-
-      const goalsList = await db
-        .select()
-        .from(goals)
-        .where(and(...goalPrivacyFilters(householdId)))
-        .orderBy(desc(goals.createdAt));
-
-      return goalsList.map((goal) => {
-        const target = Money.from(goal.targetAmount, currency);
-        const current = Money.from(goal.currentAmount, currency);
-
-        // Determine status
-        let status: "on_track" | "behind" | "ahead" | "completed";
-        if (current.gte(target)) {
-          status = "completed";
-        } else {
-          // Simple heuristic: compare progress to expected progress
-          // FIX Money Rule 1: Keep Money through calculation
-          const progress = target.isPositive()
-            ? current.divide(target.toString()).toNumber()
-            : 0;
-          if (progress >= 0.8) status = "ahead";
-          else if (progress >= 0.5) status = "on_track";
-          else status = "behind";
-        }
-
-        return {
-          goalId: goal.id,
-          name: goal.name,
-          target,
-          current,
-          status,
-          projectedCompletion: goal.targetDate,
-          monthlyContribution: goal.monthlyProjection
-            ? Money.from(goal.monthlyProjection, currency)
-            : Money.zero(currency),
-        };
-      });
+      return await readGoalsStatus(requireFinancialReadActor(context), context.currency);
     } catch (error) {
       logger.error("Failed to get goals status", { error, context });
       throw error;
@@ -162,6 +106,7 @@ export class AIAnalyticsService {
   ): Promise<UpcomingRecurringResult[]> {
     try {
       const { householdId, currency } = context;
+      const actor = requireFinancialReadActor(context);
       const endDate = format(
         new Date(Date.now() + days * 24 * 60 * 60 * 1000),
         "yyyy-MM-dd",
@@ -184,6 +129,7 @@ export class AIAnalyticsService {
         .where(
           and(
             ...recurringPrivacyFilters(householdId),
+            visibleRulePredicate(actor),
             lte(recurringTransactions.nextDueDate, endDate),
           ),
         )
@@ -209,74 +155,36 @@ export class AIAnalyticsService {
   async getBudgetStatus(context: QueryContext): Promise<BudgetStatusResult[]> {
     try {
       const { householdId, currency, userId } = context;
-      const currentMonth = format(new Date(), "yyyy-MM");
+      const currentMonth = new Date().toISOString().slice(0, 7);
       const monthStart = `${currentMonth}-01`;
+      const last = new Date(`${monthStart}T00:00:00Z`); last.setUTCMonth(last.getUTCMonth() + 1); last.setUTCDate(0);
 
-      // Get active budgets for household
-      const budgetsList = await db
-        .select({
-          categoryId: budgets.categoryId,
-          amount: budgets.amount,
-          categoryName: categories.name,
-        })
-        .from(budgets)
-        .leftJoin(categories, eq(budgets.categoryId, categories.id))
-        .where(
-          and(eq(budgets.householdId, householdId), eq(budgets.isActive, true)),
-        );
+      const limits = await readCurrentCategoryBudgetLimits(householdId, userId, currency, monthStart, last.toISOString().slice(0, 10));
+      return limits.map(budget => {
+        const budgeted = readBudgetMoney(budget.amount, budget.currency, currency);
+        const spent = Money.from(budget.spent, currency);
+        const remaining = budgeted.subtract(spent);
+        // FIX Money Rule 1: Keep Money through calculation
+        const percentUsed = budgeted.isPositive()
+          ? spent.divide(budgeted.toString()).multiply("100").toNumber()
+          : 0;
 
-      if (budgetsList.length === 0) {
-        return [];
-      }
+        let status: "under_budget" | "near_limit" | "over_budget";
+        // Any spending against a zero budget is over it (no 0% "under budget").
+        if (percentUsed > 100 || (!budgeted.isPositive() && spent.isPositive())) status = "over_budget";
+        else if (percentUsed > 85) status = "near_limit";
+        else status = "under_budget";
 
-      // Get spending for current month (with privacy filters)
-      const spending = await db
-        .select({
-          categoryId: transactions.categoryId,
-          total: sql<string>`SUM(${transactions.amount})`,
-        })
-        .from(transactions)
-        .innerJoin(accounts, eq(transactions.accountId, accounts.id))
-        .where(
-          and(
-            ...transactionPrivacyFilters(householdId, userId),
-            eq(transactions.type, "expense"),
-            gte(transactions.date, monthStart),
-          ),
-        )
-        .groupBy(transactions.categoryId);
-
-      const spendingMap = new Map(
-        spending.map((s) => [s.categoryId!, Money.from(s.total, currency)]),
-      );
-
-      return budgetsList
-        .filter((budget) => budget.categoryId !== null)
-        .map((budget) => {
-          const budgeted = Money.from(budget.amount, currency);
-          const spent =
-            spendingMap.get(budget.categoryId!) || Money.zero(currency);
-          const remaining = budgeted.subtract(spent);
-          // FIX Money Rule 1: Keep Money through calculation
-          const percentUsed = budgeted.isPositive()
-            ? spent.divide(budgeted.toString()).multiply("100").toNumber()
-            : 0;
-
-          let status: "under_budget" | "near_limit" | "over_budget";
-          if (percentUsed > 100) status = "over_budget";
-          else if (percentUsed > 85) status = "near_limit";
-          else status = "under_budget";
-
-          return {
-            categoryId: budget.categoryId!,
-            categoryName: budget.categoryName || "Unknown",
-            budgeted,
-            spent,
-            remaining,
-            percentUsed,
-            status,
-          };
-        });
+        return {
+          categoryId: budget.categoryId!,
+          categoryName: budget.categoryName || "Unknown",
+          budgeted,
+          spent,
+          remaining,
+          percentUsed,
+          status,
+        };
+      });
     } catch (error) {
       logger.error("Failed to get budget status", { error, context });
       throw error;
@@ -291,13 +199,14 @@ export class AIAnalyticsService {
     limit: number = 20,
   ): Promise<RecentTransactionResult[]> {
     try {
-      const { householdId, currency, userId } = context;
+      const { currency } = context;
+      const filters = transactionPrivacyFilters(requireFinancialReadActor(context));
 
       const txns = await db
         .select({
           id: transactions.id,
           date: transactions.date,
-          name: transactions.name,
+          name: couponCashDescriptionFields().name,
           amount: transactions.amount,
           categoryName: categories.name,
           merchantName: merchants.name,
@@ -306,7 +215,7 @@ export class AIAnalyticsService {
         .innerJoin(accounts, eq(transactions.accountId, accounts.id))
         .leftJoin(categories, eq(transactions.categoryId, categories.id))
         .leftJoin(merchants, eq(transactions.merchantId, merchants.id))
-        .where(and(...transactionPrivacyFilters(householdId, userId)))
+        .where(and(...filters))
         .orderBy(desc(transactions.date), desc(transactions.createdAt))
         .limit(limit);
 
@@ -331,19 +240,22 @@ export class AIAnalyticsService {
     context: QueryContext,
   ): Promise<AccountBalanceResult[]> {
     try {
-      const { householdId, currency, userId } = context;
+      const { householdId, userId } = context;
+      const actor = requireFinancialReadActor(context);
 
       const accountsList = await db
         .select()
         .from(accounts)
-        .where(and(...accountPrivacyFilters(householdId, { userId })))
+        .where(and(...accountPrivacyFilters(householdId, { userId }), visibleAccountPredicate(actor)))
         .orderBy(accounts.isArchived, accounts.name);
 
       return accountsList.map((account) => ({
         accountId: account.id,
         accountName: account.name,
         accountType: account.type,
-        balance: Money.from(account.balance, currency),
+        // Astra A-07: each balance in its own account's currency, never the household's.
+        balance: Money.from(account.balance, account.currency),
+        currency: account.currency,
         isActive: !account.isArchived,
       }));
     } catch (error) {
@@ -361,40 +273,7 @@ export class AIAnalyticsService {
     limit: number = 20,
   ): Promise<TopMerchantResult[]> {
     try {
-      const { householdId, currency, userId } = context;
-      const startDate = this.getPeriodStartDate(period);
-
-      const results = await db
-        .select({
-          merchantId: transactions.merchantId,
-          merchantName: merchants.name,
-          total: sql<string>`SUM(${transactions.amount})`,
-          count: sql<number>`COUNT(*)::int`,
-          avgAmount: sql<string>`AVG(${transactions.amount})`,
-        })
-        .from(transactions)
-        .innerJoin(accounts, eq(transactions.accountId, accounts.id))
-        .leftJoin(merchants, eq(transactions.merchantId, merchants.id))
-        .where(
-          and(
-            ...transactionPrivacyFilters(householdId, userId),
-            eq(transactions.type, "expense"),
-            gte(transactions.date, startDate),
-          ),
-        )
-        .groupBy(transactions.merchantId, merchants.name)
-        .orderBy(desc(sql`SUM(${transactions.amount})`))
-        .limit(limit);
-
-      return results
-        .filter((row) => row.merchantId !== null)
-        .map((row) => ({
-          merchantId: row.merchantId!,
-          merchantName: row.merchantName || "Unknown Merchant",
-          totalSpent: Money.from(row.total, currency),
-          transactionCount: row.count,
-          avgTransactionAmount: Money.from(row.avgAmount, currency),
-        }));
+      return await readMerchantSpending(context, await this.getPeriodRange(context, period), limit);
     } catch (error) {
       logger.error("Failed to get merchant spending", { error, context });
       throw error;
@@ -408,113 +287,10 @@ export class AIAnalyticsService {
     context: QueryContext,
     months: number = 6,
     categoryId?: string,
-  ): Promise<
-    Array<{
-      categoryId: string;
-      categoryName: string;
-      points: Array<{ month: string; amount: Money }>;
-      trendDirection: "up" | "down" | "flat";
-    }>
-  > {
+  ): Promise<CategoryTrendResult[]> {
     try {
-      const { householdId, currency, userId } = context;
-      const startDate = format(subMonths(new Date(), months), "yyyy-MM-dd");
-
-      // Build category filter
-      const categoryFilter = categoryId
-        ? eq(transactions.categoryId, categoryId)
-        : undefined;
-
-      const results = await db
-        .select({
-          categoryId: transactions.categoryId,
-          categoryName: categories.name,
-          month: sql<string>`TO_CHAR(${transactions.date}::date, 'YYYY-MM')`,
-          total: sql<string>`SUM(${transactions.amount})`,
-        })
-        .from(transactions)
-        .innerJoin(accounts, eq(transactions.accountId, accounts.id))
-        .leftJoin(categories, eq(transactions.categoryId, categories.id))
-        .where(
-          and(
-            ...transactionPrivacyFilters(householdId, userId),
-            eq(transactions.type, "expense"),
-            gte(transactions.date, startDate),
-            categoryFilter,
-          ),
-        )
-        .groupBy(
-          transactions.categoryId,
-          categories.name,
-          sql`TO_CHAR(${transactions.date}::date, 'YYYY-MM')`,
-        )
-        .orderBy(sql`TO_CHAR(${transactions.date}::date, 'YYYY-MM')`);
-
-      // Group by category
-      const categoryMap = new Map<
-        string,
-        {
-          categoryId: string;
-          categoryName: string;
-          points: Array<{ month: string; amount: Money }>;
-        }
-      >();
-
-      for (const row of results) {
-        if (!row.categoryId) continue;
-
-        const key = row.categoryId;
-        if (!categoryMap.has(key)) {
-          categoryMap.set(key, {
-            categoryId: row.categoryId,
-            categoryName: row.categoryName || "Uncategorized",
-            points: [],
-          });
-        }
-
-        categoryMap.get(key)!.points.push({
-          month: row.month,
-          amount: Money.from(row.total, currency),
-        });
-      }
-
-      // Calculate trend direction for each category
-      return Array.from(categoryMap.values()).map((category) => {
-        const points = category.points;
-        let trendDirection: "up" | "down" | "flat" = "flat";
-
-        if (points.length >= 2) {
-          const firstHalf = points.slice(0, Math.floor(points.length / 2));
-          const secondHalf = points.slice(Math.floor(points.length / 2));
-
-          // FIX Money Rule 1: Use Money for aggregation, divide at end
-          const firstSum = firstHalf.reduce(
-            (sum, p) => sum.add(p.amount),
-            Money.zero(currency),
-          );
-          const secondSum = secondHalf.reduce(
-            (sum, p) => sum.add(p.amount),
-            Money.zero(currency),
-          );
-          const firstAvg = firstSum.divide(firstHalf.length.toString());
-          const secondAvg = secondSum.divide(secondHalf.length.toString());
-
-          const change = firstAvg.isPositive()
-            ? secondAvg
-                .subtract(firstAvg)
-                .divide(firstAvg.toString())
-                .multiply("100")
-                .toNumber()
-            : 0;
-          if (change > 10) trendDirection = "up";
-          else if (change < -10) trendDirection = "down";
-        }
-
-        return {
-          ...category,
-          trendDirection,
-        };
-      });
+      const today = await this.getHouseholdToday(context);
+      return await readCategoryTrends(context, { from: monthsBefore(today, months), to: today }, categoryId);
     } catch (error) {
       logger.error("Failed to get category trends", { error, context });
       throw error;
@@ -529,65 +305,11 @@ export class AIAnalyticsService {
     month?: string,
   ): Promise<MonthlyTrendResult> {
     try {
-      const { householdId, currency, userId } = context;
-      const targetMonth = month || format(new Date(), "yyyy-MM");
-      const monthStart = `${targetMonth}-01`;
-      const monthEnd = format(
-        new Date(
-          Number.parseInt(targetMonth.split("-")[0]),
-          Number.parseInt(targetMonth.split("-")[1]),
-          0,
-        ),
-        "yyyy-MM-dd",
-      );
-
-      // Get income
-      const incomeResult = await db
-        .select({
-          total: sql<string>`COALESCE(SUM(${transactions.amount}), '0')`,
-        })
-        .from(transactions)
-        .innerJoin(accounts, eq(transactions.accountId, accounts.id))
-        .where(
-          and(
-            ...transactionPrivacyFilters(householdId, userId),
-            eq(transactions.type, "income"),
-            gte(transactions.date, monthStart),
-            lte(transactions.date, monthEnd),
-          ),
-        );
-
-      // Get expenses
-      const expenseResult = await db
-        .select({
-          total: sql<string>`COALESCE(SUM(${transactions.amount}), '0')`,
-        })
-        .from(transactions)
-        .innerJoin(accounts, eq(transactions.accountId, accounts.id))
-        .where(
-          and(
-            ...transactionPrivacyFilters(householdId, userId),
-            eq(transactions.type, "expense"),
-            gte(transactions.date, monthStart),
-            lte(transactions.date, monthEnd),
-          ),
-        );
-
-      const income = Money.from(incomeResult[0]?.total || "0", currency);
-      const expenses = Money.from(expenseResult[0]?.total || "0", currency);
-      const netSavings = income.subtract(expenses);
-      // FIX Money Rule 1: Keep Money through calculation
-      const savingsRate = income.isPositive()
-        ? netSavings.divide(income.toString()).multiply("100").toNumber()
-        : 0;
-
-      return {
-        month: targetMonth,
-        income,
-        expenses,
-        netSavings,
-        savingsRate,
-      };
+      const today = await this.getHouseholdToday(context);
+      const currentMonth = today.slice(0, 7);
+      const targetMonth = month || currentMonth;
+      const { from, to } = calendarMonth(`${targetMonth}-01`);
+      return await readMonthlySummary(context, targetMonth, { from, to: targetMonth === currentMonth ? today : to });
     } catch (error) {
       logger.error("Failed to get monthly summary", { error, context });
       throw error;
@@ -611,7 +333,7 @@ export class AIAnalyticsService {
     },
   ): Promise<RecentTransactionResult[]> {
     try {
-      const { householdId, currency, userId } = context;
+      const { currency } = context;
       const {
         text,
         categoryId,
@@ -624,10 +346,11 @@ export class AIAnalyticsService {
       } = params;
 
       // Build dynamic filters
-      const filters = [...transactionPrivacyFilters(householdId, userId)];
+      const filters = transactionPrivacyFilters(requireFinancialReadActor(context));
 
       if (text) {
-        filters.push(sql`${transactions.name} ILIKE ${"%" + text + "%"}`);
+        // R1-05: match the name the ledger shows, so a hidden instrument name is no oracle.
+        filters.push(sql`${couponCashDescriptionFields().name} ILIKE ${"%" + text + "%"}`);
       }
       if (categoryId) {
         filters.push(eq(transactions.categoryId, categoryId));
@@ -652,7 +375,7 @@ export class AIAnalyticsService {
         .select({
           id: transactions.id,
           date: transactions.date,
-          name: transactions.name,
+          name: couponCashDescriptionFields().name,
           amount: transactions.amount,
           categoryName: categories.name,
           merchantName: merchants.name,
@@ -682,40 +405,9 @@ export class AIAnalyticsService {
   /**
    * Get goal-account assignments.
    */
-  async getGoalAssignments(context: QueryContext): Promise<
-    Array<{
-      goalId: string;
-      goalName: string;
-      accountId: string | null;
-      accountName: string | null;
-      target: Money;
-      current: Money;
-    }>
-  > {
+  async getGoalAssignments(context: QueryContext): Promise<GoalAssignmentResult[]> {
     try {
-      const { householdId, currency } = context;
-
-      const goalsList = await db
-        .select({
-          goalId: goals.id,
-          goalName: goals.name,
-          accountId: goals.linkedAccountId,
-          accountName: accounts.name,
-          targetAmount: goals.targetAmount,
-          currentAmount: goals.currentAmount,
-        })
-        .from(goals)
-        .leftJoin(accounts, eq(goals.linkedAccountId, accounts.id))
-        .where(and(...goalPrivacyFilters(householdId)));
-
-      return goalsList.map((g) => ({
-        goalId: g.goalId,
-        goalName: g.goalName,
-        accountId: g.accountId,
-        accountName: g.accountName,
-        target: Money.from(g.targetAmount, currency),
-        current: Money.from(g.currentAmount, currency),
-      }));
+      return await readGoalAssignments(requireFinancialReadActor(context), context.currency);
     } catch (error) {
       logger.error("Failed to get goal assignments", { error, context });
       throw error;
@@ -723,83 +415,14 @@ export class AIAnalyticsService {
   }
 
   /**
-   * Get cash flow projection for upcoming months.
+   * Cash flow projection for the coming months (Astra A-07, A-40): see
+   * ai.cashflow-projection.ts for how frequency and currency are handled.
    */
-  async getCashFlow(
-    context: QueryContext,
-    months: number = 3,
-  ): Promise<
-    Array<{
-      month: string;
-      inflow: Money;
-      outflow: Money;
-      net: Money;
-      projectedEndingBalance: Money | null;
-    }>
-  > {
+  async getCashFlow(context: QueryContext, months: number = 3): Promise<CashFlowPoint[]> {
     try {
-      const { householdId, currency } = context;
-
-      // Get recurring transactions to project cash flow
-      const recurrings = await db
-        .select({
-          amount: recurringTransactions.amount,
-          type: recurringTransactions.type,
-          frequency: recurringTransactions.frequency,
-        })
-        .from(recurringTransactions)
-        .where(and(...recurringPrivacyFilters(householdId)));
-
-      // Get current account balances
-      const accountBalances = await this.getAccountBalances(context);
-      const totalBalance = accountBalances.reduce(
-        (sum, acc) => sum.add(acc.balance),
-        Money.zero(currency),
-      );
-
-      // Generate projections for each month
-      const projections: Array<{
-        month: string;
-        inflow: Money;
-        outflow: Money;
-        net: Money;
-        projectedEndingBalance: Money | null;
-      }> = [];
-
-      let runningBalance = totalBalance;
-
-      for (let i = 0; i < months; i++) {
-        const targetMonth = format(subMonths(new Date(), -i - 1), "yyyy-MM");
-
-        // Sum recurring incomes and expenses
-        let monthlyInflow = Money.zero(currency);
-        let monthlyOutflow = Money.zero(currency);
-
-        for (const recurring of recurrings) {
-          const amount = Money.from(recurring.amount, currency);
-
-          // Simple frequency multiplier (assuming monthly for simplicity)
-          // In production, would calculate based on actual frequency
-          if (recurring.type === "income") {
-            monthlyInflow = monthlyInflow.add(amount);
-          } else {
-            monthlyOutflow = monthlyOutflow.add(amount);
-          }
-        }
-
-        const net = monthlyInflow.subtract(monthlyOutflow);
-        runningBalance = runningBalance.add(net);
-
-        projections.push({
-          month: targetMonth,
-          inflow: monthlyInflow,
-          outflow: monthlyOutflow,
-          net,
-          projectedEndingBalance: runningBalance,
-        });
-      }
-
-      return projections;
+      const actor = requireFinancialReadActor(context);
+      const balances = await this.getAccountBalances(context);
+      return await projectCashFlow({ actor, currency: context.currency, balances, months });
     } catch (error) {
       logger.error("Failed to get cash flow", { error, context });
       throw error;
@@ -810,25 +433,14 @@ export class AIAnalyticsService {
   // HELPER METHODS
   // ============================================================================
 
-  private getPeriodStartDate(period: "7d" | "30d" | "90d" | "12m"): string {
-    const now = new Date();
-    let startDate: Date;
+  private getHouseholdToday(context: QueryContext): Promise<string> {
+    return householdToday(db, requireFinancialReadActor(context).householdId);
+  }
 
-    switch (period) {
-      case "7d":
-        startDate = subDays(now, 7);
-        break;
-      case "30d":
-        startDate = subDays(now, 30);
-        break;
-      case "90d":
-        startDate = subDays(now, 90);
-        break;
-      case "12m":
-        startDate = subMonths(now, 12);
-        break;
-    }
-
-    return format(startDate, "yyyy-MM-dd");
+  private async getPeriodRange(context: QueryContext, period: "7d" | "30d" | "90d" | "12m") {
+    const to = await this.getHouseholdToday(context);
+    const days = { "7d": 7, "30d": 30, "90d": 90 };
+    const from = period === "12m" ? monthsBefore(to, 12) : shiftCalendarDate(to, -days[period]);
+    return { from, to };
   }
 }

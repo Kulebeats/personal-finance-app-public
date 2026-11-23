@@ -63,6 +63,8 @@ vi.mock("@/hooks/use-toast", () => ({
 // Mock fetch delegate: apiCall's CSRF token fetch is served transparently by
 // the global.fetch wrapper installed in beforeEach; real requests land here.
 const mockFetch = vi.fn();
+const downloadFetch = vi.fn();
+const downloadClick = vi.fn();
 
 // Mock use-reports hooks. Spread the real module first so requestReportExport
 // (the export path under test, which attaches x-csrf-token via apiCall) stays
@@ -178,6 +180,15 @@ describe("CashFlow Export", () => {
     });
 
     installMockLocation(originalLocation);
+    downloadFetch.mockReset().mockImplementation(async () => new Response("date,amount", { headers: { "Content-Disposition": 'attachment; filename="cashflow.csv"' } }));
+    downloadClick.mockReset();
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL = vi.fn(() => "blob:cashflow");
+      static revokeObjectURL = vi.fn();
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloadClick({ href: this.href, filename: this.download });
+    });
 
     // Mock fetch. Serve apiCall's CSRF token fetch transparently so it neither
     // consumes per-test once-mocks nor shows up in assertions; everything else
@@ -190,6 +201,7 @@ describe("CashFlow Export", () => {
           json: () => Promise.resolve({ csrfToken: "test-csrf" }),
         } as unknown as Response);
       }
+      if (String(input).endsWith("/download")) return downloadFetch(input, init);
       return mockFetch(input, init);
     }) as unknown as typeof fetch;
 
@@ -199,6 +211,9 @@ describe("CashFlow Export", () => {
 
   afterEach(() => {
     restoreLocation(originalLocation);
+    queryClient.clear();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     vi.clearAllMocks();
   });
 
@@ -257,9 +272,10 @@ describe("CashFlow Export", () => {
       interval: "month",
     });
 
-    // Verify redirect to download URL
+    // The download now uses guarded fetch then a local Blob URL.
     await waitFor(() => {
-      expect(window.location.href).toBe(`/api/reports/exports/${mockExportId}/download`);
+      expect(downloadFetch).toHaveBeenCalledWith(`/api/reports/exports/${mockExportId}/download`, expect.objectContaining({ credentials: "include" }));
+      expect(downloadClick).toHaveBeenCalledWith({ href: "blob:cashflow", filename: "cashflow.csv" });
     });
 
     // Verify success toast

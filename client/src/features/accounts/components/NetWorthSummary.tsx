@@ -3,6 +3,7 @@ import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Account } from "@/lib/api";
 import { AccountTypeGroup, AccountsSummaryData } from "../types";
+import { formatDenominatedAmount } from "@shared/denomination";
 
 export type SummaryMode = "totals" | "percent";
 
@@ -29,10 +30,21 @@ export function NetWorthSummary({
   isExporting,
   getGroupTotal,
 }: NetWorthSummaryProps) {
+  const formatAmount = (value: number) => formatDenominatedAmount(value, data.currency) ?? "Amount unavailable";
+  if (data.available === false || ![data.totalAssets, data.totalLiabilities, data.netWorthValue].every(value => formatDenominatedAmount(value, data.currency) !== null)) return <Card className="p-6 space-y-3">
+    <h2 className="font-bold text-lg">Summary</h2>
+    <p>Visible account-linked wealth</p>
+    {data.status === "checking" ? <p role="status">Checking current access…</p> :
+      <p role="alert">{data.status === "error" ? "Unable to refresh account history. Refresh to try again." : "Valuation unavailable. Refresh to try again."}</p>}
+    <p className="text-sm text-muted-foreground">Legacy instruments without proven account access are not included.</p>
+  </Card>;
   return (
     <Card className="p-6 shadow-sm border-border bg-card">
       <div className="flex items-center justify-between mb-6">
-        <h2 className="font-bold text-lg">Summary</h2>
+        <div><h2 className="font-bold text-lg">Summary</h2>
+          <p className="text-sm text-muted-foreground">Visible account-linked wealth</p>
+          <p className="text-xs text-muted-foreground">Legacy instruments without proven account access are not included.</p>
+        </div>
         {/* HIGH-004: Added ARIA roles for accessibility (WCAG 4.1.2) */}
         <div
           role="radiogroup"
@@ -44,7 +56,7 @@ export function NetWorthSummary({
             aria-checked={summaryMode === "totals"}
             onClick={() => onSummaryModeChange("totals")}
             className={cn(
-              "px-3 py-1 rounded text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-1",
+              "px-3 py-1 rounded text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-1 max-md:min-h-11",
               summaryMode === "totals"
                 ? "bg-card shadow-sm text-foreground"
                 : "text-muted-foreground hover:text-foreground"
@@ -57,7 +69,7 @@ export function NetWorthSummary({
             aria-checked={summaryMode === "percent"}
             onClick={() => onSummaryModeChange("percent")}
             className={cn(
-              "px-3 py-1 rounded text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-1",
+              "px-3 py-1 rounded text-xs font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-1 max-md:min-h-11",
               summaryMode === "percent"
                 ? "bg-card shadow-sm text-foreground"
                 : "text-muted-foreground hover:text-foreground"
@@ -76,10 +88,7 @@ export function NetWorthSummary({
             <span className="font-bold text-foreground">
               {summaryMode === "percent"
                 ? "100%"
-                : `K${data.totalAssets.toLocaleString(undefined, {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}`}
+                : formatAmount(data.totalAssets)}
             </span>
           </div>
 
@@ -88,6 +97,9 @@ export function NetWorthSummary({
             {assetGroups.map((groupName) => {
               const groupAccounts = groupedAccounts[groupName];
               if (!groupAccounts || groupAccounts.length === 0) return null;
+              if (data.currency && groupAccounts.some(account => account.currency !== data.currency)) return <div key={groupName} className="flex justify-between text-sm">
+                <span>{groupName}</span><span>Base-currency breakdown unavailable</span>
+              </div>;
               const total = getGroupTotal(groupAccounts);
               const percent =
                 data.totalAssets > 0 ? (total / data.totalAssets) * 100 : 0;
@@ -104,10 +116,7 @@ export function NetWorthSummary({
                   <span className="font-medium text-foreground">
                     {summaryMode === "percent"
                       ? `${percent.toFixed(1)}%`
-                      : `K${total.toLocaleString(undefined, {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}`}
+                      : formatAmount(total)}
                   </span>
                 </div>
               );
@@ -122,10 +131,7 @@ export function NetWorthSummary({
             <span className="font-bold text-foreground">
               {summaryMode === "percent"
                 ? "100%"
-                : `K${data.totalLiabilities.toLocaleString(undefined, {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}`}
+                : formatAmount(data.totalLiabilities)}
             </span>
           </div>
 
@@ -133,6 +139,9 @@ export function NetWorthSummary({
             {liabilityGroups.map((groupName) => {
               const groupAccounts = groupedAccounts[groupName];
               if (!groupAccounts || groupAccounts.length === 0) return null;
+              if (data.currency && groupAccounts.some(account => account.currency !== data.currency)) return <div key={groupName} className="flex justify-between text-sm">
+                <span>{groupName}</span><span>Base-currency breakdown unavailable</span>
+              </div>;
               const total = Math.abs(getGroupTotal(groupAccounts));
               const percent =
                 data.totalLiabilities > 0
@@ -151,10 +160,7 @@ export function NetWorthSummary({
                   <span className="font-medium text-foreground">
                     {summaryMode === "percent"
                       ? `${percent.toFixed(1)}%`
-                      : `K${total.toLocaleString(undefined, {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}`}
+                      : formatAmount(total)}
                   </span>
                 </div>
               );
@@ -168,7 +174,7 @@ export function NetWorthSummary({
           onClick={onExport}
           disabled={isExporting}
           aria-label={isExporting ? "Downloading CSV export" : "Download CSV export"}
-          className="text-sm font-medium text-emerald-600 hover:text-emerald-700 transition-colors flex items-center justify-center gap-2 mx-auto disabled:opacity-50"
+          className="text-sm font-medium text-emerald-600 hover:text-emerald-700 transition-colors flex items-center justify-center gap-2 mx-auto disabled:opacity-50 max-md:min-h-11"
         >
           {isExporting ? (
             <>

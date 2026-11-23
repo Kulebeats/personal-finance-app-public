@@ -5,6 +5,8 @@ import { NotFoundError } from "../../core/errors/NotFoundError";
 
 // Hoist mocks
 const mockRecurringService = vi.hoisted(() => ({
+  getVisibleRecurringRules: vi.fn(),
+  getVisibleRecurringById: vi.fn(),
   getRecurringRules: vi.fn(),
   getRecurringById: vi.fn(),
   getUpcomingBills: vi.fn(),
@@ -13,15 +15,13 @@ const mockRecurringService = vi.hoisted(() => ({
   deleteRecurring: vi.fn(),
   getSummaryData: vi.fn(),
   // Lifecycle
-  skipNextOccurrence: vi.fn(),
-  pauseRecurring: vi.fn(),
-  resumeRecurring: vi.fn(),
-  endRecurring: vi.fn(),
+  changeLifecycle: vi.fn(),
   // Pattern detection
   detectAndSuggest: vi.fn(),
   confirmPattern: vi.fn(),
   // Linking
   linkTransaction: vi.fn(),
+  linkVisibleTransaction: vi.fn(),
   unlinkTransaction: vi.fn(),
   getLinkedTransactions: vi.fn(),
   // History & batch
@@ -85,7 +85,7 @@ function createTestApp() {
   router.post("/:id/resume", recurringController.resume);
   router.post("/:id/end", recurringController.end);
   router.post("/:id/link", recurringController.linkTransaction);
-  router.delete("/links/:linkId", recurringController.unlinkTransaction);
+  router.delete("/:id/link/:linkId", recurringController.unlinkTransaction);
   router.put("/:id", recurringController.update);
   router.delete("/:id", recurringController.delete);
 
@@ -160,15 +160,12 @@ describe("Recurring Rules Integration", () => {
       expect(response.body.success).toBe(true);
       expect(response.body.data.name).toBe("Netflix Subscription");
 
-      // Verify audit logging
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          householdId,
-          userId: "user-123",
-          entityType: "recurring_rule",
-          entityId: ruleId,
-        })
+      // FIN-13: the service writes the CREATE row inside the rule's transaction.
+      expect(mockRecurringService.createRecurring).toHaveBeenCalledWith(
+        expect.any(Object), householdId, "user-123",
+        expect.objectContaining({ audit: { ipAddress: "127.0.0.1" } }),
       );
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
 
     it("returns 400 for invalid input", async () => {
@@ -193,7 +190,7 @@ describe("Recurring Rules Integration", () => {
         },
       ];
 
-      mockRecurringService.getRecurringRules.mockResolvedValue(rules);
+      mockRecurringService.getVisibleRecurringRules.mockResolvedValue(rules);
 
       const response = await request(app).get("/api/recurring");
 
@@ -204,7 +201,7 @@ describe("Recurring Rules Integration", () => {
 
     it("gets a specific recurring rule by ID", async () => {
       const rule = { id: ruleId, name: "Netflix", frequency: "monthly" };
-      mockRecurringService.getRecurringById.mockResolvedValue(rule);
+      mockRecurringService.getVisibleRecurringById.mockResolvedValue(rule);
 
       const response = await request(app).get(`/api/recurring/${ruleId}`);
 
@@ -222,7 +219,10 @@ describe("Recurring Rules Integration", () => {
         frequency: "monthly",
       };
 
-      mockRecurringService.updateRecurring.mockResolvedValue(updatedRule);
+      mockRecurringService.updateRecurring.mockResolvedValue({
+        beforeRule: { ...updatedRule, name: "Netflix", amount: "15.99" },
+        rule: updatedRule,
+      });
 
       const response = await request(app)
         .put(`/api/recurring/${ruleId}`)
@@ -233,33 +233,39 @@ describe("Recurring Rules Integration", () => {
 
       expect(response.status).toBe(200);
       expect(response.body.data.name).toBe("Netflix Premium");
-
-      // Verify audit logging
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "recurring_rule",
-          entityId: ruleId,
-        })
+      expect(mockRecurringService.updateRecurring).toHaveBeenCalledWith(
+        ruleId,
+        { name: "Netflix Premium", amount: "22.99" },
+        { householdId: "11111111-1111-1111-1111-111111111111", userId: "user-123", role: "owner" },
+        { confirmDenomination: undefined, currency: "ZMW" },
+        { ipAddress: "127.0.0.1" },
       );
+
+      // FIN-13: the service writes the UPDATE row inside the update's transaction.
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
   });
 
   describe("DELETE - DELETE /api/recurring/:id", () => {
     it("deletes a recurring rule and logs audit event", async () => {
-      mockRecurringService.deleteRecurring.mockResolvedValue({ id: ruleId });
+      const deletedRule = {
+        id: ruleId,
+        name: "Netflix",
+        amount: "15.99",
+        frequency: "monthly",
+        accountId,
+      };
+      mockRecurringService.deleteRecurring.mockResolvedValue(deletedRule);
 
       const response = await request(app).delete(`/api/recurring/${ruleId}`);
 
       expect(response.status).toBe(200);
       expect(response.body.success).toBe(true);
-
-      // Verify audit logging
-      expect(mockBusinessAuditService.logDelete).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "recurring_rule",
-          entityId: ruleId,
-        })
+      // FIN-13: the service writes the DELETE row inside the deletion's transaction.
+      expect(mockRecurringService.deleteRecurring).toHaveBeenCalledWith(
+        ruleId, { householdId, userId: "user-123", role: "owner" }, { ipAddress: "127.0.0.1" },
       );
+      expect(mockBusinessAuditService.logDelete).not.toHaveBeenCalled();
     });
   });
 
@@ -288,7 +294,7 @@ describe("Recurring Rules Integration", () => {
       expect(response.body.success).toBe(true);
       expect(response.body.data).toHaveLength(2);
       expect(mockRecurringService.getUpcomingBills).toHaveBeenCalledWith(
-        householdId,
+        { householdId, userId: "user-123", role: "owner" },
         14
       );
     });
@@ -300,7 +306,7 @@ describe("Recurring Rules Integration", () => {
 
       expect(response.status).toBe(200);
       expect(mockRecurringService.getUpcomingBills).toHaveBeenCalledWith(
-        householdId,
+        { householdId, userId: "user-123", role: "owner" },
         7
       );
     });
@@ -333,7 +339,7 @@ describe("Recurring Rules Integration", () => {
   // =========================================================================
 
   describe("LIFECYCLE - POST /api/recurring/:id/skip", () => {
-    it("skips next occurrence and logs audit event", async () => {
+    it("skips next occurrence through the audited service write", async () => {
       const beforeRule = {
         id: ruleId,
         nextDueDate: "2024-02-01",
@@ -348,37 +354,36 @@ describe("Recurring Rules Integration", () => {
         amount: "15.99",
       };
 
-      mockRecurringService.getRecurringById.mockResolvedValue(beforeRule);
-      mockRecurringService.skipNextOccurrence.mockResolvedValue(afterRule);
+      mockRecurringService.changeLifecycle.mockResolvedValue({ beforeRule: beforeRule, rule: afterRule });
 
       const response = await request(app).post(`/api/recurring/${ruleId}/skip`);
 
       expect(response.status).toBe(200);
       expect(response.body.data.nextDueDate).toBe("2024-03-01");
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "recurring_rule",
-          metadata: { operation: "skip" },
-        })
+      // R14: the service writes the audit row inside its transaction.
+      expect(mockRecurringService.changeLifecycle).toHaveBeenCalledWith(
+        ruleId, expect.anything(), expect.objectContaining({ action: "skipped" }), "127.0.0.1",
       );
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
   });
 
   describe("LIFECYCLE - POST /api/recurring/:id/pause", () => {
-    it("pauses a recurring rule and logs audit event", async () => {
+    it("pauses a recurring rule through the audited service write", async () => {
       const beforeRule = { id: ruleId, isPaused: false, isActive: true };
       const afterRule = { ...beforeRule, isPaused: true, amount: "15.99" };
 
-      mockRecurringService.getRecurringById.mockResolvedValue(beforeRule);
-      mockRecurringService.pauseRecurring.mockResolvedValue(afterRule);
+      mockRecurringService.changeLifecycle.mockResolvedValue({ beforeRule: beforeRule, rule: afterRule });
 
       const response = await request(app).post(`/api/recurring/${ruleId}/pause`);
 
       expect(response.status).toBe(200);
       expect(response.body.data.isPaused).toBe(true);
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({ metadata: { operation: "pause" } })
+      // R14: the service writes the audit row inside its transaction.
+      expect(mockRecurringService.changeLifecycle).toHaveBeenCalledWith(
+        ruleId, expect.anything(), expect.objectContaining({ action: "paused" }), "127.0.0.1",
       );
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
   });
 
@@ -387,16 +392,17 @@ describe("Recurring Rules Integration", () => {
       const beforeRule = { id: ruleId, isPaused: true, isActive: true };
       const afterRule = { ...beforeRule, isPaused: false, amount: "15.99" };
 
-      mockRecurringService.getRecurringById.mockResolvedValue(beforeRule);
-      mockRecurringService.resumeRecurring.mockResolvedValue(afterRule);
+      mockRecurringService.changeLifecycle.mockResolvedValue({ beforeRule: beforeRule, rule: afterRule });
 
       const response = await request(app).post(`/api/recurring/${ruleId}/resume`);
 
       expect(response.status).toBe(200);
       expect(response.body.data.isPaused).toBe(false);
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({ metadata: { operation: "resume" } })
+      // R14: the service writes the audit row inside its transaction.
+      expect(mockRecurringService.changeLifecycle).toHaveBeenCalledWith(
+        ruleId, expect.anything(), expect.objectContaining({ action: "resumed" }), "127.0.0.1",
       );
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
   });
 
@@ -415,8 +421,7 @@ describe("Recurring Rules Integration", () => {
         amount: "15.99",
       };
 
-      mockRecurringService.getRecurringById.mockResolvedValue(beforeRule);
-      mockRecurringService.endRecurring.mockResolvedValue(afterRule);
+      mockRecurringService.changeLifecycle.mockResolvedValue({ beforeRule: beforeRule, rule: afterRule });
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/end`)
@@ -424,9 +429,11 @@ describe("Recurring Rules Integration", () => {
 
       expect(response.status).toBe(200);
       expect(response.body.data.endDate).toBe("2024-12-31");
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({ metadata: { operation: "end" } })
+      // R14: the service writes the audit row inside its transaction.
+      expect(mockRecurringService.changeLifecycle).toHaveBeenCalledWith(
+        ruleId, expect.anything(), expect.objectContaining({ action: "ended", endDate: "2024-12-31" }), "127.0.0.1",
       );
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
   });
 
@@ -440,12 +447,14 @@ describe("Recurring Rules Integration", () => {
         {
           name: "Netflix",
           estimatedAmount: "15.99",
+          currency: "ZMW",
           frequency: "monthly",
           confidence: 95,
         },
         {
           name: "Spotify",
           estimatedAmount: "9.99",
+          currency: "ZMW",
           frequency: "monthly",
           confidence: 88,
         },
@@ -463,6 +472,19 @@ describe("Recurring Rules Integration", () => {
         amount: "15.99",
         currency: "ZMW",
       });
+      expect(mockRecurringService.detectAndSuggest).toHaveBeenCalledWith(
+        "11111111-1111-1111-1111-111111111111",
+        { minOccurrences: 3, lookbackMonths: 6, confidenceThreshold: 80 },
+        { householdId: "11111111-1111-1111-1111-111111111111", userId: "user-123", role: "owner" },
+      );
+    });
+
+    it.each(["", null, undefined])("preserves unknown detector denomination %s without inventing ZMW", async currency => {
+      mockRecurringService.detectAndSuggest.mockResolvedValue([{ name: "Unknown-unit source", estimatedAmount: "15.99", currency,
+        confirmationIssue: "Recurring denomination is unknown; review the source before confirmation." }]);
+      const response = await request(app).post("/api/recurring/detect").send({}).expect(200);
+      expect(response.body.data[0]).toMatchObject({ estimatedAmount: { amount: "15.99", currency: "" },
+        confirmationIssue: "Recurring denomination is unknown; review the source before confirmation." });
     });
   });
 
@@ -476,28 +498,32 @@ describe("Recurring Rules Integration", () => {
       };
 
       mockRecurringService.confirmPattern.mockResolvedValue(newRule);
+      const contributorIds = ["55555555-5555-5555-5555-555555555555", "66666666-6666-6666-6666-666666666666", "77777777-7777-7777-7777-777777777777"];
+      const pattern = {
+        name: "Netflix", type: "expense", estimatedAmount: { amount: "15.99", currency: "ZMW" }, frequency: "monthly",
+        confidence: 95, amountVariance: 0, occurrences: 3, suggestedStartDate: "2026-08-01", suggestedNextDueDate: "2026-11-01",
+        sampleTransactionIds: contributorIds,
+        selection: { version: 1, startDate: "2026-05-02", endDate: "2026-11-02", timezone: "UTC", timezoneSource: "profile",
+          options: { minOccurrences: 3, lookbackMonths: 6, confidenceThreshold: 80 }, groupKey: '["netflix","expense","ZMW"]',
+          contributorIds, fingerprint: "a".repeat(64) },
+      };
 
       const response = await request(app)
         .post("/api/recurring/confirm")
         .send({
           accountId,
-          pattern: {
-            name: "Netflix",
-            type: "expense",
-            estimatedAmount: { amount: "15.99", currency: "ZMW" },
-            frequency: "monthly",
-            suggestedStartDate: "2024-01-01",
-            suggestedNextDueDate: "2024-02-01",
-            sampleTransactionIds: [
-              "55555555-5555-5555-5555-555555555555",
-              "66666666-6666-6666-6666-666666666666",
-            ],
-          },
+          pattern,
         });
 
       expect(response.status).toBe(201);
       expect(response.body.data.name).toBe("Netflix");
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalled();
+      expect(mockRecurringService.confirmPattern).toHaveBeenCalledTimes(1);
+      expect(mockRecurringService.confirmPattern).toHaveBeenCalledWith(
+        "11111111-1111-1111-1111-111111111111", pattern, "user-123", accountId,
+        { householdId: "11111111-1111-1111-1111-111111111111", userId: "user-123", role: "owner" }, "127.0.0.1",
+      );
+      // The real helper owns its atomic audit. The HTTP caller must not append a duplicate after commit.
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
   });
 
@@ -515,9 +541,13 @@ describe("Recurring Rules Integration", () => {
         expectedAmount: "15.99",
         actualAmount: "15.99",
         matchMethod: "manual",
+        // FIN-05: the service returns the units it proved — a ZMW-proven rule
+        // and a ZMW transaction.
+        expectedCurrency: "ZMW",
+        actualCurrency: "ZMW",
       };
 
-      mockRecurringService.linkTransaction.mockResolvedValue(link);
+      mockRecurringService.linkVisibleTransaction.mockResolvedValue(link);
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/link`)
@@ -528,32 +558,38 @@ describe("Recurring Rules Integration", () => {
         amount: "15.99",
         currency: "ZMW",
       });
-      expect(mockBusinessAuditService.log).toHaveBeenCalledWith(
-        expect.objectContaining({
-          action: "LINK",
-          entityType: "recurring_rule",
-        })
+      expect(response.body.data).not.toHaveProperty("expectedCurrency");
+      expect(response.body.data).not.toHaveProperty("actualCurrency");
+      // FIN-13: the service writes the LINK row inside the link's transaction.
+      expect(mockRecurringService.linkVisibleTransaction).toHaveBeenCalledWith(
+        ruleId, transactionId, expect.objectContaining({ userId: "user-123" }), { ipAddress: "127.0.0.1" },
       );
+      expect(mockBusinessAuditService.log).not.toHaveBeenCalled();
     });
   });
 
-  describe("LINKING - DELETE /api/recurring/links/:linkId", () => {
+  describe("LINKING - DELETE /api/recurring/:id/link/:linkId", () => {
     it("unlinks a transaction from a recurring rule", async () => {
+      const linkId = "55555555-5555-5555-5555-555555555555";
       const deletedLink = {
-        id: "link-123",
+        id: linkId,
         recurringTransactionId: ruleId,
         transactionId: "tx-456",
       };
 
       mockRecurringService.unlinkTransaction.mockResolvedValue(deletedLink);
 
-      const response = await request(app).delete("/api/recurring/links/link-123");
+      const response = await request(app).delete(`/api/recurring/${ruleId}/link/${linkId}`);
 
       expect(response.status).toBe(200);
       expect(response.body.data.message).toBe("Unlinked successfully");
-      expect(mockBusinessAuditService.log).toHaveBeenCalledWith(
-        expect.objectContaining({ action: "UNLINK" })
-      );
+      expect(mockRecurringService.unlinkTransaction).toHaveBeenCalledWith(ruleId, linkId, {
+        householdId: "11111111-1111-1111-1111-111111111111",
+        userId: "user-123",
+        role: "owner",
+      }, { ipAddress: "127.0.0.1" });
+      // FIN-13: the service writes the UNLINK row inside the unlink's transaction.
+      expect(mockBusinessAuditService.log).not.toHaveBeenCalled();
     });
   });
 
@@ -565,12 +601,17 @@ describe("Recurring Rules Integration", () => {
           transactionId: "tx-1",
           expectedAmount: "15.99",
           actualAmount: "15.99",
+          expectedCurrency: "ZMW",
+          actualCurrency: "ZMW",
         },
         {
+          // FIN-05: a link to a rule whose unit is unproven.
           id: "link-2",
           transactionId: "tx-2",
           expectedAmount: "15.99",
           actualAmount: "16.49",
+          expectedCurrency: null,
+          actualCurrency: "USD",
         },
       ];
 
@@ -586,6 +627,12 @@ describe("Recurring Rules Integration", () => {
         amount: "15.99",
         currency: "ZMW",
       });
+      expect(response.body.data[1].expectedAmount).toEqual({ amount: "15.99", currency: null });
+      expect(response.body.data[1].actualAmount).toEqual({ amount: "16.49", currency: "USD" });
+      expect(mockRecurringService.getLinkedTransactions).toHaveBeenCalledWith(
+        ruleId,
+        { householdId, userId: "user-123", role: "owner" },
+      );
     });
   });
 
@@ -608,7 +655,7 @@ describe("Recurring Rules Integration", () => {
       expect(response.body.data).toHaveLength(2);
       expect(mockRecurringService.getHistory).toHaveBeenCalledWith(
         ruleId,
-        householdId,
+        { householdId, userId: "user-123", role: "owner" },
         50
       );
     });
@@ -623,7 +670,7 @@ describe("Recurring Rules Integration", () => {
       expect(response.status).toBe(200);
       expect(mockRecurringService.getHistory).toHaveBeenCalledWith(
         ruleId,
-        householdId,
+        { householdId, userId: "user-123", role: "owner" },
         10
       );
     });
@@ -635,7 +682,7 @@ describe("Recurring Rules Integration", () => {
 
   describe("SECURITY - Household Isolation", () => {
     it("returns 404 when accessing recurring rule from another household", async () => {
-      mockRecurringService.getRecurringById.mockRejectedValue(
+      mockRecurringService.getVisibleRecurringById.mockRejectedValue(
         new NotFoundError("Recurring rule", ruleId)
       );
 
@@ -667,7 +714,7 @@ describe("Recurring Rules Integration", () => {
     });
 
     it("cannot link transaction from another household", async () => {
-      mockRecurringService.linkTransaction.mockRejectedValue(
+      mockRecurringService.linkVisibleTransaction.mockRejectedValue(
         new NotFoundError("Transaction")
       );
 
@@ -679,7 +726,7 @@ describe("Recurring Rules Integration", () => {
     });
 
     it("cannot skip recurring rule from another household", async () => {
-      mockRecurringService.skipNextOccurrence.mockRejectedValue(
+      mockRecurringService.changeLifecycle.mockRejectedValue(
         new NotFoundError("Recurring rule", ruleId)
       );
 
@@ -689,7 +736,7 @@ describe("Recurring Rules Integration", () => {
     });
 
     it("cannot pause recurring rule from another household", async () => {
-      mockRecurringService.pauseRecurring.mockRejectedValue(
+      mockRecurringService.changeLifecycle.mockRejectedValue(
         new NotFoundError("Recurring rule", ruleId)
       );
 
@@ -728,7 +775,11 @@ describe("Recurring Rules Integration", () => {
       expect(response.status).toBe(200);
       expect(response.body.data.recurringRule.name).toBe("Netflix");
       expect(response.body.data.isDuplicate).toBe(false);
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalled();
+      // FIN-13: the service writes the CREATE row inside the rule's transaction.
+      expect(mockRecurringService.createRecurringFromExistingTransaction).toHaveBeenCalledWith(
+        "tx-123", expect.any(Object), expect.any(String), "user-123", { ipAddress: "127.0.0.1" },
+      );
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
 
     it("does not log audit for duplicate detection", async () => {

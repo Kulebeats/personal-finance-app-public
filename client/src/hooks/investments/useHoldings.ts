@@ -6,11 +6,26 @@
  * @module hooks/investments/useHoldings
  */
 
+import { userErrorMessage } from "@/lib/errorCopy";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "../../lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { investmentKeys } from "./keys";
 import type { Holding } from "./types";
+import { assertOperationLifetime, captureOperationLifetime } from "@/lib/operation-lifetime";
+import { valuationQueryPolicy } from "./valuationQueryPolicy";
+
+export interface CreateHoldingInput {
+  operationId: string;
+  expectedCurrency: string;
+  accountId: string;
+  securityId: string;
+  quantity: string;
+  costBasis: string;
+  acquiredDate: string;
+  costBasisZmw?: string;
+  acquisitionFxRate?: string;
+}
 
 export function useHoldings(
   accountIdOrOptions?:
@@ -28,6 +43,7 @@ export function useHoldings(
   const baseCurrency = options?.baseCurrency;
 
   return useQuery({
+    ...valuationQueryPolicy,
     queryKey: resolvedAccountId
       ? investmentKeys.holdingsByAccount(resolvedAccountId, baseCurrency)
       : investmentKeys.holdings(baseCurrency),
@@ -42,22 +58,29 @@ export function useHoldings(
       const response = await apiRequest("GET", url);
       return response.json();
     },
-    select: (data) => data.data as Holding[],
+    select: (data: { data: Holding[]; meta?: { baseCurrency?: string } }) =>
+      data.data.map(holding => ({ ...holding, baseCurrency: data.meta?.baseCurrency ?? holding.baseCurrency })),
   });
 }
 
 export function useCreateHolding() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const operation = captureOperationLifetime();
 
   return useMutation({
-    mutationFn: async (data: Partial<Holding>) => {
+    mutationKey: [...investmentKeys.holdingsRoot(), "create"],
+    mutationFn: async (data: Readonly<CreateHoldingInput>) => {
+      assertOperationLifetime(operation);
       const response = await apiRequest(
         "POST",
         "/api/investments/holdings",
-        data
+        data,
+        operation,
       );
-      return response.json();
+      const result = await response.json();
+      assertOperationLifetime(operation);
+      return result;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: investmentKeys.holdingsRoot() });
@@ -72,7 +95,7 @@ export function useCreateHolding() {
     onError: (error: Error) => {
       toast({
         title: "Error",
-        description: error.message || "Failed to add holding",
+        description: userErrorMessage(error, "Failed to add holding"),
         variant: "destructive",
       });
     },
@@ -111,7 +134,7 @@ export function useUpdateHolding() {
     onError: (error: Error) => {
       toast({
         title: "Error",
-        description: error.message || "Failed to update holding",
+        description: userErrorMessage(error, "Failed to update holding"),
         variant: "destructive",
       });
     },
@@ -121,29 +144,52 @@ export function useUpdateHolding() {
 export function useDeleteHolding() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const operation = captureOperationLifetime();
+  const roots = [investmentKeys.holdingsRoot(), investmentKeys.portfolioSummaryRoot()];
+  const cancelReads = async () => {
+    assertOperationLifetime(operation);
+    await Promise.all(roots.map(queryKey => queryClient.cancelQueries({ queryKey })));
+    assertOperationLifetime(operation);
+  };
+  const refresh = async () => {
+    // Cancel first reads after the acknowledgement, including reads begun during DELETE.
+    await cancelReads();
+    await Promise.all(roots.map(queryKey => queryClient.invalidateQueries({ queryKey, refetchType: "active" })));
+    assertOperationLifetime(operation);
+  };
 
   return useMutation({
+    mutationKey: [...investmentKeys.holdingsRoot(), "delete"],
     mutationFn: async (id: string) => {
+      assertOperationLifetime(operation);
       const response = await apiRequest(
         "DELETE",
-        `/api/investments/holdings/${id}`
+        `/api/investments/holdings/${id}`,
+        undefined,
+        operation,
       );
-      return response.json();
+      // The acknowledgement is an empty 204, including a same-actor replay.
+      assertOperationLifetime(operation);
+      if (response.status !== 204) {
+        throw Object.assign(new Error("The server returned an unexpected removal response. Retry the same holding."), {
+          status: response.status,
+          code: "UNEXPECTED_DELETE_ACKNOWLEDGEMENT",
+        });
+      }
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: investmentKeys.holdingsRoot() });
-      queryClient.invalidateQueries({
-        queryKey: investmentKeys.portfolioSummaryRoot(),
-      });
+    onSuccess: async () => {
+      await refresh();
       toast({
         title: "Holding Removed",
         description: "The holding has been deleted.",
       });
     },
-    onError: (error: Error) => {
+    onError: async (error: Error & { status?: number }) => {
+      assertOperationLifetime(operation);
+      if (error.status === 404 || error.status === 409) await refresh();
       toast({
         title: "Error",
-        description: error.message || "Failed to delete holding",
+        description: userErrorMessage(error, "Failed to delete holding"),
         variant: "destructive",
       });
     },

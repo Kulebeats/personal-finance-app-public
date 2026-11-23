@@ -1,245 +1,121 @@
-import { test, expect } from "@playwright/test";
-import { getTestUser } from "./utils/testUser";
-import { pickVisible } from "./utils/locators";
-
-const loadTestUser = () => getTestUser();
-
 /**
- * Accounts E2E Tests
+ * Accounts E2E (QA-01 rewrite).
  *
- * Critical user flows for account management.
+ * The previous version returned early whenever a control was missing
+ * (`if (!addButton) return;`) and filled the create form without saving it.
+ * Each test now runs on its own synthetic household with known accounts. A
+ * required control that is missing fails, and creation is submitted and read
+ * back in the UI and in the database.
  */
+import { randomUUID } from "node:crypto";
+import { test, expect, type Page } from "./protected-test";
+import { createCompletionFixture, type CompletionFixture } from "../server/testing/fixtures/completion-fixtures";
+import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
+import { readBack, submitForData, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { responseValue, shownText, storedValue } from "./utils/observe";
+
+/** The create write; its corrupt mutant saves a different name. */
+const CREATE_ACCOUNT: SubmitStep = { name: "account", method: "POST", path: "/api/accounts", corruptField: "name" };
+import { signInAs } from "./utils/fixture-session";
+
+interface Seeded { fixture: CompletionFixture; accountId: string; accountName: string }
+
+async function seededHousehold(): Promise<Seeded> {
+  const fixture = await createCompletionFixture();
+  const accountId = randomUUID();
+  const accountName = `Synthetic current ${randomUUID().slice(0, 6)}`;
+  await withFixtureClient(async (client) => {
+    await client.query("BEGIN");
+    try {
+      await client.query("INSERT INTO accounts (id, household_id, name, type, balance, currency, is_private) VALUES ($1, $2, $3, 'checking', 1234.56, 'ZMW', false)",
+        [accountId, fixture.householdId, accountName]);
+      await client.query(`INSERT INTO transactions (household_id, account_id, category_id, owner_user_id, name, amount, currency, type, date)
+        VALUES ($1, $2, $3, $4, 'Synthetic market stall', 30.00, 'ZMW', 'expense', current_date)`,
+      [fixture.householdId, accountId, fixture.expenseCategoryId, fixture.userId]);
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+  });
+  return { fixture, accountId, accountName };
+}
+
+/** The account's card on /accounts (AccountCard links to its detail page). */
+const accountCard = (page: Page, id: string) => page.locator(`a[href="/accounts/${id}"]`);
+/**
+ * The card's name line. Not just the first bold div: the bank logo before it
+ * is a bold initial ("S") when the account has no institution logo.
+ */
+const accountName = (page: Page, id: string) => accountCard(page, id).locator("div.font-bold.text-foreground.text-sm");
+/** The card's balance, the bold line on its right. */
+const accountBalance = (page: Page, id: string) => accountCard(page, id).locator(".text-right > div.font-bold");
+
+async function openAccounts(page: Page, fixture: CompletionFixture) {
+  await signInAs(page, fixture);
+  await page.goto("/accounts");
+  await expect(page.getByRole("button", { name: "Add a new account", exact: true })).toBeVisible({ timeout: 30_000 });
+}
+
 test.describe("Accounts", () => {
-  test.beforeEach(async ({ page }) => {
-    // Login before each test
-    const testUser = loadTestUser();
-    await page.goto("/login");
-    await page.getByLabel(/email/i).fill(testUser.email);
-    await page.getByPlaceholder(/enter your password/i).fill(testUser.password);
-    await page.getByRole("button", { name: /sign in/i }).click();
-    await expect(page).toHaveURL("/");
-
-    // Navigate to accounts page
-    await page.goto("/accounts");
-    await expect(page).toHaveURL(/\/accounts/);
+  test("lists the household's accounts with their balance", async ({ page }) => {
+    const { fixture, accountId, accountName: name } = await seededHousehold();
+    await openAccounts(page, fixture);
+    // The seeded account's own card: its name, and exactly its balance (not a
+    // group total or summary that happens to contain the digits).
+    await expect(accountName(page, accountId)).toHaveText(name);
+    await expect(accountBalance(page, accountId)).toHaveText(/^K\s?1,234\.56$/);
   });
 
-  test("should display accounts page", async ({ page }) => {
-    const pageAnchor = await pickVisible(
-      page.getByRole("heading", { name: /accounts/i }),
-      page.getByRole("button", { name: /add.*account|new.*account/i }),
-    );
-    expect(pageAnchor).not.toBeNull();
-  });
-
-  test("should display account groups", async ({ page }) => {
-    const rowCount = await page.locator("tbody tr").count();
-    const emptyState = await pickVisible(
-      page.getByText(/no accounts/i),
-      page.getByText(/add your first account/i),
-      page.getByText(/get started/i),
-    );
-    expect(rowCount > 0 || emptyState !== null).toBeTruthy();
-  });
-
-  test("should have add account button", async ({ page }) => {
-    const addButton = await pickVisible(
-      page.getByRole("button", { name: /add.*account|new.*account/i }),
-    );
-    expect(addButton).not.toBeNull();
-  });
-
-  test("should open add account modal", async ({ page }) => {
-    const addButton = await pickVisible(
-      page.getByRole("button", { name: /add.*account|new.*account/i }),
-    );
-    expect(addButton).not.toBeNull();
-    if (!addButton) return;
-
-    await addButton.click();
-
-    // Modal should open
-    await expect(page.getByRole("dialog")).toBeVisible();
-  });
-
-  test("should show account details on click", async ({ page }) => {
-    const accountItem = await pickVisible(
-      page.locator("[data-testid='account-item']"),
-      page.locator(".account-card"),
-      page.locator("tbody tr"),
-    );
-
-    if (!accountItem) return;
-
-    await accountItem.click();
-    await page.waitForTimeout(300);
-
-    const hasBalance = await page.getByText(/balance/i).first().isVisible();
-    const hasDetailsUrl = /\/accounts\/.+/.test(page.url());
-    expect(hasBalance || hasDetailsUrl).toBeTruthy();
-  });
-
-  test("should display net worth summary", async ({ page }) => {
-    const netWorth = await pickVisible(page.getByText(/net worth/i));
-    if (netWorth) {
-      await expect(netWorth).toBeVisible();
-    }
+  test("an account opens its detail page with its transactions", async ({ page }) => {
+    const { fixture, accountId, accountName } = await seededHousehold();
+    await openAccounts(page, fixture);
+    await page.getByText(accountName, { exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`/accounts/${accountId}$`));
+    await expect(page.getByRole("heading", { name: accountName })).toBeVisible();
+    await expect(page.getByText("Synthetic market stall").first()).toBeVisible();
   });
 });
 
 test.describe("Account Creation", () => {
-  test.beforeEach(async ({ page }) => {
-    const testUser = loadTestUser();
-    await page.goto("/login");
-    await page.getByLabel(/email/i).fill(testUser.email);
-    await page.getByPlaceholder(/enter your password/i).fill(testUser.password);
-    await page.getByRole("button", { name: /sign in/i }).click();
-    await expect(page).toHaveURL("/");
+  test("an account needs a name before it can be saved", async ({ page }) => {
+    const { fixture } = await seededHousehold();
+    await openAccounts(page, fixture);
+    const posts: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && new URL(request.url()).pathname === "/api/accounts") posts.push(request.url());
+    });
+    await page.getByRole("button", { name: "Add a new account", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("button", { name: /^Cash Physical Cash$/ }).click();
+    // Whether the form disables Save or rejects the click, no request may leave
+    // and the dialog must stay open. `force` clicks even a disabled button so
+    // both designs are exercised the same way, without a branch.
+    await dialog.getByRole("button", { name: "Save Account", exact: true }).click({ force: true });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("Account Created", { exact: true })).toHaveCount(0);
+    expect(posts).toEqual([]);
+  });
+
+  testWithMutants("creates a cash account and reads it back", { corrupt: [CREATE_ACCOUNT] }, async (page) => {
+    const { fixture } = await seededHousehold();
+    await openAccounts(page, fixture);
+    await page.getByRole("button", { name: "Add a new account", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    const name = `E2E cash ${randomUUID().slice(0, 6)}`;
+    await dialog.getByRole("button", { name: /^Cash Physical Cash$/ }).click();
+    await dialog.getByLabel("Account Name", { exact: true }).fill(name);
+    await dialog.locator("#balance").fill("1000.00");
+    const created = await submitForData<{ id: string; name: unknown }>(page, CREATE_ACCOUNT,
+      () => dialog.getByRole("button", { name: "Save Account", exact: true }).click());
+    await expect(dialog.getByText("Account Created", { exact: true })).toBeVisible();
     await page.goto("/accounts");
-    await expect(page).toHaveURL(/\/accounts/);
-  });
-
-  test("should validate required fields", async ({ page }) => {
-    const addButton = await pickVisible(
-      page.getByRole("button", { name: /add.*account|new.*account/i }),
-    );
-    expect(addButton).not.toBeNull();
-    if (!addButton) return;
-
-    await addButton.click();
-    await page.waitForTimeout(300);
-
-    // Try to submit empty form
-    const submitButton = await pickVisible(
-      page.getByRole("button", { name: /create/i }),
-      page.getByRole("button", { name: /save/i }),
-      page.getByRole("button", { name: /add.*account/i }),
-    );
-
-    if (submitButton) {
-      await submitButton.click();
-
-      // Should show validation
-      await page.waitForTimeout(300);
-    }
-  });
-
-  test("should have account type selection", async ({ page }) => {
-    const addButton = await pickVisible(
-      page.getByRole("button", { name: /add.*account|new.*account/i }),
-    );
-    expect(addButton).not.toBeNull();
-    if (!addButton) return;
-
-    await addButton.click();
-    await page.waitForTimeout(300);
-
-    // Should have type selection
-    const typeSelector = await pickVisible(
-      page.getByLabel(/type/i),
-      page.getByRole("combobox", { name: /type/i }),
-      page.getByText(/account type/i),
-    );
-
-    if (typeSelector) {
-      await expect(typeSelector).toBeVisible();
-    }
-  });
-
-  test("should create manual account", async ({ page }) => {
-    const addButton = await pickVisible(
-      page.getByRole("button", { name: /add.*account|new.*account/i }),
-    );
-    expect(addButton).not.toBeNull();
-    if (!addButton) return;
-
-    await addButton.click();
-    await page.waitForTimeout(300);
-
-    const accountType = await pickVisible(
-      page.getByRole("button", { name: /bank account/i }),
-      page.getByRole("button", { name: /cash/i }),
-    );
-    expect(accountType).not.toBeNull();
-    if (!accountType) return;
-
-    await accountType.click();
-    await page.waitForTimeout(300);
-
-    // Fill account name
-    const nameField = await pickVisible(
-      page.getByLabel(/account name/i),
-      page.locator("input#name"),
-      page.getByPlaceholder(/account name/i),
-    );
-    if (nameField) {
-      await nameField.fill("E2E Test Account");
-    }
-
-    // Fill initial balance
-    const balanceField = await pickVisible(
-      page.getByLabel(/initial balance|current value/i),
-      page.locator("input#balance"),
-      page.getByPlaceholder(/0\.00/),
-    );
-    if (balanceField) {
-      await balanceField.fill("1000.00");
-    }
-  });
-});
-
-test.describe("Account Operations", () => {
-  test.beforeEach(async ({ page }) => {
-    const testUser = loadTestUser();
-    await page.goto("/login");
-    await page.getByLabel(/email/i).fill(testUser.email);
-    await page.getByPlaceholder(/enter your password/i).fill(testUser.password);
-    await page.getByRole("button", { name: /sign in/i }).click();
-    await expect(page).toHaveURL("/");
-    await page.goto("/accounts");
-    await expect(page).toHaveURL(/\/accounts/);
-  });
-
-  test("should allow balance adjustment", async ({ page }) => {
-    // Find an account and look for adjust balance option
-    const accountItem = await pickVisible(page.locator("tbody tr"));
-
-    if (accountItem) {
-      // Look for adjust balance button or menu
-      const adjustButton = await pickVisible(
-        page.getByRole("button", { name: /adjust/i }),
-      );
-      const moreButton = await pickVisible(
-        page.getByRole("button", { name: /more/i }),
-        page.getByRole("button", { name: /options/i }),
-      );
-
-      if (adjustButton) {
-        await adjustButton.click();
-        await page.waitForTimeout(300);
-      } else if (moreButton) {
-        await moreButton.click();
-        await page.waitForTimeout(300);
-      }
-    }
-  });
-
-  test("should show account transactions", async ({ page }) => {
-    // Click on an account to see its transactions
-    const accountItem = await pickVisible(page.locator("tbody tr"));
-
-    if (accountItem) {
-      await accountItem.click();
-      await page.waitForTimeout(500);
-
-      // Should show transactions section
-      const hasTransactions =
-        (await page.getByText(/transactions/i).first().isVisible()) ||
-        (await page.getByText(/recent/i).first().isVisible());
-
-      if (hasTransactions) {
-        expect(hasTransactions).toBeTruthy();
-      }
-    }
+    await readBack(CREATE_ACCOUNT, name, {
+      api: async () => responseValue(created.name, "name"),
+      db: () => storedValue("SELECT name AS value FROM accounts WHERE id=$1", [created.id]),
+      ui: () => shownText(accountName(page, created.id)),
+    });
+    await expect(accountBalance(page, created.id)).toHaveText(/^K\s?1,000\.00$/);
+    const stored = await withFixtureClient((client) => client.query(
+      "SELECT household_id, balance::text, currency FROM accounts WHERE id=$1", [created.id]));
+    expect(stored.rows).toEqual([{ household_id: fixture.householdId, balance: "1000.00", currency: "ZMW" }]);
   });
 });

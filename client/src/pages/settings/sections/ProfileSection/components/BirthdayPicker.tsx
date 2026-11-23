@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/tooltip";
 import { Info } from "lucide-react";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { getDaysInMonth } from "date-fns";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -171,7 +172,7 @@ export function BirthdayPicker({
             <Tooltip delayDuration={300}>
               <TooltipTrigger asChild>
                 <div
-                  className="inline-flex items-center justify-center text-muted-foreground/50 hover:text-blue-500 transition-colors cursor-help opacity-0 group-hover:opacity-100 focus-within:opacity-100"
+                  className="inline-flex items-center justify-center text-muted-foreground/50 hover:text-blue-500 transition-colors cursor-help opacity-0 group-hover:opacity-100 focus-within:opacity-100 max-md:h-11 max-md:w-11 max-md:opacity-100"
                   role="button"
                   tabIndex={0}
                   aria-label="More information"
@@ -304,7 +305,7 @@ export function BirthdayPicker({
             placeholder="YYYY"
             maxLength={4}
             className={cn(
-              "flex h-10 w-full rounded-md border border-input input-glass px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 focus:scale-[1.02]",
+              "flex h-10 max-md:h-11 w-full rounded-md border border-input input-glass px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200 focus:scale-[1.02]",
               !year && "text-muted-foreground",
             )}
           />
@@ -315,12 +316,10 @@ export function BirthdayPicker({
 
       {onHideYearChange && (
         <div className="flex items-center space-x-2 mt-2">
-          <input
-            type="checkbox"
+          <Checkbox
             id="hideYear"
             checked={hideYear}
-            onChange={(e) => onHideYearChange(e.target.checked)}
-            className="accent-primary w-4 h-4 rounded border-input"
+            onCheckedChange={(checked) => onHideYearChange(checked === true)}
           />
           <label
             htmlFor="hideYear"

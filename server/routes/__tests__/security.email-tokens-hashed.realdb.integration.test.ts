@@ -355,6 +355,8 @@ describe("Email verification/change tokens are hashed at rest (Real DB Integrati
     it("rotates to a new hashed token that differs from the previous one, and only the new raw token verifies", async () => {
       const firstRow = await loadUser(userId);
 
+      await db.update(users).set({ emailVerificationExpiry: new Date(Date.now() + 24 * 60 * 60 * 1000 - 61000) }).where(eq(users.id, userId));
+
       const resendRes = await request(app)
         .post("/api/settings/security/email/resend")
         .set("Cookie", cookie)

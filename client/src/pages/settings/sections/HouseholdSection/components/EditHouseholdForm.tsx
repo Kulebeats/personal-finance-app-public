@@ -1,3 +1,4 @@
+import { toastActionError } from "@/lib/actionErrorToast";
 import { useState, useEffect } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -12,8 +13,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { HouseholdData } from "../types";
-import { apiCall } from "@/lib/api";
+import { apiCall, type ApiError } from "@/lib/api";
 
 // Exported for tests: apiCall attaches the cached x-csrf-token (and self-heals
 // on a stale one), replacing the old manual token round-trip per call.
@@ -45,6 +47,8 @@ export function EditHouseholdForm({
   const [currency, setCurrency] = useState("ZMW");
   const [fiscalMonth, setFiscalMonth] = useState(1);
   const [hasChanges, setHasChanges] = useState(false);
+  // SET-05: the server refuses a currency change once transactions exist.
+  const [currencyLocked, setCurrencyLocked] = useState<string | null>(null);
 
   useEffect(() => {
     if (data?.household) {
@@ -70,9 +74,16 @@ export function EditHouseholdForm({
       queryClient.invalidateQueries({ queryKey: ["householdGeneral"] });
       toast.success("Household settings updated");
       setHasChanges(false);
+      setCurrencyLocked(null);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to update settings");
+      if ((error as ApiError).code === "LEDGER_NOT_EMPTY") {
+        // Show the server's guidance by the field and restore the saved currency.
+        setCurrencyLocked(error.message);
+        setCurrency(data.household.currency);
+        return;
+      }
+      toastActionError("Failed to update settings", error);
     },
   });
 
@@ -139,6 +150,11 @@ export function EditHouseholdForm({
         <p className="text-xs text-muted-foreground">
           Used for all transactions and reports
         </p>
+        {currencyLocked && (
+          <Alert variant="destructive" className="max-w-md">
+            <AlertDescription>{currencyLocked}</AlertDescription>
+          </Alert>
+        )}
       </div>
 
       {/* Fiscal Year Start */}

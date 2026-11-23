@@ -1,3 +1,4 @@
+import { ProtectedImage } from "@/components/session/ProtectedImage";
 import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
@@ -13,6 +14,7 @@ import {
 import { Card } from "@/components/ui/card";
 import { GoalStatusBadge } from "./GoalStatusBadge";
 import { GoalProgressBar } from "./GoalProgressBar";
+import { GoalProgressHidden, isGoalProgressHidden } from "./GoalProgressHidden";
 import { useArchiveGoal, useCompleteGoal } from "@/hooks/useGoals";
 import { parseMoney } from "@/lib/utils";
 import type { Goal } from "../types";
@@ -70,7 +72,7 @@ export function GoalDetailsSection({
 
       {goal.customImageUrl ? (
         <div className="overflow-hidden rounded-lg border">
-          <img
+          <ProtectedImage
             src={goal.customImageUrl}
             alt=""
             className="h-40 w-full object-cover"
@@ -150,6 +152,12 @@ export function GoalDetailsSection({
         </div>
       </div>
 
+      {isGoalProgressHidden(goal) ? (
+        <div className="space-y-1">
+          <GoalProgressHidden />
+          <div className="text-xs text-muted-foreground">Target: {formatCurrency(targetAmount)}</div>
+        </div>
+      ) : (
       <div className="space-y-2">
         <div className="flex justify-between text-sm">
           <span className="text-muted-foreground">Progress</span>
@@ -167,10 +175,13 @@ export function GoalDetailsSection({
           <span>{formatCurrency(targetAmount)}</span>
         </div>
       </div>
+      )}
 
       <div className="text-xs text-muted-foreground flex items-center justify-between">
         <span>
-          {goal.type === "pay_down"
+          {isGoalProgressHidden(goal)
+            ? null
+            : goal.type === "pay_down"
             ? `Remaining debt: ${formatCurrency(remainingAmount)}`
             : `Remaining: ${formatCurrency(remainingAmount)}`}
         </span>

@@ -460,26 +460,26 @@ if (data.type === "sell" && data.holdingId && data.quantity) {
 ## 9. Files Reviewed
 
 ### Server Files
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/investments/investments.controller.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/investments/investments.service.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/investments/investments.validation.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/investments/investments.routes.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/investments/investments.*.controller.ts` (5 files)
-- `/mnt/c/Users/kuwan/personal-finance-app/server/routes/investment-*.ts` (6 files)
-- `/mnt/c/Users/kuwan/personal-finance-app/server/services/PortfolioValuationService.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/server/services/InvestmentPerformanceService.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/server/services/FXAttributionService.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/server/services/PensionService.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/server/services/InvestmentAutomationService.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/server/services/InvestmentTaxService.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/investments/investments.controller.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/investments/investments.service.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/investments/investments.validation.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/investments/investments.routes.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/investments/investments.*.controller.ts` (5 files)
+- `/mnt/c/Users/USER/personal-finance-app/server/routes/investment-*.ts` (6 files)
+- `/mnt/c/Users/USER/personal-finance-app/server/services/PortfolioValuationService.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/services/InvestmentPerformanceService.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/services/FXAttributionService.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/services/PensionService.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/services/InvestmentAutomationService.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/services/InvestmentTaxService.ts`
 
 ### Client Files
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/hooks/investments/*.ts` (10 files)
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/features/investments/components/*.tsx` (30+ files)
+- `/mnt/c/Users/USER/personal-finance-app/client/src/hooks/investments/*.ts` (10 files)
+- `/mnt/c/Users/USER/personal-finance-app/client/src/features/investments/components/*.tsx` (30+ files)
 
 ### Test Files
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/investments/__tests__/investments.integration.test.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/features/investments/__tests__/*.tsx`
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/investments/__tests__/investments.integration.test.ts`
+- `/mnt/c/Users/USER/personal-finance-app/client/src/features/investments/__tests__/*.tsx`
 
 ---
 

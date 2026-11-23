@@ -8,7 +8,7 @@ import {
   type InsertRecurringTransactionHistory,
   type InsertRecurringTransactionLink,
 } from "@shared/schema";
-import { eq, and, lte } from "drizzle-orm";
+import { eq, and, gte, isNull, lte, or } from "drizzle-orm";
 import { calculateNextDate } from "../core/calculations";
 import type {
   Frequency,
@@ -17,6 +17,30 @@ import type {
 } from "../core/calculations/recurring/types";
 import type { TransactionType } from "../utils/withTransaction";
 import { recurringQueryRepository } from "./RecurringQueryRepository";
+
+/**
+ * R14: the rule has not reached its inclusive end date. Its end date is still
+ * today or later, and its next occurrence is not after that end date. Shared
+ * by upcoming, the list and the forecast so none of them shows an occurrence
+ * past the end (services/recurring/RecurringLifecycleRules.ts).
+ */
+export function ruleNotEndedPredicate(today = new Date().toISOString().slice(0, 10)) {
+  return or(
+    isNull(recurringTransactions.endDate),
+    and(gte(recurringTransactions.endDate, today), lte(recurringTransactions.nextDueDate, recurringTransactions.endDate)),
+  )!;
+}
+
+/** Date window shared by the bill list and its summary count, including overdue bills. */
+export function upcomingDatePredicate(withinDays: number) {
+  const today = new Date();
+  const through = new Date(today);
+  through.setDate(today.getDate() + withinDays);
+  return and(
+    lte(recurringTransactions.nextDueDate, through.toISOString().slice(0, 10)),
+    ruleNotEndedPredicate(),
+  )!;
+}
 
 /**
  * RecurringRepository
@@ -120,11 +144,9 @@ export class RecurringRepository {
       )
       .orderBy(recurringTransactions.nextDueDate);
 
-    // Filter out rules past their end date
-    return results.filter((r) => {
-      if (r.endDate && r.endDate < byDate) return false;
-      return true;
-    });
+    // A-12: the inclusive end date bounds the occurrence, not the run date, so an
+    // occurrence on endDate still posts when the run comes a day or more late.
+    return results.filter((r) => !(r.endDate && r.endDate < r.nextDueDate));
   }
 
   /**
@@ -134,13 +156,7 @@ export class RecurringRepository {
     householdId: string,
     withinDays: number = 14,
   ): Promise<RecurringTransaction[]> {
-    const today = new Date();
-    const futureDate = new Date(today);
-    futureDate.setDate(today.getDate() + withinDays);
-    const futureDateStr = futureDate.toISOString().split("T")[0];
-    const todayStr = today.toISOString().split("T")[0];
-
-    const results = await db
+    return db
       .select()
       .from(recurringTransactions)
       .where(
@@ -148,15 +164,11 @@ export class RecurringRepository {
           eq(recurringTransactions.householdId, householdId),
           eq(recurringTransactions.isActive, true),
           eq(recurringTransactions.isPaused, false),
-          lte(recurringTransactions.nextDueDate, futureDateStr),
+          upcomingDatePredicate(withinDays),
         ),
       )
       .orderBy(recurringTransactions.nextDueDate);
 
-    return results.filter((r) => {
-      if (r.endDate && r.endDate < todayStr) return false;
-      return true;
-    });
   }
 
   /**
@@ -266,18 +278,20 @@ export class RecurringRepository {
     const rule = await this.findById(id, householdId);
     if (!rule) return undefined;
 
-    const nextDate = this.calculateNextDate(
+    return this.updateNextDueDate(id, this.nextDateAfter(rule));
+  }
+
+  nextDateAfter(rule: RecurringTransaction): string {
+    return this.calculateNextDate(
       rule.nextDueDate,
       rule.frequency as Frequency,
       {
         dayOfMonth: rule.dayOfMonth || undefined,
-        dayOfWeek: rule.dayOfWeek || undefined,
+        dayOfWeek: rule.dayOfWeek ?? undefined,
         intervalValue: rule.intervalValue ?? undefined,
         intervalUnit: (rule.intervalUnit as IntervalUnit | null) ?? undefined,
       },
     );
-
-    return this.updateNextDueDate(id, nextDate);
   }
 
   // ====================================================================
@@ -360,23 +374,6 @@ export class RecurringRepository {
     return recurringQueryRepository.findHistory(recurringId, householdId, limit);
   }
 
-  /**
-   * Recurring summary metrics
-   * @delegate RecurringQueryRepository
-   */
-  async getSummary(householdId: string): Promise<{
-    totalMonthlyIncome: string;
-    totalMonthlyExpenses: string;
-    activeCount: number;
-    subscriptionCount: number;
-    upcomingCount: number;
-  }> {
-    return recurringQueryRepository.getSummary(
-      householdId,
-      (hid) => this.findByHousehold(hid),
-      (hid, days) => this.findUpcoming(hid, days),
-    );
-  }
 }
 
 // Export singleton instance

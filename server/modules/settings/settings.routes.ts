@@ -19,19 +19,24 @@ import {
   pictureUploadMiddleware,
 } from "./settings.picture.controller";
 import reportWidgetsRoutes from "../../routes/settings.report-widgets";
-import { generalLimiter, uploadLimiter } from "../../middleware/rateLimit";
+import { uploadLimiter } from "../../middleware/rateLimit";
 import { requireStepUp } from "../../middleware/requireStepUp";
+import { requireCapability } from "../../core/authz/requireCapability";
+import personalSettingsRoutes from "./settings.personal.routes";
+import savedViewsRoutes from "../saved-views/saved-views.routes";
 
 const router = Router();
 
 // Apply rate limiting to all settings routes
-router.use(generalLimiter);
 
 // All settings require authentication
 router.use(requireAuth);
 
 // Mount report widget preferences routes
 router.use(reportWidgetsRoutes);
+router.use(personalSettingsRoutes);
+// R05.2 named household saved views (household context, owner/admin writes).
+router.use("/saved-views", savedViewsRoutes);
 
 // =========================================================================
 // Profile (user-level, no household required)
@@ -70,12 +75,6 @@ router.delete(
 );
 
 // =========================================================================
-// Display Settings (user-level, no household required)
-// =========================================================================
-router.get("/display", settingsController.getDisplaySettings);
-router.put("/display", settingsController.updateDisplaySettings);
-
-// =========================================================================
 // Password & Sessions
 // =========================================================================
 // NOTE: Password change and session management are owned by the security
@@ -92,25 +91,14 @@ router.post(
   requireStepUp("DESTRUCTIVE"),
   settingsController.deleteAccount,
 );
-router.post(
-  "/account/export",
-  requireStepUp("SETTINGS"),
-  settingsController.exportData,
-);
-
-// =========================================================================
-// Notification Preferences (user-level)
-// =========================================================================
-router.get("/notifications", settingsController.getNotificationPreferences);
-router.put("/notifications", settingsController.updateNotificationPreferences);
 
 // =========================================================================
 // Household Preferences (require household context)
 // =========================================================================
 router.get("/preferences", householdGuard, settingsController.getPreferences);
-router.put(
-  "/preferences",
+router.put("/preferences",
   householdGuard,
+  requireCapability("household.policy.write"),
   settingsController.updatePreferences,
 );
 

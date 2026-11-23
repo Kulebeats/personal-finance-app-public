@@ -1,0 +1,23 @@
+# Native Chromium profile trust feasibility
+
+Status: bounded local primitive, 15 October 2026. The full production browser profile, TLS PostgreSQL, actual Redis, CSRF/cookies/CSP and staging checks remain OPEN. No application or database is started by this proof.
+
+## Source and implementation
+
+Chromium 145.0.7632.6 stores user-added server certificates in a profile-local `ServerCertificate` SQLite database. Its [database implementation](https://chromium.googlesource.com/chromium/src/+/refs/tags/145.0.7632.6/components/server_certificate_database/server_certificate_database.cc), [metadata protobuf](https://chromium.googlesource.com/chromium/src/+/refs/tags/145.0.7632.6/components/server_certificate_database/server_certificate_database.proto) and [profile service factory](https://chromium.googlesource.com/chromium/src/+/refs/tags/145.0.7632.6/chrome/browser/net/server_certificate_database_service_factory.cc) were inspected at that exact tag. The internal format is version-sensitive; this fixture refuses a different browser version or unexpected database version/column names.
+
+`server/testing/browser-trust-proof.mjs` creates ephemeral CA/leaf keys and three new temporary browser profiles. Chromium initializes each certificate database itself, then is closed before the fixture inserts the one synthetic trust anchor. The inserted DER digest and protobuf trust setting match the pinned source contract. The script never reads or edits a personal browser profile or Windows trust store, and removes its temporary keys/profiles after closing owned browsers and servers.
+
+Full Chromium runs headless with `ignoreHTTPSErrors:false`, no certificate-ignore flags and no intercepted/fabricated page responses. Native TLS travels through an owned CONNECT proxy that forwards only the exact numeric loopback TLS endpoint. Plain HTTP and other authorities are refused. QUIC is disabled. A separately owned forbidden HTTP sink is requested as a negative control: the proxy must observe/refuse it and the sink must receive zero requests. This fixture demonstrates this bounded transport; it is not a completed general browser egress guard.
+
+## Reproduction and evidence
+
+Use campaign Node 24.22.0 and explicitly set `PLAYWRIGHT_BROWSERS_PATH` to this checkout's `.local/r20-browser-runtime`. Install the already pinned browser using `node node_modules/playwright/cli.js install chromium --no-shell`, then run `node server/testing/browser-trust-proof.mjs --run-owned-proof`. No package/lock dependency changes are required. The script requires that exact campaign-owned runtime directory.
+
+The existing shared-cache full Chromium failed at process spawn with `UNKNOWN`, before TLS. A fresh same-version installation in the campaign-owned directory launched successfully. Both chrome.exe files have SHA-256 `ff0c99fc5bb2301cad77930aa76e5354cf2a5fefb7efdcf3b3bc10ba0550c015`; the shared installation's failure cause is unresolved and it was not repaired or replaced. A first database-shape assertion also encountered Chromium's unrelated mmap_status metadata; the corrected check pins the two actual version keys and the certificate columns. The forbidden HTTP navigation rejects with ERR_HTTP_RESPONSE_CODE_FAILURE rather than yielding a page response, so its oracle requires that exact error plus the proxy's exact-target refusal and zero sink hits.
+
+Latest completed proof at `4752e58`: trusted native navigation succeeds with the expected synthetic CA issuer; unknown CA and wrong CA fail with ERR_CERT_AUTHORITY_INVALID; wrong hostname fails with ERR_CERT_COMMON_NAME_INVALID; the original untrusted profile still rejects the CA after the trusted-profile run. Three independent profiles, 10 allowed CONNECTs, 60 refused proxy requests (including one exact forbidden-target request), zero forbidden sink hits. Ordinary browser background traffic was refused by the proxy; its request count is incidental, not a fixed acceptance threshold. Exit 0; `npm run check` passed. Logs: `.local/r20-golden/browser-trust-final.log`, `browser-trust-static.log`, and `browser-install.log`. Independent review remains pending at this checkpoint.
+
+This resolves the feasibility of isolated native Chromium trust for the selected local build. It does not substitute for the later HTTPS application journey or for actual production browser/security acceptance.
+
+Separate reviewer subsequently accepted exact `4752e58`, including the pinned Chromium source contract and recorded native controls. This supersedes review-pending status above for the bounded primitive only. No application HTTPS, TLS PostgreSQL or actual Redis profile is certified.

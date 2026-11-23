@@ -7,12 +7,15 @@
  */
 
 import { Request, Response } from "express";
+import { isIP } from "node:net";
 import { accountService } from "./accounts.service";
 import { logger } from "../../utils/logger";
 import { success, created } from "../../core/http";
 import { ValidationError } from "../../core/errors";
 import { businessAuditService } from "../../services/BusinessAuditService";
 import { Money } from "../../core/money";
+import { CalculationError } from "../../core/calculations/errors";
+import { AccountFinancialDataUnavailable } from "../../repositories/AccountReadAudience";
 import {
   createAccountSchema,
   updateAccountSchema,
@@ -23,6 +26,14 @@ import {
   type DateRange,
 } from "./accounts.validation";
 import { accountsImportController } from "./accounts.import.controller";
+
+async function financialRead<T>(operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch (error) {
+    if (error instanceof CalculationError && error.code === "MISSING_FX_RATE") throw new AccountFinancialDataUnavailable();
+    throw error;
+  }
+}
 
 // ============================================================================
 // ACCOUNT CRUD
@@ -59,7 +70,7 @@ export async function list(req: Request, res: Response): Promise<void> {
 export async function getSummary(req: Request, res: Response): Promise<void> {
   const { householdId, userId } = req.householdContext!;
 
-  const summary = await accountService.getNetWorthSummary(householdId, userId);
+  const summary = await financialRead(() => accountService.getNetWorthSummary(householdId, userId));
 
   success(res, summary);
 }
@@ -74,7 +85,7 @@ export async function exportSummary(
 ): Promise<void> {
   const { householdId, userId } = req.householdContext!;
 
-  const csvData = await accountService.exportSummary(householdId, userId);
+  const csvData = await financialRead(() => accountService.exportSummary(householdId, userId));
 
   res.setHeader("Content-Type", "text/csv");
   res.setHeader(
@@ -102,14 +113,12 @@ export async function getNetWorthHistory(
     );
   }
 
-  const { dateRange, scope } = queryResult.data;
+  const { dateRange, scope, includeAccounts, ownerUserId } = queryResult.data;
 
-  const history = await accountService.getNetWorthHistory(
-    householdId,
-    userId,
-    dateRange as DateRange,
-    scope,
-  );
+  const args = [householdId, userId, dateRange as DateRange, scope] as const;
+  const history = includeAccounts ? ownerUserId === undefined ? await accountService.getNetWorthHistory(...args, true)
+    : await accountService.getNetWorthHistory(...args, true, ownerUserId)
+    : await accountService.getNetWorthHistory(...args);
 
   success(res, history);
 }
@@ -139,25 +148,15 @@ export async function create(req: Request, res: Response): Promise<void> {
     throw new ValidationError("Invalid account data", parseResult.error.errors);
   }
 
+  // Express applies the configured proxy trust policy; an arbitrary forwarding
+  // chain is not an inet value and must not abort the mandatory financial audit.
+  const requestIp = req.ip?.split("%")[0];
   const account = await accountService.createAccount(
     parseResult.data,
     householdId,
     userId,
+    { ipAddress: requestIp && isIP(requestIp) ? requestIp : undefined },
   );
-
-  await businessAuditService.logCreate({
-    userId,
-    householdId,
-    entityId: account.id,
-    entityType: "account",
-    newValue: {
-      name: account.name,
-      type: account.type,
-      balance: account.balance,
-      currency: account.currency,
-    },
-    ipAddress: businessAuditService.getIpAddress(req),
-  });
 
   logger.request(req, "Created account");
 
@@ -177,52 +176,17 @@ export async function update(req: Request, res: Response): Promise<void> {
     throw new ValidationError("Invalid update data", parseResult.error.errors);
   }
 
-  const beforeAccount = await accountService.getAccountById(
-    id,
-    householdId,
-    userId,
-  );
-
   const { updatedAt, ...updateData } = parseResult.data;
 
-  const account = await accountService.updateAccount(
+  // NEW-32: the update and its one audit row commit in one transaction.
+  const account = await accountService.updateAccountAudited(
     id,
     updateData,
     householdId,
     userId,
     updatedAt ? new Date(updatedAt) : undefined,
+    businessAuditService.getIpAddress(req),
   );
-
-  // TODO-010: Include privacy/ownership fields in audit log
-  await businessAuditService.logUpdate({
-    userId,
-    householdId,
-    entityId: id,
-    entityType: "account",
-    oldValue: {
-      name: beforeAccount.name,
-      type: beforeAccount.type,
-      balance: beforeAccount.balance,
-      currency: beforeAccount.currency,
-      isArchived: beforeAccount.isArchived,
-      isPrivate: beforeAccount.isPrivate,
-      ownerUserId: beforeAccount.ownerUserId,
-      institution: beforeAccount.institution,
-      notes: beforeAccount.notes,
-    },
-    newValue: {
-      name: account.name,
-      type: account.type,
-      balance: account.balance,
-      currency: account.currency,
-      isArchived: account.isArchived,
-      isPrivate: account.isPrivate,
-      ownerUserId: account.ownerUserId,
-      institution: account.institution,
-      notes: account.notes,
-    },
-    ipAddress: businessAuditService.getIpAddress(req),
-  });
 
   logger.request(req, "Updated account");
 
@@ -237,28 +201,8 @@ export async function remove(req: Request, res: Response): Promise<void> {
   const { householdId, userId } = req.householdContext!;
   const { id } = req.params;
 
-  const deletedAccount = await accountService.getAccountById(
-    id,
-    householdId,
-    userId,
-  );
-
-  await accountService.deleteAccount(id, householdId, userId);
-
-  await businessAuditService.logDelete({
-    userId,
-    householdId,
-    entityId: id,
-    entityType: "account",
-    oldValue: {
-      name: deletedAccount.name,
-      type: deletedAccount.type,
-      balance: deletedAccount.balance,
-      currency: deletedAccount.currency,
-      isArchived: deletedAccount.isArchived,
-    },
-    ipAddress: businessAuditService.getIpAddress(req),
-  });
+  // NEW-32: the soft delete and its one audit row commit in one transaction.
+  await accountService.deleteAccountAudited(id, householdId, userId, businessAuditService.getIpAddress(req));
 
   logger.request(req, "Deleted account");
 
@@ -288,14 +232,9 @@ export async function adjustBalance(
     );
   }
 
-  const beforeAccount = await accountService.getAccountById(
-    id,
-    householdId,
-    userId,
-  );
-
-  // FIX DATA-ACCOUNT-001: Pass amount as string to preserve precision
-  // The Money class in the service will handle validation with currency context
+  // FIX DATA-ACCOUNT-001: Pass amount as string to preserve precision.
+  // NEW-32 / FIN-13: the ledger row, the balance change and the row's one
+  // CREATE audit commit in one transaction under the account lock.
   const result = await accountService.adjustBalance(
     id,
     parseResult.data.amount,
@@ -303,27 +242,8 @@ export async function adjustBalance(
     householdId,
     userId,
     parseResult.data.notes,
+    businessAuditService.getIpAddress(req),
   );
-
-  await businessAuditService.logUpdate({
-    userId,
-    householdId,
-    entityId: id,
-    entityType: "account",
-    oldValue: {
-      balance: beforeAccount.balance,
-    },
-    newValue: {
-      balance: result.account.balance,
-    },
-    ipAddress: businessAuditService.getIpAddress(req),
-    metadata: {
-      operation: "adjustBalance",
-      amount: parseResult.data.amount,
-      isIncrease: parseResult.data.isIncrease,
-      transactionId: result.transactionId,
-    },
-  });
 
   logger.request(req, "Adjusted account balance");
 
@@ -338,28 +258,8 @@ export async function archive(req: Request, res: Response): Promise<void> {
   const { householdId, userId } = req.householdContext!;
   const { id } = req.params;
 
-  const beforeAccount = await accountService.getAccountById(
-    id,
-    householdId,
-    userId,
-  );
-
-  const account = await accountService.archiveAccount(id, householdId, userId);
-
-  await businessAuditService.logUpdate({
-    userId,
-    householdId,
-    entityId: id,
-    entityType: "account",
-    oldValue: {
-      isArchived: beforeAccount.isArchived,
-    },
-    newValue: {
-      isArchived: account.isArchived,
-    },
-    ipAddress: businessAuditService.getIpAddress(req),
-    metadata: { operation: "archive" },
-  });
+  // One audit row, written by the service in the archive's transaction.
+  const account = await accountService.archiveAccount(id, householdId, userId, businessAuditService.getIpAddress(req));
 
   success(res, account);
 }
@@ -372,32 +272,8 @@ export async function unarchive(req: Request, res: Response): Promise<void> {
   const { householdId, userId } = req.householdContext!;
   const { id } = req.params;
 
-  const beforeAccount = await accountService.getAccountById(
-    id,
-    householdId,
-    userId,
-  );
-
-  const account = await accountService.unarchiveAccount(
-    id,
-    householdId,
-    userId,
-  );
-
-  await businessAuditService.logUpdate({
-    userId,
-    householdId,
-    entityId: id,
-    entityType: "account",
-    oldValue: {
-      isArchived: beforeAccount.isArchived,
-    },
-    newValue: {
-      isArchived: account.isArchived,
-    },
-    ipAddress: businessAuditService.getIpAddress(req),
-    metadata: { operation: "unarchive" },
-  });
+  // One audit row, written by the service in the unarchive's transaction.
+  const account = await accountService.unarchiveAccount(id, householdId, userId, businessAuditService.getIpAddress(req));
 
   success(res, account);
 }
@@ -409,7 +285,6 @@ export async function unarchive(req: Request, res: Response): Promise<void> {
 /**
  * Update account visibility settings
  * PATCH /api/accounts/:id/settings
- * TODO-010: Added audit logging for compliance
  */
 export async function updateSettings(
   req: Request,
@@ -426,39 +301,14 @@ export async function updateSettings(
     );
   }
 
-  // Get before state for audit logging
-  const beforeAccount = await accountService.getAccountById(
-    id,
-    householdId,
-    userId,
-  );
-
-  const account = await accountService.updateAccountSettings(
+  // NEW-32: the settings change and its one audit row commit in one transaction.
+  const account = await accountService.updateAccountSettingsAudited(
     id,
     parseResult.data,
     householdId,
     userId,
+    businessAuditService.getIpAddress(req),
   );
-
-  // Audit log the settings update (TODO-010)
-  await businessAuditService.logUpdate({
-    userId,
-    householdId,
-    entityId: id,
-    entityType: "account",
-    oldValue: {
-      isHidden: beforeAccount.isHidden,
-      excludeFromNetWorth: beforeAccount.excludeFromNetWorth,
-      hideTransactions: beforeAccount.hideTransactions,
-    },
-    newValue: {
-      isHidden: account.isHidden,
-      excludeFromNetWorth: account.excludeFromNetWorth,
-      hideTransactions: account.hideTransactions,
-    },
-    ipAddress: businessAuditService.getIpAddress(req),
-    metadata: { operation: "updateSettings" },
-  });
 
   logger.request(req, "Updated account settings");
 

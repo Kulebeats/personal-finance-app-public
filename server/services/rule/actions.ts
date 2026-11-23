@@ -7,36 +7,63 @@
  */
 
 import { type Transaction, type InsertTransaction } from "@shared/schema";
-import { Money } from "../../core/money";
+import { allocateRuleSplits } from "./split-allocation";
 import { transactionRepository } from "../../repositories/TransactionRepository";
 import { merchantRepository } from "../../repositories/MerchantRepository";
 import { tagRepository } from "../../repositories/TagRepository";
 import { logger } from "../../utils/logger";
 import { transactionGoalLinkService } from "../TransactionGoalLinkService";
 import { type TransactionType } from "../../utils/withTransaction";
-import type { Rule, RuleAction, RuleActionResult, MerchantCache } from "./types";
+import {
+  actionTagIds,
+  resolveOwnedActionReferences,
+  splitCategoryIds,
+  unownedIds,
+  withBlocked,
+} from "./action-references";
+import type {
+  BlockedRuleReferences,
+  Rule,
+  RuleAction,
+  RuleActionPlan,
+  PlannedEffect,
+  PlannedSplit,
+  MerchantCache,
+} from "./types";
 import { resolveMerchant } from "./matching";
+import { assertRuleActionReferencesCurrent } from "./entity-references";
+import { addMerchantAliasIfFree } from "../../modules/merchants/merchants.name-guard";
 
 /**
- * Generate updates based on actions
+ * Compute what a rule would do to a transaction. WRITES NOTHING (C3-09).
  *
- * SCP-334: when `tx` is provided, all inline writes (tags, merchant aliases,
- * splits) run inside that transaction. DB-write failures must PROPAGATE so the
- * enclosing rule-apply transaction rolls back as a whole — they are no longer
- * swallowed per-action.
+ * This is the only evaluator a preview or dry run may use: it reads (merchant
+ * lookup, existing aliases) and returns the field `updates`, goal ids to link,
+ * and the database `effects` (tag links, merchant aliases, split replacement)
+ * that a real apply would persist via `persistRuleEffects`.
  */
-export async function evaluateActions(
+export async function planRuleActions(
   rule: Rule,
   transaction: Transaction,
   householdId: string,
   merchantCache: MerchantCache,
   tx?: TransactionType
-): Promise<RuleActionResult> {
+): Promise<RuleActionPlan> {
   const actions = rule.actions as RuleAction[];
   // Filter to only enabled actions (default to true if enabled is undefined)
   const activeActions = actions.filter((a) => a.enabled !== false);
+  // ORG-003: an owner/member can leave and a goal can go after a rule was
+  // saved. Fail closed (the whole apply or preview aborts) rather than plan a
+  // stale id. Real applies pass their transaction so the check is locked.
+  await assertRuleActionReferencesCurrent(activeActions, householdId, tx);
+  // ORG-003: a category or tag id that is not this household's skips the
+  // action naming it; the run reports the id and nothing is written for it.
+  const owned = await resolveOwnedActionReferences(activeActions, householdId, tx);
+  let blocked: BlockedRuleReferences = { categoryIds: [], tagIds: [] };
   const updates: Partial<Transaction> = {};
   const linkGoalIds: string[] = [];
+  const effects: PlannedEffect[] = [];
+  const plannedAliasKeys = new Set<string>();
   let currentMerchantId = transaction.merchantId ?? null;
 
   for (const action of activeActions) {
@@ -47,27 +74,26 @@ export async function evaluateActions(
         case "rename_merchant":
           updates.name = String(value);
           break;
-        case "categorize":
-          updates.categoryId = String(value);
+        case "categorize": {
+          const categoryId = String(value);
+          const foreign = unownedIds([categoryId], owned.categoryIds);
+          if (foreign.length > 0) {
+            blocked = withBlocked(blocked, { categoryIds: foreign });
+            break;
+          }
+          updates.categoryId = categoryId;
           break;
+        }
         case "add_tags": {
+          const tagIds = actionTagIds(action);
+          const foreign = unownedIds(tagIds, owned.tagIds);
+          if (foreign.length > 0) {
+            blocked = withBlocked(blocked, { tagIds: foreign });
+            break;
+          }
           if (transaction.id) {
-            const tagIds = Array.isArray(value) ? value : [String(value)];
             for (const tagId of tagIds) {
-              if (tagId && tagId.trim()) {
-                // SCP-334: no inner catch — a failed tag write must roll back
-                // the whole rule apply, not be silently swallowed.
-                // SCP-335: only bump usageCount when the link was newly added,
-                // so re-applying a rule does not inflate the count.
-                const { inserted } = await tagRepository.addTagToTransaction(
-                  transaction.id,
-                  tagId,
-                  tx
-                );
-                if (inserted) {
-                  await tagRepository.incrementUsageCount(tagId, tx);
-                }
-              }
+              effects.push({ kind: "add_tag", tagId });
             }
           }
           break;
@@ -116,8 +142,16 @@ export async function evaluateActions(
             (alias) => alias.aliasName.toLowerCase() === normalizedAlias
           );
 
-          if (!alreadyExists) {
-            await merchantRepository.addAlias(merchant.id, aliasName, tx);
+          // A second planned alias with the same name must not become a second
+          // insert: the earlier one is not in the database yet at plan time.
+          const plannedKey = `${merchant.id}:${normalizedAlias}`;
+          if (!alreadyExists && !plannedAliasKeys.has(plannedKey)) {
+            plannedAliasKeys.add(plannedKey);
+            effects.push({
+              kind: "add_merchant_alias",
+              merchantId: merchant.id,
+              aliasName,
+            });
           }
           break;
         }
@@ -146,43 +180,20 @@ export async function evaluateActions(
           }
           break;
         case "split_transaction": {
-          // FIX INT-RULES-001: Persist rule-generated splits to transaction_splits table
+          // FIX INT-RULES-001: rule-generated splits go to transaction_splits
+          // when the plan is persisted (never while planning).
           const splits = action.splitConfig;
-
-          if (!splits || splits.length === 0) break;
-
-          // Use Money class for all split calculations to maintain precision
-          const totalMoney = new Money(transaction.amount).abs();
-
-          // Track remainder for last split to avoid rounding errors
-          let remainder = totalMoney;
-          const splitAmounts: Money[] = [];
-
-          // Calculate split amounts, assigning remainder to last split
-          for (let i = 0; i < splits.length; i++) {
-            const split = splits[i];
-            let splitMoney: Money;
-
-            if (i === splits.length - 1) {
-              // Last split gets the remainder to avoid rounding errors
-              splitMoney = remainder;
-            } else if (split.percentage) {
-              // Calculate percentage using Money arithmetic
-              splitMoney = totalMoney.multiply(split.percentage).divide(100);
-              remainder = remainder.subtract(splitMoney);
-            } else if (split.amount) {
-              splitMoney = new Money(String(split.amount));
-              remainder = remainder.subtract(splitMoney);
-            } else {
-              splitMoney = Money.zero();
-            }
-
-            splitAmounts.push(splitMoney);
+          const foreign = unownedIds(splitCategoryIds(action), owned.categoryIds);
+          if (foreign.length > 0) {
+            blocked = withBlocked(blocked, { categoryIds: foreign });
+            break;
           }
 
+          const splitAmounts = allocateRuleSplits(transaction.amount, transaction.currency ?? "ZMW", splits ?? []);
+
           // Build split records for transaction_splits table
-          const splitRecords = splits
-            .map((split, i) => {
+          const splitRecords = (splits ?? [])
+            .map((split, i): PlannedSplit | null => {
               const splitMoney = splitAmounts[i];
               // Skip zero or negative amounts
               if (splitMoney.lte(0)) return null;
@@ -195,18 +206,10 @@ export async function evaluateActions(
                 displayOrder: i,
               };
             })
-            .filter((s): s is NonNullable<typeof s> => s !== null);
+            .filter((s): s is PlannedSplit => s !== null);
 
-          // Persist splits to transaction_splits table
           if (splitRecords.length > 0 && transaction.id) {
-            // SCP-334: no inner catch — a failed split write must roll back the
-            // whole rule apply (including the parent-transaction update below).
-            await transactionRepository.addSplits(
-              transaction.id,
-              householdId,
-              splitRecords,
-              tx
-            );
+            effects.push({ kind: "replace_splits", splits: splitRecords });
 
             // Add note to indicate splits were applied by rule
             updates.notes =
@@ -224,17 +227,90 @@ export async function evaluateActions(
         actionType: action.type,
         error: error instanceof Error ? error.message : String(error),
       });
-      // SCP-334: in atomic mode (running inside a transaction) a failed action
-      // must abort the whole apply so the transaction rolls back. Only the
-      // legacy non-atomic path continues on error.
-      if (tx) {
-        throw error;
-      }
-      // Continue with other actions even if one fails
+      // A failed action must abort the whole apply so its transaction rolls
+      // back; a preview surfaces the failure rather than a partial answer.
+      throw error;
     }
   }
 
-  return { updates, linkGoalIds };
+  if (blocked.categoryIds.length + blocked.tagIds.length > 0) {
+    logger.warn("Rule actions blocked: ids outside the transaction's household", {
+      ruleId: rule.id,
+      transactionId: transaction.id,
+      householdId,
+      blockedCategoryCount: blocked.categoryIds.length,
+      blockedTagCount: blocked.tagIds.length,
+    });
+  }
+  return { updates, linkGoalIds, effects, blocked };
+}
+
+/**
+ * Persist the database effects of a plan. The ONLY writer of rule-action
+ * effects: called by the real apply path, never by a dry run or preview.
+ *
+ * SCP-334: every write runs inside `tx` and failures PROPAGATE so the
+ * enclosing rule-apply transaction rolls back as a whole.
+ */
+export async function persistRuleEffects(
+  effects: PlannedEffect[],
+  transaction: Transaction,
+  householdId: string,
+  tx: TransactionType
+): Promise<void> {
+  for (const effect of effects) {
+    switch (effect.kind) {
+      case "add_tag": {
+        // SCP-335: only bump usageCount when the link was newly added, so
+        // re-applying a rule does not inflate the count.
+        const { inserted } = await tagRepository.addTagToTransaction(
+          transaction.id,
+          effect.tagId,
+          tx
+        );
+        if (inserted) {
+          await tagRepository.incrementUsageCount(effect.tagId, tx);
+        }
+        break;
+      }
+      case "add_merchant_alias":
+        // One household namespace (merchants.name-guard): a name another
+        // merchant already claims is skipped rather than duplicated.
+        await addMerchantAliasIfFree(tx, householdId, effect.merchantId, effect.aliasName);
+        break;
+      case "replace_splits":
+        await transactionRepository.addSplits(
+          transaction.id,
+          householdId,
+          effect.splits,
+          tx
+        );
+        break;
+    }
+  }
+}
+
+/**
+ * Real-apply evaluator: plan the rule's actions, then persist their database
+ * effects inside `tx`. `tx` is required — there is no write-free mode here;
+ * previews use `planRuleActions` and never reach the persist step.
+ */
+export async function evaluateActions(
+  rule: Rule,
+  transaction: Transaction,
+  householdId: string,
+  merchantCache: MerchantCache,
+  tx: TransactionType
+): Promise<RuleActionPlan> {
+  const plan = await planRuleActions(
+    rule,
+    transaction,
+    householdId,
+    merchantCache,
+    tx
+  );
+  await persistRuleEffects(plan.effects, transaction, householdId, tx);
+  return plan;
 }
 
 /**
@@ -256,7 +332,9 @@ export async function linkGoalsToTransaction(
     return;
   }
 
-  const uniqueGoalIds = Array.from(new Set(goalIds)).filter(Boolean);
+  // Goals are locked in id order, as every other multi-goal writer does, so
+  // two rules linking to overlapping goals cannot deadlock.
+  const uniqueGoalIds = Array.from(new Set(goalIds)).filter(Boolean).sort();
   if (uniqueGoalIds.length === 0) {
     return;
   }

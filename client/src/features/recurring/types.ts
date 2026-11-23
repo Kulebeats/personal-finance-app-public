@@ -5,6 +5,7 @@
  */
 
 import type { MoneyDto } from "@shared/money";
+import type { RecurringCalendarOccurrence } from "@/hooks/useRecurring";
 
 export type { RecurringTransaction } from "@/hooks/useRecurring";
 
@@ -15,13 +16,9 @@ export interface CalendarItem {
   id: string;
   day: number;
   name: string;
-  amount: MoneyDto;
-  type: "bill" | "income";
-  status: "paid" | "upcoming";
-  category: string;
-  logo: string;
+  amount: MoneyDto | null;
+  status: RecurringCalendarOccurrence["status"];
   isPaused: boolean;
-  frequency: import("@/hooks/useRecurring").RecurringTransaction["frequency"];
   raw: import("@/hooks/useRecurring").RecurringTransaction;
 }
 
@@ -29,6 +26,8 @@ export interface CalendarItem {
  * Edit form state.
  */
 export interface RecurringEditForm {
+  confirmDenomination?: boolean;
+  expectedDefinition?: string;
   name: string;
   amount: string;
   frequency:

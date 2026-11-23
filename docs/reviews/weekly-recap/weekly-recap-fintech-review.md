@@ -396,23 +396,23 @@ const validDateSchema = z
 
 ### Server Files
 
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/weekly-recap/weekly-recap.service.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/weekly-recap/weekly-recap.controller.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/weekly-recap/weekly-recap.routes.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/weekly-recap/weekly-recap.validation.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/weekly-recap/index.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/weekly-recap/README.md`
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/weekly-recap/weekly-recap.service.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/weekly-recap/weekly-recap.controller.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/weekly-recap/weekly-recap.routes.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/weekly-recap/weekly-recap.validation.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/weekly-recap/index.ts`
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/weekly-recap/README.md`
 
 ### Client Files
 
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/weekly-recap/hooks/useWeeklyRecapData.ts`
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/weekly-recap/WeeklyRecapContext.tsx`
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/weekly-recap/WeeklyRecapWidget.tsx`
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/weekly-recap/WeeklyRecapWizard.tsx`
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/weekly-recap/steps/NetWorthStep.tsx`
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/weekly-recap/steps/SpendingStep.tsx`
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/weekly-recap/steps/RecurringStep.tsx`
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/weekly-recap/steps/WelcomeStep.tsx`
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/weekly-recap/steps/WrapUpStep.tsx`
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/weekly-recap/components/WeeklyChart.tsx`
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/weekly-recap/components/StepProgress.tsx`
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/weekly-recap/hooks/useWeeklyRecapData.ts`
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/weekly-recap/WeeklyRecapContext.tsx`
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/weekly-recap/WeeklyRecapWidget.tsx`
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/weekly-recap/WeeklyRecapWizard.tsx`
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/weekly-recap/steps/NetWorthStep.tsx`
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/weekly-recap/steps/SpendingStep.tsx`
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/weekly-recap/steps/RecurringStep.tsx`
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/weekly-recap/steps/WelcomeStep.tsx`
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/weekly-recap/steps/WrapUpStep.tsx`
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/weekly-recap/components/WeeklyChart.tsx`
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/weekly-recap/components/StepProgress.tsx`

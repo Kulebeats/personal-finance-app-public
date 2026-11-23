@@ -8,6 +8,7 @@
  */
 
 import { Request, Response, NextFunction } from "express";
+import { isIP } from "node:net";
 import { budgetService } from "../../services/BudgetService";
 import { householdRepository } from "../../repositories/HouseholdRepository";
 import { logger } from "../../utils/logger";
@@ -21,20 +22,16 @@ import {
   forecastQuerySchema,
   forecastUpdateSchema,
   recalcBudgetsSchema,
+  budgetPreviewQuerySchema,
   clearBudgetsSchema,
+  ensureFlexBudgetSchema,
   moveBudgetSchema,
 } from "./budgets.validation";
 import { businessAuditService } from "../../services/BusinessAuditService";
+import { toBudgetSettingsView, updateBudgetSettings } from "../../services/budget/BudgetSettingsService";
 import { success, created } from "../../core/http";
 import { ValidationError } from "../../core/errors";
-import { mapBudgetMoney, mapBudgetWithPeriods } from "./budgets.helpers";
-
-// Type for budget settings updates (avoids Record<string, any>)
-interface BudgetSettingsUpdate {
-  budgetSystem?: string;
-  defaultBudgetScope?: "all_future" | "current_month";
-  defaultMonthOnlyChanges?: boolean;
-}
+import { mapBudgetMoney, mapBudgetWithPeriods, mapUnbudgetedSpend } from "./budgets.helpers";
 
 // Helper to get household currency
 async function getHouseholdCurrency(householdId: string): Promise<string> {
@@ -76,7 +73,6 @@ export const budgetsController = {
   async getProgress(req: Request, res: Response, next: NextFunction) {
     try {
       const { householdId } = req.householdContext!;
-      const currency = await getHouseholdCurrency(householdId);
       const queryResult = budgetProgressQuerySchema.safeParse(req.query);
       if (!queryResult.success) {
         throw new ValidationError(
@@ -85,14 +81,17 @@ export const budgetsController = {
         );
       }
       const { year, month } = queryResult.data;
-      const progress = await budgetService.getBudgetProgress(
+      const { progress, unavailable, unbudgeted } = await budgetService.getBudgetProgressReport(
         householdId,
         year,
-        month
+        month,
+        { kind: "actor", actor: req.householdContext! },
       );
       return success(
         res,
-        progress.map((item) => mapBudgetMoney(item, currency))
+        progress.map((item) => mapBudgetMoney(item, item.currency)),
+        200,
+        { unavailableBudgets: unavailable, unbudgetedSpent: mapUnbudgetedSpend(unbudgeted) },
       );
     } catch (error) {
       next(error);
@@ -102,7 +101,6 @@ export const budgetsController = {
   async getAlerts(req: Request, res: Response, next: NextFunction) {
     try {
       const { householdId } = req.householdContext!;
-      const currency = await getHouseholdCurrency(householdId);
       const queryResult = budgetProgressQuerySchema.safeParse(req.query);
       if (!queryResult.success) {
         throw new ValidationError(
@@ -111,18 +109,21 @@ export const budgetsController = {
         );
       }
       const { year, month } = queryResult.data;
-      const alerts = await budgetService.getBudgetAlerts(
+      const { alerts, unavailable } = await budgetService.getBudgetAlertsReport(
         householdId,
         year,
-        month
+        month,
+        { kind: "actor", actor: req.householdContext! },
       );
       return success(
         res,
         alerts.map((alert) => ({
           ...alert,
-          budget: mapBudgetMoney(alert.budget, currency),
-          spent: toMoneyDto(alert.spent, currency),
-        }))
+          budget: mapBudgetMoney(alert.budget, alert.budget.currency),
+          spent: toMoneyDto(alert.spent),
+        })),
+        200,
+        { unavailableBudgets: unavailable },
       );
     } catch (error) {
       next(error);
@@ -144,23 +145,12 @@ export const budgetsController = {
           parseResult.error.errors
         );
       }
-      const budget = await budgetService.createBudget(
-        parseResult.data,
-        householdId
-      );
-
-      await businessAuditService.logCreate({
+      // The service writes the budget and its audit row in one transaction.
+      const { onlyFor, ...data } = parseResult.data;
+      const budget = await budgetService.createBudget(data, householdId, {
         userId: req.householdContext!.userId,
-        householdId,
-        entityId: budget.id,
-        entityType: "budget",
-        newValue: {
-          name: budget.name,
-          amount: budget.amount,
-          period: budget.period,
-        },
         ipAddress: businessAuditService.getIpAddress(req),
-      });
+      }, onlyFor);
 
       logger.request(req, "Created budget");
       return success(res, mapBudgetMoney(budget, currency), 201);
@@ -182,34 +172,9 @@ export const budgetsController = {
         );
       }
 
-      // Fetch before state for audit
-      const beforeBudget = await budgetService.getBudgetById(id, householdId);
-
-      const budget = await budgetService.updateBudget(
-        id,
-        parseResult.data,
-        householdId
-      );
-
-      await businessAuditService.logUpdate({
+      // NEW-32: the update and its one audit row commit in one transaction.
+      const budget = await budgetService.updateBudget(id, parseResult.data, householdId, {
         userId: req.householdContext!.userId,
-        householdId,
-        entityId: id,
-        entityType: "budget",
-        oldValue: {
-          name: beforeBudget.name,
-          amount: beforeBudget.amount,
-          period: beforeBudget.period,
-          categoryId: beforeBudget.categoryId,
-          isActive: beforeBudget.isActive,
-        },
-        newValue: {
-          name: budget.name,
-          amount: budget.amount,
-          period: budget.period,
-          categoryId: budget.categoryId,
-          isActive: budget.isActive,
-        },
         ipAddress: businessAuditService.getIpAddress(req),
       });
 
@@ -225,22 +190,9 @@ export const budgetsController = {
       const { householdId } = req.householdContext!;
       const { id } = req.params;
 
-      // Capture entity snapshot before deletion for audit
-      const deletedBudget = await budgetService.getBudgetById(id, householdId);
-
-      await budgetService.deleteBudget(id, householdId);
-
-      await businessAuditService.logDelete({
+      // NEW-32: the delete and its one audit row commit in one transaction.
+      await budgetService.deleteBudget(id, householdId, {
         userId: req.householdContext!.userId,
-        householdId,
-        entityId: id,
-        entityType: "budget",
-        oldValue: {
-          name: deletedBudget.name,
-          amount: deletedBudget.amount,
-          period: deletedBudget.period,
-          categoryId: deletedBudget.categoryId,
-        },
         ipAddress: businessAuditService.getIpAddress(req),
       });
 
@@ -264,14 +216,7 @@ export const budgetsController = {
           householdId,
         });
       }
-      const defaultApplyScope =
-        preferences.defaultBudgetScope === "all_future"
-          ? "all_future"
-          : "this_month";
-      return success(res, {
-        budgetSystem: preferences.budgetSystem || "flex",
-        defaultApplyScope,
-      });
+      return success(res, toBudgetSettingsView(preferences));
     } catch (error) {
       next(error);
     }
@@ -279,7 +224,7 @@ export const budgetsController = {
 
   async updateSettings(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
+      const { householdId, userId } = req.householdContext!;
       const parseResult = budgetSettingsSchema.safeParse(req.body);
       if (!parseResult.success) {
         throw new ValidationError(
@@ -287,43 +232,35 @@ export const budgetsController = {
           parseResult.error.errors
         );
       }
-
-      let preferences = await householdRepository.findPreferences(householdId);
-      if (!preferences) {
-        preferences = await householdRepository.createPreferences({
-          householdId,
-        });
-      }
-
-      const updates: BudgetSettingsUpdate = {};
-      if (parseResult.data.budgetSystem) {
-        updates.budgetSystem = parseResult.data.budgetSystem;
-      }
-      if (parseResult.data.defaultApplyScope) {
-        updates.defaultBudgetScope =
-          parseResult.data.defaultApplyScope === "all_future"
-            ? "all_future"
-            : "current_month";
-        updates.defaultMonthOnlyChanges =
-          parseResult.data.defaultApplyScope !== "all_future";
-      }
-
-      const updated = await householdRepository.updatePreferences(
-        householdId,
-        updates
+      // NEW-32: preferences, any flex budget and their audit rows commit together.
+      const settings = await updateBudgetSettings(
+        { householdId, userId, ipAddress: businessAuditService.getIpAddress(req) },
+        parseResult.data,
       );
+      return success(res, settings);
+    } catch (error) {
+      next(error);
+    }
+  },
 
-      if (parseResult.data.budgetSystem === "flex") {
-        await budgetService.ensureFlexBudget(householdId);
+  /**
+   * The household's flex budget, created and audited if it has none yet
+   * (N8 b2: a new household is on the flex system before any bucket exists).
+   * Idempotent under the preferences lock; the amount is set through update.
+   */
+  async ensureFlex(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { householdId, userId } = req.householdContext!;
+      const parseResult = ensureFlexBudgetSchema.safeParse(req.body ?? {});
+      if (!parseResult.success) {
+        throw new ValidationError("Invalid request data", parseResult.error.errors);
       }
-
-      return success(res, {
-        budgetSystem: updated.budgetSystem || "flex",
-        defaultApplyScope:
-          updated.defaultBudgetScope === "all_future"
-            ? "all_future"
-            : "this_month",
+      const currency = await getHouseholdCurrency(householdId);
+      const budget = await budgetService.ensureFlexBudget({
+        householdId, userId, ipAddress: businessAuditService.getIpAddress(req),
       });
+      logger.request(req, "Ensured flex budget");
+      return success(res, mapBudgetMoney(budget, currency));
     } catch (error) {
       next(error);
     }
@@ -371,25 +308,9 @@ export const budgetsController = {
           parseResult.error.errors
         );
       }
-      const result = await budgetService.updateBudgetForecast(
-        householdId,
-        id,
-        parseResult.data
-      );
-      await businessAuditService.logUpdate({
-        userId,
-        householdId,
-        entityId: id,
-        entityType: "budget",
-        newValue: {
-          amount: parseResult.data.amount,
-          year: parseResult.data.year,
-          month: parseResult.data.month,
-          applyScope: result.scope,
-          months: result.months,
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
-        metadata: { operation: "forecastUpdate" },
+      // NEW-32: the override and its one audit row commit in one transaction.
+      const result = await budgetService.updateBudgetForecast(householdId, id, parseResult.data, {
+        userId, ipAddress: businessAuditService.getIpAddress(req),
       });
       return success(res, result);
     } catch (error) {
@@ -400,7 +321,8 @@ export const budgetsController = {
   async recalculate(req: Request, res: Response, next: NextFunction) {
     try {
       const { householdId, userId } = req.householdContext!;
-      const parseResult = recalcBudgetsSchema.safeParse(req.body || {});
+      const parseResult = req.method === "GET" ? budgetPreviewQuerySchema.safeParse(req.query)
+        : recalcBudgetsSchema.safeParse(req.body || {});
       if (!parseResult.success) {
         throw new ValidationError(
           "Invalid request data",
@@ -408,24 +330,12 @@ export const budgetsController = {
         );
       }
       const months = parseResult.data.months || 3;
-      const result = await budgetService.recalculateBudgets(
+      const result = await budgetService.previewRecalculation(
         householdId,
+        userId,
         months
       );
-      await businessAuditService.logUpdate({
-        userId,
-        householdId,
-        entityId: `bulk:${householdId}`,
-        entityType: "budget",
-        newValue: {
-          months,
-          updated: result.updated,
-          created: result.created,
-          cleared: result.cleared,
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
-        metadata: { operation: "recalculate" },
-      });
+      res.set("Cache-Control", "no-store");
       return success(res, result);
     } catch (error) {
       next(error);
@@ -442,15 +352,11 @@ export const budgetsController = {
           parseResult.error.errors
         );
       }
-      const cleared = await budgetService.clearBudgets(householdId);
-      await businessAuditService.logDelete({
-        userId,
+      const requestIp = req.ip?.split("%")[0];
+      const cleared = await budgetService.clearBudgets({
         householdId,
-        entityId: `bulk:${householdId}`,
-        entityType: "budget",
-        oldValue: { cleared },
-        ipAddress: businessAuditService.getIpAddress(req),
-        metadata: { operation: "clear" },
+        userId,
+        ipAddress: requestIp && isIP(requestIp) ? requestIp : undefined,
       });
       return success(res, { cleared });
     } catch (error) {
@@ -468,21 +374,9 @@ export const budgetsController = {
           parseResult.error.errors
         );
       }
-      const result = await budgetService.moveBudgetAmount(
-        householdId,
-        parseResult.data
-      );
-
-      await businessAuditService.log({
-        householdId,
+      // NEW-32: the move and its one TRANSFER audit row commit in one transaction.
+      const result = await budgetService.moveBudgetAmount(householdId, parseResult.data, {
         userId: req.householdContext!.userId,
-        action: "TRANSFER",
-        entityType: "budget",
-        entityId: parseResult.data.fromBudgetId,
-        details: {
-          toBudgetId: parseResult.data.toBudgetId,
-          amount: parseResult.data.amount,
-        },
         ipAddress: businessAuditService.getIpAddress(req),
       });
 

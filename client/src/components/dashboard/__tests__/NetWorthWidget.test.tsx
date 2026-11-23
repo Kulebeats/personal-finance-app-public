@@ -171,4 +171,34 @@ describe("NetWorthWidget", () => {
     // Should display zero
     expect(screen.getByText("$0")).toBeInTheDocument();
   });
+  describe("incomplete total notice (FIN-14)", () => {
+    const withData = (extra: Record<string, unknown>) => {
+      mockedUseReportsNetWorth.mockReturnValue({
+        data: { latest: { netWorth: 730 }, series: [{ id: "Net Worth", data: [{ x: "2026-11-17", y: 730 }] }], ...extra },
+        isLoading: false,
+        error: null,
+        refetch: mockRefetch,
+        isFetching: false,
+        dataUpdatedAt: Date.now(),
+      } as unknown as ReturnType<typeof useReportsNetWorth>);
+      render(<NetWorthWidget />, { wrapper: createWrapper() });
+    };
+
+    it("says which classes were left out when the total is incomplete", () => {
+      withData({ incomplete: true, omittedValuations: ["holdings", "bonds"] });
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Some investment holdings and bonds have no current value, so this total leaves them out.",
+      );
+    });
+
+    it("shows no notice when the total is complete", () => {
+      withData({ incomplete: false, omittedValuations: [] });
+      expect(screen.queryByText(/leaves them out/)).not.toBeInTheDocument();
+    });
+
+    it("shows no notice when the response carries no flag (snapshot history)", () => {
+      withData({});
+      expect(screen.queryByText(/leaves them out/)).not.toBeInTheDocument();
+    });
+  });
 });

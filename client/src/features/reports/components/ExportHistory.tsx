@@ -5,6 +5,7 @@
  */
 
 import { Card } from "@/components/ui/card";
+import { downloadProtectedResource, reportProtectedMediaError } from "@/lib/protected-media";
 import { Download, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatExportRange } from "../utils/reportFormatters";
@@ -102,9 +103,7 @@ export function ExportHistory({
                       {item.status === "completed" && item.id ? (
                         <button
                           onClick={() => {
-                            window.location.href = getReportsExportDownloadUrl(
-                              item.id
-                            );
+                            void downloadProtectedResource(getReportsExportDownloadUrl(item.id)).catch(reportProtectedMediaError);
                           }}
                           className="inline-flex items-center gap-1 text-xs text-primary hover:text-primary/80"
                         >

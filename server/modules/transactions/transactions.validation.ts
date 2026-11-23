@@ -84,6 +84,13 @@ export const transactionTypeSchema = z.enum(["income", "expense", "transfer"]);
 
 export const amountSchema = positiveMoneyDtoSchema;
 
+const transactionSplitSchema = z.object({
+  amount: amountSchema,
+  categoryId: z.string().uuid().optional().nullable(),
+  merchantId: z.string().uuid().optional().nullable(),
+  notes: z.string().max(1000).optional().nullable(),
+});
+
 const createTransactionBaseObjectSchema = z.object({
   accountId: z.string().uuid(),
   amount: amountSchema,
@@ -95,17 +102,7 @@ const createTransactionBaseObjectSchema = z.object({
   merchantId: z.string().uuid().optional(),
   notes: z.string().max(1000).optional(),
   tags: z.array(z.string().max(50)).max(10).optional(),
-  splits: z
-    .array(
-      z.object({
-        amount: amountSchema,
-        categoryId: z.string().uuid().optional().nullable(),
-        merchantId: z.string().uuid().optional().nullable(),
-        notes: z.string().max(1000).optional().nullable(),
-      }),
-    )
-    .max(50)
-    .optional(),
+  splits: z.array(transactionSplitSchema).max(50).optional(),
   isRecurring: z.boolean().optional().default(false),
   recurringTransactionId: z.string().uuid().optional(),
   recurringRuleId: z.string().uuid().optional(),
@@ -115,6 +112,7 @@ const createTransactionBaseObjectSchema = z.object({
 export const createTransactionBaseSchema = createTransactionBaseObjectSchema;
 
 export const createTransactionSchema = createTransactionBaseObjectSchema
+  .extend({ ownerUserId: ownerUserIdBodySchema.optional(), isPrivate: z.boolean().optional() })
   .superRefine((data, ctx) => {
     if (!data.name && !data.description) {
       ctx.addIssue({
@@ -123,6 +121,12 @@ export const createTransactionSchema = createTransactionBaseObjectSchema
         path: ["name"],
       });
     }
+    data.splits?.forEach((split, index) => {
+      if (split.amount.currency !== data.amount.currency) ctx.addIssue({
+        code: z.ZodIssueCode.custom, path: ["splits", index, "amount", "currency"],
+        message: "Split currency must match the parent amount currency",
+      });
+    });
   })
   .transform((data) => {
     const { description, recurringRuleId, amount, splits, categoryId, ...rest } = data;
@@ -150,6 +154,9 @@ export const createTransactionSchema = createTransactionBaseObjectSchema
 export const updateTransactionSchema = z
   .object({
     amount: positiveMoneyDtoSchema.optional(),
+    splits: z.array(transactionSplitSchema.extend({
+      displayOrder: z.number().int().min(0).max(2147483647).optional(),
+    })).min(1).max(50).optional(),
     type: transactionTypeSchema.optional(),
     date: dateStringSchema.optional(),
     name: transactionNameSchema.optional(),
@@ -162,9 +169,18 @@ export const updateTransactionSchema = z
     expectedUpdatedAt: timestampSchema.optional(),
     // R-05: Allow owner updates via main update endpoint
     ownerUserId: ownerUserIdBodySchema.optional(),
+    isPrivate: z.boolean().optional(),
+  })
+  .superRefine((data, ctx) => {
+    data.splits?.forEach((split, index) => {
+      if (data.amount && split.amount.currency !== data.amount.currency) ctx.addIssue({
+        code: z.ZodIssueCode.custom, path: ["splits", index, "amount", "currency"],
+        message: "Split currency must match the parent amount currency",
+      });
+    });
   })
   .transform((data) => {
-    const { description, expectedUpdatedAt, amount, ...rest } = data;
+    const { description, expectedUpdatedAt, amount, splits, ...rest } = data;
     const output = {
       ...rest,
     } as typeof rest & {
@@ -172,6 +188,7 @@ export const updateTransactionSchema = z
       updatedAt?: string;
       amount?: string;
       currency?: string;
+      splits?: Array<Omit<z.infer<typeof transactionSplitSchema>, "amount"> & { amount: string; currency: string }>;
     };
 
     const resolvedName = data.name ?? description;
@@ -181,6 +198,10 @@ export const updateTransactionSchema = z
       output.amount = amount.amount;
       output.currency = amount.currency;
     }
+
+    if (splits !== undefined) output.splits = splits.map(split => ({
+      ...split, amount: split.amount.amount, currency: split.amount.currency,
+    }));
 
     const resolvedUpdatedAt = data.updatedAt ?? expectedUpdatedAt;
     if (resolvedUpdatedAt) output.updatedAt = resolvedUpdatedAt;
@@ -233,6 +254,7 @@ export const createTransferSchema = z
 
 export const updateTransferSchema = z
   .object({
+    expectedUpdatedAt: z.string().datetime({ offset: true }).optional(),
     fromAccountId: z.string().uuid(),
     toAccountId: z.string().uuid(),
     amount: amountSchema,
@@ -280,8 +302,7 @@ function parseTagIds(tagsParam?: string): string[] | undefined {
   return tagIds.length > 0 ? tagIds : undefined;
 }
 
-export const transactionQuerySchema = z
-  .object({
+const transactionQueryFields = z.object({
     accountId: z.string().uuid().optional(),
     categoryId: z.string().uuid().optional(),
     merchantId: z.string().uuid().optional(),
@@ -298,7 +319,9 @@ export const transactionQuerySchema = z
     amountMin: z.coerce.number().positive().optional(),
     amountMax: z.coerce.number().positive().optional(),
     reviewed: z.enum(["reviewed", "unreviewed"]).optional(),
-  })
+  });
+
+export const transactionQuerySchema = transactionQueryFields
   .transform((data) => {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { tags, ...rest } = data;
@@ -308,14 +331,12 @@ export const transactionQuerySchema = z
     };
   });
 
-export const summaryQuerySchema = z
-  .object({
+export const summaryQuerySchema = transactionQueryFields
+  .omit({ limit: true, offset: true, sortBy: true, sortOrder: true })
+  .extend({
     startDate: dateStringSchema,
     endDate: dateStringSchema,
-    accountId: z.string().uuid().optional(),
     groupBy: z.enum(["day", "week", "month", "year"]).default("month"),
-    ownerUserId: ownerUserIdQuerySchema,
-    tags: z.string().optional(), // Comma-separated tag IDs
   })
   .transform((data) => {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars

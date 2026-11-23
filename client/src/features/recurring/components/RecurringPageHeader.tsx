@@ -14,6 +14,8 @@ import type { MoneyDto } from "@shared/money";
 interface RecurringPageHeaderProps {
   upcomingCount: number;
   upcomingTotal: MoneyDto;
+  /** Upcoming payments left out of the total: amount not confirmed in `currency` (FIN-05). */
+  upcomingExcluded: number;
   currency: string;
   viewMode: "calendar" | "list";
   setViewMode: (mode: "calendar" | "list") => void;
@@ -22,6 +24,7 @@ interface RecurringPageHeaderProps {
 export function RecurringPageHeader({
   upcomingCount,
   upcomingTotal,
+  upcomingExcluded,
   currency,
   viewMode,
   setViewMode,
@@ -38,6 +41,13 @@ export function RecurringPageHeader({
             {formatCurrency(upcomingTotal)}
           </span>
         </p>
+        {upcomingExcluded > 0 && (
+          <p className="text-xs text-muted-foreground">
+            {upcomingExcluded === 1
+              ? `1 payment is not included because its amount is not confirmed in ${currency}.`
+              : `${upcomingExcluded} payments are not included because their amounts are not confirmed in ${currency}.`}
+          </p>
+        )}
       </div>
       <div className="flex gap-3">
         <RecurringPatternsModal>

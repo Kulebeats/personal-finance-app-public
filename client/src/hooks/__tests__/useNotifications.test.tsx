@@ -127,7 +127,7 @@ describe("useNotifications hooks", () => {
     });
 
     it("handles fetch error gracefully", async () => {
-      mockFetch.mockResolvedValue(mockFetchResponse({}, false));
+      mockFetch.mockResolvedValue(new Response(JSON.stringify({ error: { code: "SERVICE_UNAVAILABLE", message: "Failed to fetch notifications" } }), { status: 503 }));
 
       const { wrapper } = createWrapper();
       const { result } = renderHook(() => useNotifications(), { wrapper });
@@ -205,7 +205,7 @@ describe("useNotifications hooks", () => {
     });
 
     it("handles fetch error gracefully", async () => {
-      mockFetch.mockResolvedValue(mockFetchResponse({}, false));
+      mockFetch.mockResolvedValue(new Response(JSON.stringify({ error: { code: "SERVICE_UNAVAILABLE", message: "Failed to fetch unread count" } }), { status: 503 }));
 
       const { wrapper } = createWrapper();
       const { result } = renderHook(() => useUnreadCount(), { wrapper });

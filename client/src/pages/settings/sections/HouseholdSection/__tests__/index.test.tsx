@@ -20,6 +20,10 @@ vi.mock("../components/EditHouseholdForm", () => ({
   EditHouseholdForm: () => <div>edit-household-form</div>,
 }));
 
+vi.mock("../components/BudgetRolloverSetting", () => ({
+  BudgetRolloverSetting: () => <div>budget-rollover-setting</div>,
+}));
+
 const mockFetch = vi.fn();
 
 function renderWithClient() {

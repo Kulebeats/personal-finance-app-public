@@ -10,6 +10,8 @@ import request from "supertest";
 
 // Hoist mocks
 const mockRecurringService = vi.hoisted(() => ({
+  getVisibleRecurringRules: vi.fn(),
+  getVisibleRecurringById: vi.fn(),
   getRecurringRules: vi.fn(),
   getRecurringById: vi.fn(),
   getUpcomingBills: vi.fn(),
@@ -20,11 +22,9 @@ const mockRecurringService = vi.hoisted(() => ({
   detectAndSuggest: vi.fn(),
   confirmPattern: vi.fn(),
   linkTransaction: vi.fn(),
+  linkVisibleTransaction: vi.fn(),
   unlinkTransaction: vi.fn(),
-  skipNextOccurrence: vi.fn(),
-  pauseRecurring: vi.fn(),
-  resumeRecurring: vi.fn(),
-  endRecurring: vi.fn(),
+  changeLifecycle: vi.fn(),
   getHistory: vi.fn(),
   getLinkedTransactions: vi.fn(),
   processRecurring: vi.fn(),
@@ -45,6 +45,12 @@ vi.mock("../../../services/RecurringService", () => ({
 
 vi.mock("../../../services/BusinessAuditService", () => ({
   businessAuditService: mockBusinessAuditService,
+}));
+
+// The batch summary row is written in its own transaction (FIN-13); here it
+// runs the audit call against a stand-in transaction.
+vi.mock("../../../utils/withTransaction", () => ({
+  withTransaction: (work: (tx: object) => Promise<unknown>) => work({}),
 }));
 
 vi.mock("../../../middleware/validateEntity", () => ({
@@ -170,6 +176,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
           frequency: "monthly",
           confidence: 95,
           estimatedAmount: "15.99",
+          currency: "ZMW",
           suggestedStartDate: "2024-01-01",
           suggestedNextDueDate: "2024-02-01",
           sampleTransactionIds: [transactionId],
@@ -206,12 +213,17 @@ describe("Recurring Module - Extended Integration Tests", () => {
           lookbackMonths: 6,
           confidenceThreshold: 80,
         }),
+        expect.objectContaining({
+          householdId,
+          userId: "user-123",
+          role: "owner",
+        }),
       );
     });
   });
 
   describe("PATTERN CONFIRM - POST /api/recurring/confirm", () => {
-    it("confirms a detected pattern and creates recurring rule", async () => {
+    it("maps the confirmed service result and supplies the signed actor and audit context", async () => {
       const createdRule = {
         id: ruleId,
         name: "Netflix",
@@ -234,13 +246,15 @@ describe("Recurring Module - Extended Integration Tests", () => {
             estimatedAmount: { amount: "15.99", currency: "ZMW" },
             suggestedStartDate: "2024-01-01",
             suggestedNextDueDate: "2024-02-01",
-            sampleTransactionIds: [transactionId],
+            sampleTransactionIds: [transactionId, "44444444-4444-4444-4444-444444444445", "44444444-4444-4444-4444-444444444446"],
           },
         });
 
       expect(response.status).toBe(201);
       expect(response.body.success).toBe(true);
       expect(response.body.data.name).toBe("Netflix");
+      expect(mockRecurringService.confirmPattern).toHaveBeenCalledWith(householdId, expect.any(Object), "user-123", accountId,
+        expect.objectContaining({ householdId, userId: "user-123", role: "owner" }), "127.0.0.1");
     });
 
     it("returns 400 for invalid pattern data", async () => {
@@ -271,7 +285,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
         matchConfidence: 100,
       };
 
-      mockRecurringService.linkTransaction.mockResolvedValue(link);
+      mockRecurringService.linkVisibleTransaction.mockResolvedValue(link);
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/link`)
@@ -284,12 +298,11 @@ describe("Recurring Module - Extended Integration Tests", () => {
       expect(response.body.success).toBe(true);
       expect(response.body.data.transactionId).toBe(transactionId);
 
-      expect(mockBusinessAuditService.log).toHaveBeenCalledWith(
-        expect.objectContaining({
-          action: "LINK",
-          entityType: "recurring_rule",
-        }),
+      // FIN-13: the service writes the LINK row inside the link's transaction.
+      expect(mockRecurringService.linkVisibleTransaction).toHaveBeenCalledWith(
+        ruleId, transactionId, expect.objectContaining({ householdId }), { ipAddress: "127.0.0.1" },
       );
+      expect(mockBusinessAuditService.log).not.toHaveBeenCalled();
     });
 
     it("returns 400 for invalid transaction ID", async () => {
@@ -305,7 +318,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
 
   describe("UNLINK TRANSACTION - DELETE /api/recurring/:id/link/:linkId", () => {
     it("unlinks a transaction from a recurring rule", async () => {
-      mockRecurringService.unlinkTransaction.mockResolvedValue({ id: linkId });
+      mockRecurringService.unlinkTransaction.mockResolvedValue({ id: linkId, transactionId, recurringTransactionId: ruleId });
 
       const response = await request(app).delete(
         `/api/recurring/${ruleId}/link/${linkId}`,
@@ -313,13 +326,13 @@ describe("Recurring Module - Extended Integration Tests", () => {
 
       expect(response.status).toBe(200);
       expect(response.body.success).toBe(true);
-
-      expect(mockBusinessAuditService.log).toHaveBeenCalledWith(
-        expect.objectContaining({
-          action: "UNLINK",
-          entityType: "recurring_rule",
-        }),
-      );
+      // FIN-13: the service writes the UNLINK row inside the unlink's transaction.
+      expect(mockRecurringService.unlinkTransaction).toHaveBeenCalledWith(ruleId, linkId, {
+        householdId,
+        userId: "user-123",
+        role: "owner",
+      }, { ipAddress: "127.0.0.1" });
+      expect(mockBusinessAuditService.log).not.toHaveBeenCalled();
     });
   });
 
@@ -338,8 +351,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
         nextDueDate: "2024-03-01", // Skipped to next
       };
 
-      mockRecurringService.getRecurringById.mockResolvedValue(beforeRule);
-      mockRecurringService.skipNextOccurrence.mockResolvedValue(updatedRule);
+      mockRecurringService.changeLifecycle.mockResolvedValue({ beforeRule: beforeRule, rule: updatedRule });
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/skip`)
@@ -356,8 +368,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
       const beforeRule = { id: ruleId, name: "Test", isPaused: false };
       const pausedRule = { id: ruleId, isPaused: true };
 
-      mockRecurringService.getRecurringById.mockResolvedValue(beforeRule);
-      mockRecurringService.pauseRecurring.mockResolvedValue(pausedRule);
+      mockRecurringService.changeLifecycle.mockResolvedValue({ beforeRule: beforeRule, rule: pausedRule });
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/pause`)
@@ -374,8 +385,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
       const beforeRule = { id: ruleId, name: "Test", isPaused: true };
       const resumedRule = { id: ruleId, isPaused: false };
 
-      mockRecurringService.getRecurringById.mockResolvedValue(beforeRule);
-      mockRecurringService.resumeRecurring.mockResolvedValue(resumedRule);
+      mockRecurringService.changeLifecycle.mockResolvedValue({ beforeRule: beforeRule, rule: resumedRule });
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/resume`)
@@ -392,8 +402,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
       const beforeRule = { id: ruleId, name: "Test", isActive: true };
       const endedRule = { id: ruleId, isActive: false, endDate: "2024-01-31" };
 
-      mockRecurringService.getRecurringById.mockResolvedValue(beforeRule);
-      mockRecurringService.endRecurring.mockResolvedValue(endedRule);
+      mockRecurringService.changeLifecycle.mockResolvedValue({ beforeRule: beforeRule, rule: endedRule });
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/end`)
@@ -411,8 +420,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
       const beforeRule = { id: ruleId, name: "Test", isActive: true };
       const endedRule = { id: ruleId, isActive: false };
 
-      mockRecurringService.getRecurringById.mockResolvedValue(beforeRule);
-      mockRecurringService.endRecurring.mockResolvedValue(endedRule);
+      mockRecurringService.changeLifecycle.mockResolvedValue({ beforeRule: beforeRule, rule: endedRule });
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/end`)
@@ -444,7 +452,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
       expect(response.body.data).toHaveLength(2);
       expect(mockRecurringService.getHistory).toHaveBeenCalledWith(
         ruleId,
-        householdId,
+        { householdId, userId: "user-123", role: "owner" },
         50,
       );
     });
@@ -459,7 +467,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
       expect(response.status).toBe(200);
       expect(mockRecurringService.getHistory).toHaveBeenCalledWith(
         ruleId,
-        householdId,
+        { householdId, userId: "user-123", role: "owner" },
         10,
       );
     });
@@ -474,7 +482,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
       expect(response.status).toBe(200);
       expect(mockRecurringService.getHistory).toHaveBeenCalledWith(
         ruleId,
-        householdId,
+        { householdId, userId: "user-123", role: "owner" },
         100,
       );
     });
@@ -489,7 +497,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
       expect(response.status).toBe(200);
       expect(mockRecurringService.getHistory).toHaveBeenCalledWith(
         ruleId,
-        householdId,
+        { householdId, userId: "user-123", role: "owner" },
         50, // Default
       );
     });
@@ -518,6 +526,10 @@ describe("Recurring Module - Extended Integration Tests", () => {
       expect(response.body.success).toBe(true);
       expect(response.body.data).toHaveLength(1);
       expect(response.body.data[0].transactionId).toBe(transactionId);
+      expect(mockRecurringService.getLinkedTransactions).toHaveBeenCalledWith(
+        ruleId,
+        { householdId, userId: "user-123", role: "owner" },
+      );
     });
   });
 
@@ -567,6 +579,24 @@ describe("Recurring Module - Extended Integration Tests", () => {
       expect(response.status).toBe(200);
       expect(response.body.data.errors).toHaveLength(1);
     });
+
+    it("uses the same UTC cutoff for processing and its audit across midnight", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2030-02-28T23:59:59Z"));
+        mockRecurringService.processRecurring.mockImplementationOnce(async () => {
+          vi.setSystemTime(new Date("2030-03-01T00:00:01Z"));
+          return { processed: 1, created: 1, errors: [] };
+        });
+        await request(app).post("/api/recurring/process").send({}).expect(200);
+        expect.soft(mockRecurringService.processRecurring).toHaveBeenCalledWith(
+          "11111111-1111-1111-1111-111111111111", "2030-02-28", false, expect.objectContaining({ role: "owner" }),
+        );
+        expect(mockBusinessAuditService.log).toHaveBeenCalledWith(expect.objectContaining({
+          entityType: "recurring_batch", details: expect.objectContaining({ asOfDate: "2030-02-28" }),
+        }));
+      } finally { vi.useRealTimers(); }
+    });
   });
 
   // =========================================================================
@@ -607,11 +637,11 @@ describe("Recurring Module - Extended Integration Tests", () => {
         "Netflix from Transaction",
       );
 
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "recurring_rule",
-        }),
+      // FIN-13: the service writes the CREATE row inside the rule's transaction.
+      expect(mockRecurringService.createRecurringFromExistingTransaction).toHaveBeenCalledWith(
+        transactionId, expect.any(Object), householdId, "user-123", { ipAddress: "127.0.0.1" },
       );
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
 
     it("requires frequency parameter", async () => {
@@ -651,7 +681,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
     });
 
     it("returns 404 when linking to non-existent rule", async () => {
-      mockRecurringService.linkTransaction.mockRejectedValue(notFoundError);
+      mockRecurringService.linkVisibleTransaction.mockRejectedValue(notFoundError);
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/link`)
@@ -742,7 +772,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
   // Privacy - ISSUE-REC-008 Fix Verification
   // =========================================================================
   describe("PRIVACY - Transaction Visibility", () => {
-    it("calls linkTransaction with userId for visibility check", async () => {
+    it("passes the complete actor to signed link authorization", async () => {
       const link = {
         id: linkId,
         recurringTransactionId: ruleId,
@@ -750,19 +780,18 @@ describe("Recurring Module - Extended Integration Tests", () => {
         matchMethod: "manual",
       };
 
-      mockRecurringService.linkTransaction.mockResolvedValue(link);
+      mockRecurringService.linkVisibleTransaction.mockResolvedValue(link);
 
       await request(app)
         .post(`/api/recurring/${ruleId}/link`)
         .send({ transactionId });
 
-      // Verify that userId is passed for visibility checking
-      expect(mockRecurringService.linkTransaction).toHaveBeenCalledWith(
+      // The complete signed actor reaches the link authorization boundary.
+      expect(mockRecurringService.linkVisibleTransaction).toHaveBeenCalledWith(
         ruleId,
         transactionId,
-        householdId,
-        "user-123", // userId for visibility check
-        "manual",
+        { householdId, userId: "user-123", role: "owner" },
+        { ipAddress: "127.0.0.1" },
       );
     });
   });
@@ -772,49 +801,49 @@ describe("Recurring Module - Extended Integration Tests", () => {
   // =========================================================================
   describe("SECURITY - Cross Household Isolation", () => {
     it("prevents access to other households' resources (GetById)", async () => {
-      // Simulate service throwing NotFoundError when householdId doesn't match
+      // Actor-scoped read must hide a rule outside the current audience.
       const error = new Error("Rule not found");
       error.name = "NotFoundError";
-      mockRecurringService.getRecurringById.mockRejectedValue(error);
+      mockRecurringService.getVisibleRecurringById.mockRejectedValue(error);
 
       const response = await request(app).get(`/api/recurring/${ruleId}`);
 
       expect(response.status).toBe(404);
-      expect(mockRecurringService.getRecurringById).toHaveBeenCalledWith(
+      expect(mockRecurringService.getVisibleRecurringById).toHaveBeenCalledWith(
         ruleId,
-        householdId, // Controller MUST pass the authenticated householdId
+        { householdId, userId: "user-123", role: "owner" },
       );
     });
 
     it("prevents updating other households' resources", async () => {
       const error = new Error("Rule not found");
       error.name = "NotFoundError";
-      // The controller calls getRecurringById BEFORE updateRecurring
-      mockRecurringService.getRecurringById.mockRejectedValue(error);
+      mockRecurringService.updateRecurring.mockRejectedValue(error);
 
       const response = await request(app).put(`/api/recurring/${ruleId}`).send({
         name: "Hacked Update",
       });
 
       expect(response.status).toBe(404);
-      expect(mockRecurringService.getRecurringById).toHaveBeenCalledWith(
+      expect(mockRecurringService.updateRecurring).toHaveBeenCalledWith(
         ruleId,
-        householdId,
+        { name: "Hacked Update" },
+        { householdId, userId: "user-123", role: "owner" },
+        undefined,
+        { ipAddress: "127.0.0.1" },
       );
     });
 
     it("prevents deleting other households' resources", async () => {
       const error = new Error("Rule not found");
       error.name = "NotFoundError";
-      // The controller calls getRecurringById BEFORE deleteRecurring
-      mockRecurringService.getRecurringById.mockRejectedValue(error);
+      mockRecurringService.deleteRecurring.mockRejectedValue(error);
 
       const response = await request(app).delete(`/api/recurring/${ruleId}`);
 
       expect(response.status).toBe(404);
-      expect(mockRecurringService.getRecurringById).toHaveBeenCalledWith(
-        ruleId,
-        householdId,
+      expect(mockRecurringService.deleteRecurring).toHaveBeenCalledWith(
+        ruleId, { householdId, userId: "user-123", role: "owner" }, { ipAddress: "127.0.0.1" },
       );
     });
   });
@@ -843,6 +872,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
         expect.objectContaining({ accountId }),
         householdId,
         expect.any(String),
+        { actor: { householdId, userId: "user-123", role: "owner" }, currency: "ZMW", audit: { ipAddress: "127.0.0.1" } },
       );
     });
 
@@ -877,52 +907,51 @@ describe("Recurring Module - Extended Integration Tests", () => {
     notFoundError.name = "NotFoundError";
 
     it("prevents skipping other households' recurring rules", async () => {
-      mockRecurringService.getRecurringById.mockRejectedValue(notFoundError);
+      mockRecurringService.changeLifecycle.mockRejectedValue(notFoundError);
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/skip`)
         .send({});
 
       expect(response.status).toBe(404);
-      expect(mockRecurringService.getRecurringById).toHaveBeenCalledWith(
-        ruleId,
-        householdId,
-      );
-      // skipNextOccurrence should NOT be called if getById fails
-      expect(mockRecurringService.skipNextOccurrence).not.toHaveBeenCalled();
+      expect(mockRecurringService.changeLifecycle).toHaveBeenCalledWith(ruleId,
+        { householdId, userId: "user-123", role: "owner" }, expect.objectContaining({ action: "skipped" }), "127.0.0.1");
     });
 
     it("prevents pausing other households' recurring rules", async () => {
-      mockRecurringService.getRecurringById.mockRejectedValue(notFoundError);
+      mockRecurringService.changeLifecycle.mockRejectedValue(notFoundError);
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/pause`)
         .send({});
 
       expect(response.status).toBe(404);
-      expect(mockRecurringService.pauseRecurring).not.toHaveBeenCalled();
+      expect(mockRecurringService.changeLifecycle).toHaveBeenCalledWith(ruleId,
+        { householdId, userId: "user-123", role: "owner" }, expect.objectContaining({ action: "paused" }), "127.0.0.1");
     });
 
     it("prevents resuming other households' recurring rules", async () => {
-      mockRecurringService.getRecurringById.mockRejectedValue(notFoundError);
+      mockRecurringService.changeLifecycle.mockRejectedValue(notFoundError);
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/resume`)
         .send({});
 
       expect(response.status).toBe(404);
-      expect(mockRecurringService.resumeRecurring).not.toHaveBeenCalled();
+      expect(mockRecurringService.changeLifecycle).toHaveBeenCalledWith(ruleId,
+        { householdId, userId: "user-123", role: "owner" }, expect.objectContaining({ action: "resumed" }), "127.0.0.1");
     });
 
     it("prevents ending other households' recurring rules", async () => {
-      mockRecurringService.getRecurringById.mockRejectedValue(notFoundError);
+      mockRecurringService.changeLifecycle.mockRejectedValue(notFoundError);
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/end`)
         .send({ endDate: "2024-12-31" });
 
       expect(response.status).toBe(404);
-      expect(mockRecurringService.endRecurring).not.toHaveBeenCalled();
+      expect(mockRecurringService.changeLifecycle).toHaveBeenCalledWith(ruleId,
+        { householdId, userId: "user-123", role: "owner" }, expect.objectContaining({ action: "ended" }), "127.0.0.1");
     });
 
     it("prevents viewing history of other households' recurring rules", async () => {
@@ -935,7 +964,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
       expect(response.status).toBe(404);
       expect(mockRecurringService.getHistory).toHaveBeenCalledWith(
         ruleId,
-        householdId,
+        { householdId, userId: "user-123", role: "owner" },
         50,
       );
     });
@@ -962,7 +991,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
       const error = new Error("Transaction not found");
       error.name = "NotFoundError";
 
-      mockRecurringService.linkTransaction.mockRejectedValue(error);
+      mockRecurringService.linkVisibleTransaction.mockRejectedValue(error);
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/link`)
@@ -971,13 +1000,12 @@ describe("Recurring Module - Extended Integration Tests", () => {
         });
 
       expect(response.status).toBe(404);
-      // Verify userId is passed for visibility check
-      expect(mockRecurringService.linkTransaction).toHaveBeenCalledWith(
+      // Private transaction checks use the signed actor.
+      expect(mockRecurringService.linkVisibleTransaction).toHaveBeenCalledWith(
         ruleId,
         transactionId,
-        householdId,
-        "user-123", // Current user - used for visibility check
-        "manual",
+        { householdId, userId: "user-123", role: "owner" },
+        { ipAddress: "127.0.0.1" },
       );
     });
 
@@ -989,7 +1017,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
         matchMethod: "manual",
       };
 
-      mockRecurringService.linkTransaction.mockResolvedValue(link);
+      mockRecurringService.linkVisibleTransaction.mockResolvedValue(link);
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/link`)
@@ -1016,8 +1044,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
         nextDueDate: "2025-02-28", // 2025 is not a leap year
       };
 
-      mockRecurringService.getRecurringById.mockResolvedValue(leapYearRule);
-      mockRecurringService.skipNextOccurrence.mockResolvedValue(skippedRule);
+      mockRecurringService.changeLifecycle.mockResolvedValue({ beforeRule: leapYearRule, rule: skippedRule });
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/skip`)
@@ -1040,8 +1067,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
         nextDueDate: "2024-02-29", // Feb 2024 has 29 days (leap year)
       };
 
-      mockRecurringService.getRecurringById.mockResolvedValue(monthEndRule);
-      mockRecurringService.skipNextOccurrence.mockResolvedValue(skippedRule);
+      mockRecurringService.changeLifecycle.mockResolvedValue({ beforeRule: monthEndRule, rule: skippedRule });
 
       const response = await request(app)
         .post(`/api/recurring/${ruleId}/skip`)
@@ -1221,7 +1247,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
       expect(response.body.success).toBe(true);
       expect(response.body.data).toHaveLength(2);
       expect(mockRecurringService.getUpcomingBills).toHaveBeenCalledWith(
-        householdId,
+        { householdId, userId: "user-123", role: "owner" },
         14, // Default
       );
     });
@@ -1232,7 +1258,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
       await request(app).get("/api/recurring/upcoming?days=7");
 
       expect(mockRecurringService.getUpcomingBills).toHaveBeenCalledWith(
-        householdId,
+        { householdId, userId: "user-123", role: "owner" },
         7,
       );
     });
@@ -1243,7 +1269,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
       await request(app).get("/api/recurring/upcoming?days=1000");
 
       expect(mockRecurringService.getUpcomingBills).toHaveBeenCalledWith(
-        householdId,
+        { householdId, userId: "user-123", role: "owner" },
         365, // Capped
       );
     });
@@ -1290,34 +1316,34 @@ describe("Recurring Module - Extended Integration Tests", () => {
 
   describe("EDGE CASES - List Filters", () => {
     it("lists with includeInactive=true", async () => {
-      mockRecurringService.getRecurringRules.mockResolvedValue([]);
+      mockRecurringService.getVisibleRecurringRules.mockResolvedValue([]);
 
       await request(app).get("/api/recurring?includeInactive=true");
 
-      expect(mockRecurringService.getRecurringRules).toHaveBeenCalledWith(
-        householdId,
+      expect(mockRecurringService.getVisibleRecurringRules).toHaveBeenCalledWith(
+        { householdId, userId: "user-123", role: "owner" },
         expect.objectContaining({ includeInactive: true }),
       );
     });
 
     it("lists with includePaused=true", async () => {
-      mockRecurringService.getRecurringRules.mockResolvedValue([]);
+      mockRecurringService.getVisibleRecurringRules.mockResolvedValue([]);
 
       await request(app).get("/api/recurring?includePaused=true");
 
-      expect(mockRecurringService.getRecurringRules).toHaveBeenCalledWith(
-        householdId,
+      expect(mockRecurringService.getVisibleRecurringRules).toHaveBeenCalledWith(
+        { householdId, userId: "user-123", role: "owner" },
         expect.objectContaining({ includePaused: true }),
       );
     });
 
     it("lists with both filters", async () => {
-      mockRecurringService.getRecurringRules.mockResolvedValue([]);
+      mockRecurringService.getVisibleRecurringRules.mockResolvedValue([]);
 
       await request(app).get("/api/recurring?includeInactive=true&includePaused=true");
 
-      expect(mockRecurringService.getRecurringRules).toHaveBeenCalledWith(
-        householdId,
+      expect(mockRecurringService.getVisibleRecurringRules).toHaveBeenCalledWith(
+        { householdId, userId: "user-123", role: "owner" },
         expect.objectContaining({
           includeInactive: true,
           includePaused: true,
@@ -1436,7 +1462,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
       expect(response.status).toBe(201);
     });
 
-    it("rejects dayOfMonth above 28 to ensure all months work", async () => {
+    it("rejects an anchor outside the calendar month", async () => {
       const response = await request(app)
         .post("/api/recurring")
         .send({
@@ -1446,7 +1472,7 @@ describe("Recurring Module - Extended Integration Tests", () => {
           type: "expense",
           frequency: "monthly",
           nextDueDate: "2024-02-29",
-          dayOfMonth: 31, // Not all months have 31 days
+          dayOfMonth: 32,
         });
 
       expect(response.status).toBe(400);
@@ -1454,74 +1480,35 @@ describe("Recurring Module - Extended Integration Tests", () => {
   });
 
   describe("AUDIT LOGGING - Lifecycle Actions", () => {
-    it("logs skip action to audit", async () => {
-      const rule = { id: ruleId, name: "Test", nextDueDate: "2024-02-01" };
-      const skippedRule = { ...rule, nextDueDate: "2024-03-01" };
+    // R14: the audit row is written inside the service transaction
+    // (RecurringLifecycleService); the controller hands it the request IP.
+    // completion-r14.recurring-skip-pause-end.realdb asserts the real row.
+    it.each([
+      ["skip", "skipped", {}],
+      ["pause", "paused", {}],
+      ["resume", "resumed", {}],
+      ["end", "ended", { endDate: "2024-12-31" }],
+    ] as const)("passes the %s action and the request IP to the audited service write", async (path, action, body) => {
+      const rule = { id: ruleId, name: "Test" };
+      mockRecurringService.changeLifecycle.mockResolvedValue({ beforeRule: rule, rule });
 
-      mockRecurringService.getRecurringById.mockResolvedValue(rule);
-      mockRecurringService.skipNextOccurrence.mockResolvedValue(skippedRule);
+      await request(app).post(`/api/recurring/${ruleId}/${path}`).send(body).expect(200);
 
-      await request(app).post(`/api/recurring/${ruleId}/skip`).send({});
-
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "recurring_rule",
-          entityId: ruleId,
-        }),
+      expect(mockRecurringService.changeLifecycle).toHaveBeenCalledWith(
+        ruleId, expect.objectContaining({ householdId }), expect.objectContaining({ action }), "127.0.0.1",
       );
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
 
-    it("logs pause action to audit", async () => {
-      const rule = { id: ruleId, name: "Test", isPaused: false };
-      const pausedRule = { ...rule, isPaused: true };
+    it("forwards a named skip occurrence and rejects a malformed one", async () => {
+      const rule = { id: ruleId, name: "Test" };
+      mockRecurringService.changeLifecycle.mockResolvedValue({ beforeRule: rule, rule });
 
-      mockRecurringService.getRecurringById.mockResolvedValue(rule);
-      mockRecurringService.pauseRecurring.mockResolvedValue(pausedRule);
-
-      await request(app).post(`/api/recurring/${ruleId}/pause`).send({});
-
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "recurring_rule",
-          metadata: { operation: "pause" },
-        }),
+      await request(app).post(`/api/recurring/${ruleId}/skip`).send({ occurrenceDate: "2024-02-01" }).expect(200);
+      expect(mockRecurringService.changeLifecycle).toHaveBeenCalledWith(
+        ruleId, expect.anything(), { action: "skipped", occurrenceDate: "2024-02-01" }, "127.0.0.1",
       );
-    });
-
-    it("logs resume action to audit", async () => {
-      const rule = { id: ruleId, name: "Test", isPaused: true };
-      const resumedRule = { ...rule, isPaused: false };
-
-      mockRecurringService.getRecurringById.mockResolvedValue(rule);
-      mockRecurringService.resumeRecurring.mockResolvedValue(resumedRule);
-
-      await request(app).post(`/api/recurring/${ruleId}/resume`).send({});
-
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "recurring_rule",
-          metadata: { operation: "resume" },
-        }),
-      );
-    });
-
-    it("logs end action to audit", async () => {
-      const rule = { id: ruleId, name: "Test", isActive: true };
-      const endedRule = { ...rule, isActive: false, endDate: "2024-12-31" };
-
-      mockRecurringService.getRecurringById.mockResolvedValue(rule);
-      mockRecurringService.endRecurring.mockResolvedValue(endedRule);
-
-      await request(app)
-        .post(`/api/recurring/${ruleId}/end`)
-        .send({ endDate: "2024-12-31" });
-
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "recurring_rule",
-          metadata: { operation: "end" },
-        }),
-      );
+      await request(app).post(`/api/recurring/${ruleId}/skip`).send({ occurrenceDate: "2024-02-30" }).expect(400);
     });
   });
 });

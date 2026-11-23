@@ -17,87 +17,64 @@
  * navigated to routes that return the 404 page. None of that matched the
  * shipped UI or router.
  *
- * First-time households see a "Welcome to Your Reports Dashboard" widget
- * onboarding modal on load; `dismissOnboardingIfPresent` clears it the same
- * way a real user would ("Skip for Now") before each test proceeds.
+ * Each test signs in as a fresh synthetic household (an account, an expense
+ * and an income this month, so the summary cards have figures). A new
+ * household has not finished widget setup, so the one-time "Welcome to Your
+ * Reports Dashboard" onboarding dialog always opens; each test asserts it and
+ * dismisses it the way a user would ("Skip for Now"). Nothing is optional: a
+ * missing dialog, heading or card fails the test.
  *
- * NOT gated in `test:e2e:smoke` (package.json) yet. The rewritten assertions
- * pass locally, but the very first `/reports` navigation in this dev
- * environment is a genuine cold-start outlier: the annual dashboard is the
- * heaviest bundle in the app (recharts + every widget), and on an unwarmed
- * Vite dev server + a heavily-reused shared dev DB, that first paint has
- * taken anywhere from ~10s to well over 90s across repeated runs, which is
- * not safe to gate on. The `beforeAll` warm-up pass below (best-effort,
- * failure ignored) and the `dismissOnboardingIfPresent` fix meaningfully
- * reduced the failure rate (was 6/6 failing before either fix; now typically
- * 5/6 or 6/6 passing), but "loads the Annual Dashboard tab by default" still
- * intermittently times out waiting on that first paint. Re-time this in CI
- * (a fresh, non-shared DB) before adding it to the gate - if CI's first load
- * is consistently fast, it likely just needs its own generous first-load
- * timeout the way transactions.spec.ts already does; if it is still slow
- * there, that is a real performance finding about the annual dashboard, not
- * a test problem.
+ * Gated in `test:e2e:smoke` (QA-01). The annual dashboard is the heaviest
+ * bundle in the app, so the first paint gets a long timeout rather than a
+ * best-effort warm-up whose failure was ignored.
  */
 
-import { test, expect, type Page } from "@playwright/test";
-import { login } from "./utils/login";
+import { randomUUID } from "node:crypto";
+import { test, expect, type Page } from "./protected-test";
+import { createCompletionFixture, type CompletionFixture } from "../server/testing/fixtures/completion-fixtures";
+import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
+import { signInAs } from "./utils/fixture-session";
 
-async function dismissOnboardingIfPresent(page: Page): Promise<void> {
-  const onboardingDialog = page.getByRole("dialog", {
-    name: /welcome to your reports dashboard/i,
+/** The annual dashboard is the heaviest first paint; a cold server can take this long. */
+const FIRST_PAINT_MS = 90_000;
+
+async function householdWithActivity(): Promise<CompletionFixture> {
+  const fixture = await createCompletionFixture();
+  const accountId = randomUUID();
+  await withFixtureClient(async (client) => {
+    await client.query("BEGIN");
+    try {
+      await client.query("INSERT INTO accounts (id, household_id, name, type, balance, currency, is_private) VALUES ($1, $2, 'Synthetic reports account', 'checking', 1000, 'ZMW', false)",
+        [accountId, fixture.householdId]);
+      await client.query(`INSERT INTO transactions (household_id, account_id, category_id, owner_user_id, name, amount, currency, type, date)
+        VALUES ($1, $2, $3, $4, 'Synthetic groceries', 120.00, 'ZMW', 'expense', current_date)`,
+      [fixture.householdId, accountId, fixture.expenseCategoryId, fixture.userId]);
+      await client.query(`INSERT INTO transactions (household_id, account_id, owner_user_id, name, amount, currency, type, date)
+        VALUES ($1, $2, $3, 'Synthetic salary', 900.00, 'ZMW', 'income', current_date)`,
+      [fixture.householdId, accountId, fixture.userId]);
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
   });
-  // The onboarding modal (shown once per household, until "Skip for Now" or
-  // "Save & Continue" is chosen) opens asynchronously after the
-  // widget-preferences query resolves - it is not present on first paint.
-  // An instant `isVisible()` check right after navigation reliably misses
-  // it, which leaves the modal open and its overlay silently blocks every
-  // later click in the test (each failing only after the full actionability
-  // timeout). Wait for it with a real timeout instead, and treat "it never
-  // appeared" as the normal case for a household that already completed
-  // onboarding in an earlier test run.
-  try {
-    await onboardingDialog.waitFor({ state: "visible", timeout: 10_000 });
-  } catch {
-    return;
-  }
-  await onboardingDialog.getByRole("button", { name: /skip for now/i }).click();
-  await expect(onboardingDialog).not.toBeVisible();
+  return fixture;
+}
+
+async function skipOnboarding(page: Page): Promise<void> {
+  // It opens after the widget-preferences query resolves, not on first paint.
+  const onboarding = page.getByRole("dialog", { name: /welcome to your reports dashboard/i });
+  await expect(onboarding).toBeVisible({ timeout: FIRST_PAINT_MS });
+  await onboarding.getByRole("button", { name: /skip for now/i }).click();
+  await expect(onboarding).toBeHidden();
 }
 
 test.describe("Reports", () => {
-  // The Reports/Annual Dashboard bundle (recharts + every widget) is by far
-  // the heaviest page in the app, and Vite's dev server transforms modules
-  // on demand: the *first* request for this chunk graph can take well over
-  // a minute, independent of anything under test. `--workers=1` runs every
-  // test in this file in one worker/process, so paying that cold-start cost
-  // once here (generous, best-effort, failure ignored) means the timed
-  // tests below - each still using a real, honest timeout - hit an already
-  // -warmed dev server instead of flaking on a cold one.
-  test.beforeAll(async ({ browser }, testInfo) => {
-    testInfo.setTimeout(150_000);
-    const page = await browser.newPage();
-    try {
-      await login(page);
-      await page.goto("/reports");
-      await page
-        .getByRole("heading", { name: "Reports", level: 1 })
-        .waitFor({ state: "visible", timeout: 120_000 })
-        .catch(() => {});
-    } finally {
-      await page.close();
-    }
-  });
+  test.describe.configure({ timeout: FIRST_PAINT_MS * 2 });
 
   test.beforeEach(async ({ page }) => {
-    await login(page);
+    await signInAs(page, await householdWithActivity());
     await page.goto("/reports");
-    await expect(page).toHaveURL(/\/reports/);
-    // Generous even after the warm-up above: this is still a real, data-heavy
-    // first paint per test (fresh browser context per test = no client cache).
-    await expect(
-      page.getByRole("heading", { name: "Reports", level: 1 }),
-    ).toBeVisible({ timeout: 30_000 });
-    await dismissOnboardingIfPresent(page);
+    // The onboarding dialog is modal: until it closes the page behind it, h1 included, is out of the accessibility tree.
+    await skipOnboarding(page);
+    await expect(page.getByRole("heading", { name: "Reports", level: 1 })).toBeVisible();
   });
 
   test("loads the Annual Dashboard tab by default", async ({ page }) => {

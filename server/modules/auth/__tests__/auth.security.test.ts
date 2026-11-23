@@ -35,9 +35,21 @@ const mockNotificationService = vi.hoisted(() => ({
 const mockAuditService = vi.hoisted(() => ({
   log: vi.fn().mockResolvedValue(undefined),
 }));
+const mockConsumeMfa = vi.hoisted(() => vi.fn());
+vi.mock("../auth.mfa-credential", () => ({
+  storeMfaChallenge: (user: { id: string }, hash: string, expiry: Date) => mockUserRepository.update(user.id, { mfaCode: hash, mfaCodeExpiry: expiry }),
+  consumeMfaCredential: mockConsumeMfa,
+}));
 
 vi.mock("../../../repositories/UserRepository", () => ({
   userRepository: mockUserRepository,
+}));
+// Durable identity storage is covered by completion-r01's real PG store tests.
+// These controller tests retain their existing mocked repository boundary.
+vi.mock("../../../services/session-identity", () => ({
+  assertCurrentCredential: vi.fn().mockResolvedValue(undefined),
+  registerSessionIdentity: (_user: unknown, data: unknown) => mockUserRepository.upsertSession(data),
+  revokeLoginSession: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("../../../auth", () => ({
@@ -83,6 +95,7 @@ vi.mock("../../../middleware/rateLimit", () => ({
 import { authController } from "../auth.controller";
 import { verifyPassword } from "../../../auth";
 import { parseDeviceInfo, isKnownDeviceSession } from "../auth.device";
+import { UnauthorizedError } from "../../../core/errors";
 
 const mockUser = {
   id: "123e4567-e89b-12d3-a456-426614174000",
@@ -498,7 +511,7 @@ describe("Auth Module Security Tests", () => {
         );
       });
 
-      it("should verify successful MFA login with hashed code", async () => {
+      it("should delegate MFA completion to guarded pending-session consumption", async () => {
         // Mock Setup
         const mfaUser = { ...mockUser, mfaEnabled: true };
         mockUserRepository.findByEmail.mockResolvedValue(mfaUser);
@@ -517,8 +530,12 @@ describe("Auth Module Security Tests", () => {
           password: "password123",
         });
 
-        // 2. Verify MFA
-        (verifyPassword as any).mockResolvedValueOnce(true); // MFA code check
+        // Atomic consumption is tested against PostgreSQL; this controller
+        // test asserts it delegates the pending identity and code correctly.
+        mockConsumeMfa.mockImplementationOnce(async (req) => {
+          expect(req.session.mfaPendingUserId).toBe(mfaUser.id);
+          return { user: mfaUser, kind: "otp" };
+        });
 
         const res = await agent.post("/api/auth/mfa/verify").send({
           code: "123456",
@@ -526,12 +543,7 @@ describe("Auth Module Security Tests", () => {
 
         expect(res.status).toBe(200);
 
-        // Assert verifyPassword was called with provided code and stored hash
-        // First call was login, second call is MFA
-        expect(verifyPassword).toHaveBeenLastCalledWith(
-          "123456",
-          "hashed_stored_code",
-        );
+        expect(mockConsumeMfa).toHaveBeenCalledWith(expect.anything(), "123456", "login");
       });
 
       it("should reject invalid MFA code", async () => {
@@ -551,7 +563,7 @@ describe("Auth Module Security Tests", () => {
         });
 
         // Verify MFA - Incorrect code
-        (verifyPassword as any).mockResolvedValueOnce(false); // MFA check fails
+        mockConsumeMfa.mockRejectedValueOnce(new UnauthorizedError("Invalid or expired MFA code"));
 
         const res = await agent.post("/api/auth/mfa/verify").send({
           code: "999999",

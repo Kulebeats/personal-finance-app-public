@@ -19,9 +19,11 @@
  *   - missing rate  → the report throws (never a rate-1 total), and
  *   - seeded rate   → the report converts correctly to the cent.
  *
- * fx_rates is a GLOBAL table, so the two sides use different currencies to
+ * FX tables are GLOBAL, so the two sides use different currencies to
  * avoid defeating each other: TZS (no rate seeded anywhere) for the
  * fail-closed household, MWK (rate seeded here) for the conversion household.
+ * Budget comparison requires a provider quote covering the expense date;
+ * the other report families use the legacy fx_rates fixture.
  *
  * Run against the test DB ONLY (never finance_app):
  *   DATABASE_URL=...finance_app_test npx vitest run \
@@ -44,6 +46,9 @@ import {
   accounts,
   transactions,
   fxRates,
+  householdMembers,
+  providerFxQuotes,
+  users,
 } from "@shared/schema";
 import { CashflowReportRepository } from "../CashflowReportRepository";
 import { CashflowBudgetComparisonRepository } from "../CashflowBudgetComparisonRepository";
@@ -53,10 +58,10 @@ import { CompositeReportRepository } from "../CompositeReportRepository";
 
 const FROM = "2026-01-01";
 const TO = "2026-01-31";
-// The raw-SQL report queries interpolate `${userId}::uuid` and require a
-// defined value (the HTTP layer always provides one). The seeded rows are
-// non-private, so any UUID sees them.
+// Budget comparison requires a persisted reader membership, even for shared rows.
 const USER_ID = randomUUID();
+const OUTSIDER_USER_ID = randomUUID();
+const PROVIDER_QUOTE_ID = randomUUID();
 // Currency of the household that has NO rate row → reports must fail closed.
 const UNRATED_CURRENCY = "TZS";
 // Currency of the household whose rate IS seeded → reports must convert.
@@ -78,6 +83,12 @@ async function seedHousehold(
     id: householdId,
     name,
     currency: "USD",
+  });
+
+  await db.insert(householdMembers).values({
+    householdId,
+    userId: USER_ID,
+    role: "member",
   });
 
   await db.insert(accounts).values({
@@ -110,8 +121,8 @@ async function seedHousehold(
     displayOrder: 0,
   });
 
-  // One foreign-currency income and one expense in January 2026. ownerUserId
-  // stays null (non-private) so reports include them without a seeded user.
+  // One shared foreign-currency income and expense in January 2026, readable
+  // by the seeded household member.
   await db.insert(transactions).values([
     {
       id: randomUUID(),
@@ -177,9 +188,10 @@ describe("Report SQL aggregation — FX fail-closed (real DB)", () => {
   // Household B: MWK transactions plus MWK->USD rate 0.045 → reports convert.
   let withRate: Awaited<ReturnType<typeof seedHousehold>>;
   // Household C: unrated TZS transactions in a hide_transactions account.
-  // Aggregates that do NOT filter hidden accounts (expense classification,
-  // category averages, budget-comparison spending) still convert these rows,
-  // so their guard must cover hidden accounts too.
+  // Aggregates that do NOT filter hidden accounts (category averages,
+  // budget-comparison spending) still convert these rows, so their guard must
+  // cover hidden accounts too. The expense classification reads visible
+  // accounts only (A-24), so these rows must not block it.
   let hiddenNoRate: Awaited<ReturnType<typeof seedHousehold>>;
 
   const cashflowRepo = new CashflowReportRepository();
@@ -189,6 +201,14 @@ describe("Report SQL aggregation — FX fail-closed (real DB)", () => {
   const compositeRepo = new CompositeReportRepository();
 
   beforeAll(async () => {
+    await db.insert(users).values([USER_ID, OUTSIDER_USER_ID].map((id) => ({
+      id,
+      username: `report-fx-${id}`,
+      email: `report-fx-${id}@example.com`,
+      passwordHash: "repository-fixture-no-login",
+      emailVerified: true,
+    })));
+
     // Deterministic reruns: clear any residue for the pairs this suite owns.
     await deleteRatePair(UNRATED_CURRENCY, "USD");
     await deleteRatePair(RATED_CURRENCY, "USD");
@@ -217,13 +237,28 @@ describe("Report SQL aggregation — FX fail-closed (real DB)", () => {
       date: "2026-01-01",
       source: "manual",
     });
+
+    // Budget comparison accepts dated provider evidence, not a manual rate.
+    await db.insert(providerFxQuotes).values({
+      id: PROVIDER_QUOTE_ID,
+      fromCurrency: RATED_CURRENCY,
+      toCurrency: "USD",
+      provider: "exchangerate_api",
+      quotedAt: new Date("2026-01-15T00:00:00Z"),
+      effectiveDate: "2026-01-15",
+      validThrough: "2026-01-15",
+      rate: "0.0450",
+    });
   });
 
   afterAll(async () => {
+    await db.delete(providerFxQuotes).where(eq(providerFxQuotes.id, PROVIDER_QUOTE_ID));
     await deleteRatePair(RATED_CURRENCY, "USD");
     await cleanupHousehold(noRate.householdId);
     await cleanupHousehold(withRate.householdId);
     await cleanupHousehold(hiddenNoRate.householdId);
+    await db.delete(users).where(eq(users.id, USER_ID));
+    await db.delete(users).where(eq(users.id, OUTSIDER_USER_ID));
   });
 
   describe("CashflowReportRepository.getCashflow", () => {
@@ -321,17 +356,33 @@ describe("Report SQL aggregation — FX fail-closed (real DB)", () => {
   });
 
   describe("CashflowBudgetComparisonRepository.getSpendingByCategory", () => {
-    it("throws when a transaction currency has no rate to the base currency", async () => {
+    it("rejects a member's missing conversion with FINANCIAL_DATA_UNAVAILABLE", async () => {
       await expect(
         budgetComparisonRepo.getSpendingByCategory(noRate.householdId, {
           from: FROM,
           to: TO,
           userId: USER_ID,
         }),
-      ).rejects.toThrow(MISSING_RATE_ERROR);
+      ).rejects.toMatchObject({
+        statusCode: 422,
+        code: "FINANCIAL_DATA_UNAVAILABLE",
+      });
     });
 
-    it("converts per-category spending at the seeded rate", async () => {
+    it("denies a seeded user without household membership", async () => {
+      await expect(
+        budgetComparisonRepo.getSpendingByCategory(withRate.householdId, {
+          from: FROM,
+          to: TO,
+          userId: OUTSIDER_USER_ID,
+        }),
+      ).rejects.toMatchObject({
+        statusCode: 403,
+        code: "FORBIDDEN",
+      });
+    });
+
+    it("converts per-category spending at the dated provider quote", async () => {
       const result = await budgetComparisonRepo.getSpendingByCategory(
         withRate.householdId,
         {
@@ -350,12 +401,12 @@ describe("Report SQL aggregation — FX fail-closed (real DB)", () => {
     });
   });
 
-  describe("aggregates that include hidden accounts", () => {
-    // These queries have no hide_transactions filter, so their guard must
-    // cover hidden-account currencies too (reviewer-flagged false negative).
-    it("getExpenseClassification throws for an unrated currency in a hidden account", async () => {
+  describe("CashflowReportRepository.getExpenseClassification", () => {
+    // Both reads behind this figure (the category breakdown and the monthly
+    // series) filter hide_transactions, so the guard checks visible rows only.
+    it("throws for an unrated currency on an expense the figure includes", async () => {
       await expect(
-        cashflowRepo.getExpenseClassification(hiddenNoRate.householdId, {
+        cashflowRepo.getExpenseClassification(noRate.householdId, {
           from: FROM,
           to: TO,
           userId: USER_ID,
@@ -363,6 +414,21 @@ describe("Report SQL aggregation — FX fail-closed (real DB)", () => {
       ).rejects.toThrow(MISSING_RATE_ERROR);
     });
 
+    it("leaves an unrated hidden-account expense out instead of failing (A-24)", async () => {
+      const result = await cashflowRepo.getExpenseClassification(hiddenNoRate.householdId, {
+        from: FROM,
+        to: TO,
+        userId: USER_ID,
+      });
+      expect(result.total.currency).toBe("USD");
+      expect(result.total.amount).toMatch(/^0(\.0+)?$/);
+      expect(result.accuracy.totalCategories).toBe(0);
+    });
+  });
+
+  describe("aggregates that include hidden accounts", () => {
+    // These queries have no hide_transactions filter, so their guard must
+    // cover hidden-account currencies too (reviewer-flagged false negative).
     it("getSpendingByCategory throws for an unrated currency in a hidden account", async () => {
       await expect(
         budgetComparisonRepo.getSpendingByCategory(hiddenNoRate.householdId, {
@@ -370,7 +436,10 @@ describe("Report SQL aggregation — FX fail-closed (real DB)", () => {
           to: TO,
           userId: USER_ID,
         }),
-      ).rejects.toThrow(MISSING_RATE_ERROR);
+      ).rejects.toMatchObject({
+        statusCode: 422,
+        code: "FINANCIAL_DATA_UNAVAILABLE",
+      });
     });
   });
 

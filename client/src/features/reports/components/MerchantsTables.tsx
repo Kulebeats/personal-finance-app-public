@@ -10,7 +10,7 @@ type MerchantsTablesProps = {
   onMerchantSelect: (id: string) => void;
   totalValue: number;
   categoryTotalValue: number;
-  currency: string;
+  currency: string | null;
 };
 
 export function MerchantsTables({

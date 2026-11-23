@@ -1,15 +1,16 @@
 import { type Request, type Response, type NextFunction } from "express";
 import { householdRepository } from "../repositories/HouseholdRepository";
 import { logger } from "../utils/logger";
+import { isHouseholdRole } from "../core/authz/capabilities";
+import { resolveVerifiedSessionUser } from "../auth";
+import { HttpError } from "../core/errors";
+import type { HouseholdContext } from "../core/authz/implicit-household-context";
+import { resolveRequestImplicitHouseholdContext, readSessionPreconditions, assertHouseholdPrecondition } from "../core/authz/session-preconditions";
 
 /**
  * Household context attached to request after middleware verification
  */
-export interface HouseholdContext {
-  householdId: string;
-  userId: string;
-  role: "owner" | "admin" | "member" | "view_only";
-}
+export type { HouseholdContext } from "../core/authz/implicit-household-context";
 
 /**
  * Extend Express Request to include household context
@@ -38,33 +39,24 @@ export async function householdGuard(
   res: Response,
   next: NextFunction
 ) {
-  // Ensure user is authenticated (should be handled by requireAuth middleware first)
-  if (!req.session.userId) {
-    return res.status(401).json({
-      success: false,
-      error: {
-        code: "UNAUTHORIZED",
-        message: "Authentication required",
-      },
-    });
-  }
-
-  const userId = req.session.userId;
+  delete req.householdContext;
+  const user = await resolveVerifiedSessionUser(req, res);
+  if (!user) return;
+  const userId = user.id;
   logger.debug("Household guard check", {
     requestId: req.requestId,
     userId: userId?.substring(0, 8) + "...",
   });
 
   try {
-    // Resolve household and membership
-    const household = await householdRepository.findByUserId(userId);
+    const context = await resolveRequestImplicitHouseholdContext(req, userId);
     logger.debug("Household resolved", {
       requestId: req.requestId,
-      householdFound: !!household,
-      householdId: household?.id?.substring(0, 8) + "...",
+      householdFound: !!context,
+      householdId: context?.householdId.substring(0, 8) + "...",
     });
 
-    if (!household) {
+    if (!context) {
       logger.warn("No household found for user", {
         requestId: req.requestId,
         userId: userId?.substring(0, 8) + "...",
@@ -81,32 +73,13 @@ export async function householdGuard(
       });
     }
 
-    // Get household membership to determine role
-    const membership = await householdRepository.findMember(
-      household.id,
-      userId
-    );
-
-    if (!membership) {
-      // User is not a member of this household
-      return res.status(403).json({
-        success: false,
-        error: {
-          code: "FORBIDDEN",
-          message: "Access denied. You are not a member of this household.",
-        },
-      });
-    }
-
-    // Attach household context to request
-    req.householdContext = {
-      householdId: household.id,
-      userId: userId,
-      role: membership.role as "owner" | "admin" | "member" | "view_only",
-    };
+    req.householdContext = context;
 
     next();
   } catch (error) {
+    if (error instanceof HttpError) {
+      return res.status(error.statusCode).json(error.toJSON());
+    }
     logger.error(
       "Household guard error",
       {
@@ -142,19 +115,11 @@ export async function householdGuardWithId(
   res: Response,
   next: NextFunction
 ) {
-  // Ensure user is authenticated
-  if (!req.session.userId) {
-    return res.status(401).json({
-      success: false,
-      error: {
-        code: "UNAUTHORIZED",
-        message: "Authentication required",
-      },
-    });
-  }
-
-  const userId = req.session.userId;
-  const targetHouseholdId = req.params.householdId || req.body.householdId;
+  delete req.householdContext;
+  const user = await resolveVerifiedSessionUser(req, res, { explicitHousehold: true });
+  if (!user) return;
+  const userId = user.id;
+  const targetHouseholdId = req.params.householdId || req.body?.householdId;
 
   if (!targetHouseholdId) {
     return res.status(400).json({
@@ -173,7 +138,7 @@ export async function householdGuardWithId(
       userId
     );
 
-    if (!membership) {
+    if (!membership || !isHouseholdRole(membership.role)) {
       // User is attempting to access another household's resources
       return res.status(403).json({
         success: false,
@@ -185,15 +150,19 @@ export async function householdGuardWithId(
       });
     }
 
+    assertHouseholdPrecondition(readSessionPreconditions(req), targetHouseholdId);
     // Attach household context to request
     req.householdContext = {
       householdId: targetHouseholdId,
       userId: userId,
-      role: membership.role as "owner" | "admin" | "member" | "view_only",
+      role: membership.role,
     };
 
     next();
   } catch (error) {
+    if (error instanceof HttpError) {
+      return res.status(error.statusCode).json(error.toJSON());
+    }
     logger.error(
       "Household guard with ID error",
       {

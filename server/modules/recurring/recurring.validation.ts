@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { positiveMoneyDtoSchema } from "../../core/validation/money";
 import { createTransactionBaseSchema } from "../transactions/transactions.validation";
+import { MAX_PATTERN_CONTRIBUTORS, patternOptionsSchema, patternSelectionSchema } from "@shared/recurring-pattern";
 
 /**
  * Recurring Transaction Validation Schemas
@@ -68,7 +69,7 @@ export const createRecurringSchema = z
     startDate: validDateSchema.optional(),
     endDate: validDateSchema.optional().nullable(),
     nextDueDate: validDateSchema,
-    dayOfMonth: z.number().int().min(1).max(28).optional().nullable(), // Max 28 for all months
+    dayOfMonth: z.number().int().min(1).max(31).optional().nullable(),
     dayOfWeek: z.number().int().min(0).max(6).optional().nullable(),
     reminderDays: z.number().int().min(0).max(30).default(3),
     reminderEmail: z.boolean().default(false),
@@ -148,6 +149,13 @@ export const createRecurringFromTransactionSchema = baseTransactionSchema
         path: ["name"],
       });
     }
+    data.splits?.forEach((split, index) => {
+      if (split.amount.currency !== data.amount.currency) ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Split currency must match the transaction currency",
+        path: ["splits", index, "amount", "currency"],
+      });
+    });
   })
   .transform((data) => {
     const { description, recurringRuleId, amount, splits, ...rest } = data;
@@ -177,6 +185,8 @@ export const createRecurringFromExistingTransactionSchema =
  */
 export const updateRecurringSchema = z
   .object({
+    confirmDenomination: z.boolean().optional(),
+    expectedDefinition: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     accountId: z.string().uuid().optional(),
     name: z.string().min(1).max(255).optional(),
     amount: positiveMoneyAmountSchema.optional(),
@@ -190,7 +200,7 @@ export const updateRecurringSchema = z
     intervalUnit: z.enum(["days", "weeks", "months", "years"]).optional(),
     endDate: validDateSchema.optional().nullable(),
     nextDueDate: validDateSchema.optional(),
-    dayOfMonth: z.number().int().min(1).max(28).optional().nullable(), // Max 28 for all months
+    dayOfMonth: z.number().int().min(1).max(31).optional().nullable(),
     dayOfWeek: z.number().int().min(0).max(6).optional().nullable(),
     reminderDays: z.number().int().min(0).max(30).optional(),
     reminderEmail: z.boolean().optional(),
@@ -205,6 +215,12 @@ export const updateRecurringSchema = z
     isPaused: z.boolean().optional(),
   })
   .superRefine((data, ctx) => {
+    if (data.confirmDenomination && data.amount === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Enter the amount to confirm its denomination", path: ["amount"] });
+    }
+    if (data.confirmDenomination && !data.expectedDefinition) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Reload the observed definition before confirming denomination", path: ["expectedDefinition"] });
+    }
     if (data.frequency === "custom") {
       if (!data.intervalUnit || !data.intervalValue) {
         ctx.addIssue({
@@ -230,6 +246,18 @@ export const listRecurringQuerySchema = z.object({
     .transform((v) => v === "true"),
 });
 
+// PostgreSQL's calendar represents the year before 0001 as 0001 BC.
+const calendarDateSchema = validDateSchema.refine(date => !date.startsWith("0000-"), {
+  message: "Year must be between 0001 and 9999",
+});
+export const recurringCalendarQuerySchema = z.object({
+  from: calendarDateSchema,
+  to: calendarDateSchema,
+}).refine(({ from, to }) => from <= to && from.slice(0, 7) === to.slice(0, 7), {
+  path: ["to"],
+  message: "Calendar date range must be within one month",
+});
+
 /**
  * Schema for upcoming bills query
  */
@@ -248,13 +276,7 @@ export const upcomingQuerySchema = z.object({
 /**
  * Pattern detection and linking schemas
  */
-export const detectPatternsSchema = z.object({
-  minOccurrences: z.number().int().min(2).max(12).default(3),
-  lookbackMonths: z.number().int().min(1).max(24).default(6),
-  confidenceThreshold: z.number().min(50).max(100).default(80),
-  merchantId: z.string().uuid().optional(),
-  categoryId: z.string().uuid().optional(),
-});
+export const detectPatternsSchema = patternOptionsSchema;
 
 export const confirmPatternSchema = z.object({
   accountId: z.string().uuid(),
@@ -263,20 +285,28 @@ export const confirmPatternSchema = z.object({
     type: recurringTypeSchema,
     merchantId: z.string().uuid().optional().nullable(),
     estimatedAmount: positiveMoneyDtoSchema,
-    amountVariance: z.number().min(0).max(50).optional(), // Cap at 50%
+    amountVariance: z.number().finite().min(0).optional(), // Measurement is distinct from the bounded rule tolerance.
     confidence: z.number().min(0).max(100).optional(),
     frequency: frequencySchema,
-    dayOfMonth: z.number().int().min(1).max(28).optional().nullable(), // Max 28 for all months
+    dayOfMonth: z.number().int().min(1).max(31).optional().nullable(),
     dayOfWeek: z.number().int().min(0).max(6).optional().nullable(),
     suggestedStartDate: validDateSchema,
     suggestedNextDueDate: validDateSchema,
-    sampleTransactionIds: z.array(z.string().uuid()),
+    sampleTransactionIds: z.array(z.string().uuid().transform(id => id.toLowerCase())).min(1).max(MAX_PATTERN_CONTRIBUTORS)
+      .refine(ids => new Set(ids).size === ids.length, "Duplicate contributor IDs are not allowed"),
+    occurrences: z.number().int().min(2).optional(),
+    selection: patternSelectionSchema.optional(),
   }),
 });
 
 export const linkTransactionSchema = z.object({
   transactionId: z.string().uuid(),
   matchConfidence: z.number().int().min(0).max(100).optional(),
+});
+
+/** R14: naming the skipped occurrence makes a repeated skip an idempotent no-op. */
+export const skipRecurringSchema = z.object({
+  occurrenceDate: validDateSchema.optional(),
 });
 
 export const endRecurringSchema = z.object({

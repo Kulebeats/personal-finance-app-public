@@ -12,6 +12,7 @@ import type { PayDownGoalDraft } from "./PayDownGoalForm";
 import type { InvestmentGoalDraft } from "./InvestmentGoalForm";
 import type { AssignmentDraft } from "./GoalAssignmentStep";
 import { parseMoney } from "@/lib/utils";
+import { saveUpRequiredErrors, payDownRequiredErrors, investmentRequiredErrors } from "./goalRequiredFields";
 
 /** Minimal account type for wizard data functions */
 interface AccountLike {
@@ -84,30 +85,15 @@ export function getMonthsRemaining(targetDate?: string): number | null {
 }
 
 export function canSubmitSaveUp(draft: SaveUpGoalDraft): boolean {
-  return (
-    draft.name.trim().length > 0 &&
-    draft.targetAmount.length > 0 &&
-    (draft.goalType !== "other" || draft.otherGoalType.trim().length > 0)
-  );
+  return Object.keys(saveUpRequiredErrors(draft)).length === 0;
 }
 
 export function canSubmitPayDown(draft: PayDownGoalDraft): boolean {
-  return (
-    draft.name.trim().length > 0 &&
-    draft.debtAccountId.length > 0 &&
-    draft.interestRate.length > 0 &&
-    draft.minimumPayment.length > 0 &&
-    draft.monthlyPayment.length > 0 &&
-    (draft.goalType !== "other" || draft.otherGoalType.trim().length > 0)
-  );
+  return Object.keys(payDownRequiredErrors(draft)).length === 0;
 }
 
 export function canSubmitInvestment(draft: InvestmentGoalDraft): boolean {
-  return (
-    draft.name.trim().length > 0 &&
-    draft.targetAmount.length > 0 &&
-    (draft.goalType !== "other" || draft.otherGoalType.trim().length > 0)
-  );
+  return Object.keys(investmentRequiredErrors(draft)).length === 0;
 }
 
 export function buildSaveUpPayload(draft: SaveUpGoalDraft, currency: string) {

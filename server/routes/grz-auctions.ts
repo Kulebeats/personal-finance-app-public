@@ -7,14 +7,12 @@ import { grzAuctionResults } from "@shared/schema";
 import { householdGuard } from "../middleware/householdGuard";
 import { requireRole } from "../middleware/validateEntity";
 import { requireAuth } from "../auth";
-import { generalLimiter } from "../middleware/rateLimit";
 import { businessAuditService } from "../services/BusinessAuditService";
 
 const router = Router();
 
 // SEC-AUTH-004: Apply authentication, rate limiting, and household isolation
 router.use(requireAuth);
-router.use(generalLimiter);
 router.use(householdGuard);
 
 const auctionResultSchema = z.object({

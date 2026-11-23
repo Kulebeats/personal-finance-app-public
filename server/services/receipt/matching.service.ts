@@ -9,7 +9,7 @@
 import type { OcrExtractedData, Transaction } from "@shared/schema";
 import { receiptRepository } from "../../repositories/ReceiptRepository";
 import { logger } from "../../utils/logger";
-import { NotFoundError } from "../../utils/errorHandler";
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../../utils/errorHandler";
 import {
   buildMatchCriteria,
   calculateMatchScore,
@@ -31,14 +31,19 @@ export class ReceiptMatchingService {
   async attemptMatch(
     receiptId: string,
     householdId: string,
-    linkCallback?: (receiptId: string, transactionId: string, householdId: string, userId: string) => Promise<void>
+    linkCallback?: (receiptId: string, transactionId: string, householdId: string, userId: string) => Promise<boolean>,
+    actorUserId?: string,
+    afterOcrCommit = false,
   ): Promise<{ matched: boolean; transactionId?: string }> {
-    const receipt = await receiptRepository.findById(receiptId);
+    const receipt = actorUserId
+      ? await receiptRepository.findForSignedMatch(receiptId, householdId, actorUserId)
+      : await receiptRepository.findById(receiptId);
     if (!receipt || receipt.householdId !== householdId) {
+      if (afterOcrCommit) return { matched: false };
       throw new NotFoundError("Receipt not found");
     }
 
-    if (!receipt.ocrData) {
+    if (receipt.matchStatus === "matched" || receipt.matchedTransactionId || !receipt.ocrData) {
       return { matched: false };
     }
 
@@ -46,10 +51,10 @@ export class ReceiptMatchingService {
 
     // Need at least amount or date to match
     if (!ocrData.amount && !ocrData.date) {
-      await receiptRepository.update(receiptId, {
+      await receiptRepository.updateUnmatchedReceipt(receiptId, householdId, {
         matchStatus: "no_match",
         ocrErrorMessage: "Insufficient data for matching (need amount or date)",
-      });
+      }, actorUserId);
       return { matched: false };
     }
 
@@ -57,9 +62,10 @@ export class ReceiptMatchingService {
     const matchCriteria = buildMatchCriteria(ocrData);
 
     // Search for matching transactions
+    const matchingUserId = actorUserId ?? receipt.uploadedBy;
     const candidates = (await receiptRepository.findTransactionsForMatch(
       householdId,
-      receipt.uploadedBy,
+      matchingUserId,
       matchCriteria
     )) as MatchCandidate[];
 
@@ -75,13 +81,16 @@ export class ReceiptMatchingService {
       .sort((a, b) => b.score - a.score)[0];
 
     if (bestMatch && linkCallback) {
-      await linkCallback(
-        receiptId,
-        bestMatch.transaction.id,
-        householdId,
-        receipt.uploadedBy
-      );
-      return { matched: true, transactionId: bestMatch.transaction.id };
+      try {
+        const linked = await linkCallback(receiptId, bestMatch.transaction.id, householdId, matchingUserId);
+        return linked ? { matched: true, transactionId: bestMatch.transaction.id } : { matched: false };
+      } catch (error: unknown) {
+        // Automatic matching follows a committed OCR write. A denied or
+        // outdated match leaves the result unmatched without exposing details.
+        if (afterOcrCommit && (error instanceof ForbiddenError || error instanceof NotFoundError ||
+          error instanceof ConflictError || error instanceof ValidationError)) return { matched: false };
+        throw error;
+      }
     }
 
     // No match - schedule retry
@@ -90,17 +99,17 @@ export class ReceiptMatchingService {
       const delayMinutes = RETRY_DELAY_MINUTES[attempts - 1] || 1440;
       const nextMatchAt = new Date(Date.now() + delayMinutes * 60 * 1000);
 
-      await receiptRepository.update(receiptId, {
+      await receiptRepository.updateUnmatchedReceipt(receiptId, householdId, {
         matchAttempts: attempts,
         lastMatchAttempt: new Date(),
         nextMatchAt,
-      });
+      }, actorUserId);
     } else {
-      await receiptRepository.update(receiptId, {
+      await receiptRepository.updateUnmatchedReceipt(receiptId, householdId, {
         matchStatus: "no_match",
         matchAttempts: attempts,
         lastMatchAttempt: new Date(),
-      });
+      }, actorUserId);
     }
 
     return { matched: false };

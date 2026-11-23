@@ -25,7 +25,9 @@ User profile, preferences, security, and account management.
 | Method | Path            | Description    |
 | ------ | --------------- | -------------- |
 | POST   | /account/delete | Delete account |
-| POST   | /account/export | Export data    |
+| POST   | /privacy/export | Personal-data export (needs step-up) |
+| GET    | /privacy/exports | List own personal exports |
+| GET    | /privacy/exports/:id/download | Download own export (expires after 7 days) |
 
 ### Notifications
 

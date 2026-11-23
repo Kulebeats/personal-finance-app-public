@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+import { clearCsrfToken } from "@/lib/csrf";
 import {
   goalKeys,
   useAddContribution,
@@ -29,6 +30,7 @@ import {
 } from "../useGoals";
 
 const toastSpy = vi.fn();
+const endpointFetch = vi.fn();
 
 vi.mock("@/hooks/use-toast", () => ({
   useToast: () => ({ toast: toastSpy }),
@@ -46,17 +48,17 @@ const createWrapper = () => {
 };
 
 const mockFetchResponse = (data: unknown, ok = true): Response =>
-  ({
-    ok,
-    json: vi.fn().mockResolvedValue(data),
-  } as unknown as Response);
+  new Response(JSON.stringify(data), { status: ok ? 200 : 400 });
 
 describe("useGoals hooks", () => {
   const goalId = "11111111-1111-1111-1111-111111111111";
 
   beforeEach(() => {
     toastSpy.mockReset();
-    vi.stubGlobal("fetch", vi.fn());
+    clearCsrfToken(); endpointFetch.mockReset();
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => String(input) === "/api/csrf-token"
+      ? Promise.resolve(new Response(JSON.stringify({ csrfToken: "goals-test-token" })))
+      : endpointFetch(input, init));
   });
 
   afterEach(() => {
@@ -65,7 +67,7 @@ describe("useGoals hooks", () => {
   });
 
   it("fetches goals with query params", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -98,7 +100,7 @@ describe("useGoals hooks", () => {
   });
 
   it("fetches goals summary", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -109,15 +111,15 @@ describe("useGoals hooks", () => {
             behind: 0,
             atRisk: 0,
             completed: 0,
-            totalSaved: 100,
-            totalTarget: 500,
+            totalSaved: { amount: "100.00", currency: "ZMW" },
+            totalTarget: { amount: "500.00", currency: "ZMW" },
             overallProgress: 20,
           },
           payDown: {
             total: 0,
-            totalDebt: 0,
-            totalPaid: 0,
-            projectedInterest: 0,
+            totalDebt: { amount: "0.00", currency: "ZMW" },
+            totalPaid: { amount: "0.00", currency: "ZMW" },
+            projectedInterest: { amount: "0.00", currency: "ZMW" },
             onTrack: 0,
             behind: 0,
           },
@@ -138,7 +140,7 @@ describe("useGoals hooks", () => {
   });
 
   it("fetches a goal by id", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -171,7 +173,7 @@ describe("useGoals hooks", () => {
   });
 
   it("fetches household assignments", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -200,7 +202,7 @@ describe("useGoals hooks", () => {
   });
 
   it("fetches available funds", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -228,12 +230,13 @@ describe("useGoals hooks", () => {
   });
 
   it("fetches goal projection", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
         data: {
-          monthlyProjection: 75,
+          availability: "available",
+          monthlyProjection: { amount: "75.00", currency: "ZMW" },
           projectedCompletionDate: "2026-12-31",
           status: "on_track",
           monthsRemaining: 12,
@@ -252,7 +255,7 @@ describe("useGoals hooks", () => {
   });
 
   it("fetches goal contributions", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -281,7 +284,7 @@ describe("useGoals hooks", () => {
   });
 
   it("fetches goal transfers for a goal", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -310,7 +313,7 @@ describe("useGoals hooks", () => {
   });
 
   it("fetches goal transactions", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -349,7 +352,7 @@ describe("useGoals hooks", () => {
   });
 
   it("fetches transaction goal links", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -384,7 +387,7 @@ describe("useGoals hooks", () => {
   });
 
   it("fetches goal activity with query params", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -413,7 +416,7 @@ describe("useGoals hooks", () => {
   });
 
   it("creates a goal and invalidates cache", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -454,7 +457,7 @@ describe("useGoals hooks", () => {
   });
 
   it("updates a goal and invalidates caches", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -500,7 +503,7 @@ describe("useGoals hooks", () => {
   });
 
   it("deletes a goal and invalidates list cache", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({ success: true, data: { message: "Deleted" } })
     );
@@ -526,7 +529,7 @@ describe("useGoals hooks", () => {
   });
 
   it("assigns an account and invalidates caches", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -589,7 +592,7 @@ describe("useGoals hooks", () => {
   });
 
   it("adds a contribution and invalidates caches", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -649,7 +652,7 @@ describe("useGoals hooks", () => {
   });
 
   it("links a transaction and invalidates caches", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -709,7 +712,7 @@ describe("useGoals hooks", () => {
   });
 
   it("unlinks a transaction and invalidates caches", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,
@@ -743,7 +746,7 @@ describe("useGoals hooks", () => {
   });
 
   it("transfers between goals and invalidates caches", async () => {
-    const mockFetch = vi.mocked(fetch);
+    const mockFetch = endpointFetch;
     mockFetch.mockResolvedValue(
       mockFetchResponse({
         success: true,

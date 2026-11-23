@@ -104,6 +104,7 @@ export async function findFullBalanceAssignment(
         eq(goalAccountAssignments.assignmentType, "full_balance")
       )
     )
+    .orderBy(goalAccountAssignments.id)
     .limit(1);
 
   // Use FOR UPDATE lock when inside a transaction to prevent race conditions
@@ -125,9 +126,10 @@ export async function findAssignmentsByAccount(
   const query = executor
     .select()
     .from(goalAccountAssignments)
-    .where(eq(goalAccountAssignments.accountId, accountId));
+    .where(eq(goalAccountAssignments.accountId, accountId))
+    .orderBy(goalAccountAssignments.id);
 
-  // Use FOR UPDATE lock when inside a transaction to prevent race conditions
+  // FOR UPDATE inside a transaction, in id order so every writer locks the set the same way
   return tx ? await query.for("update") : await query;
 }
 
@@ -151,7 +153,8 @@ export async function getTotalPartialAssigned(
         eq(goalAccountAssignments.accountId, accountId),
         eq(goalAccountAssignments.assignmentType, "partial_balance")
       )
-    );
+    )
+    .orderBy(goalAccountAssignments.id);
 
   // Use FOR UPDATE lock when inside a transaction to prevent race conditions
   const assignments = tx ? await query.for("update") : await query;

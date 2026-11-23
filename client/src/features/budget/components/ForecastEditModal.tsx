@@ -21,6 +21,7 @@ interface ForecastEditModalProps {
     year: number;
     month: number;
     amount: string;
+    currency: string;
     applyScope: ApplyScope;
   }) => void;
   isSaving: boolean;
@@ -35,11 +36,13 @@ export function ForecastEditModal({
   isSaving,
 }: ForecastEditModalProps) {
   const [amount, setAmount] = useState("");
+  const [currency, setCurrency] = useState("");
   const [applyScope, setApplyScope] = useState<ApplyScope>(defaultApplyScope);
 
   useEffect(() => {
     if (!data) return;
     setAmount(String(data.amount ?? ""));
+    setCurrency(data.currency ?? "");
     setApplyScope(defaultApplyScope);
   }, [data, defaultApplyScope]);
 
@@ -47,11 +50,13 @@ export function ForecastEditModal({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!/^[A-Z]{3}$/.test(currency) || amount.trim() === "") return;
     onSave({
       budgetId: data.budgetId,
       year: data.year,
       month: data.month,
       amount,
+      currency,
       applyScope,
     });
   };
@@ -110,6 +115,15 @@ export function ForecastEditModal({
               />
             </div>
 
+            <div>
+              <Label htmlFor="forecast-currency" className="text-sm font-medium">Currency</Label>
+              <input id="forecast-currency" type="text" value={currency} required maxLength={3} pattern="[A-Z]{3}"
+                readOnly={Boolean(data.currency)} onChange={event => setCurrency(event.target.value.toUpperCase())}
+                className="mt-2 w-full px-3 py-2 rounded-md border border-border bg-background text-sm"
+                placeholder="e.g. USD" />
+              {!data.currency && <p className="mt-1 text-sm text-muted-foreground">Choose the currency for this monthly limit.</p>}
+            </div>
+
             {/* Apply Scope */}
             <div>
               <Label className="text-sm font-medium mb-3 block">
@@ -153,7 +167,7 @@ export function ForecastEditModal({
             </button>
             <button
               type="submit"
-              disabled={isSaving}
+              disabled={isSaving || !/^[A-Z]{3}$/.test(currency) || amount.trim() === ""}
               className="px-6 py-2 text-sm font-bold bg-orange-500 text-white rounded-md hover:bg-orange-600 transition-colors disabled:opacity-60"
             >
               {isSaving ? "Saving..." : "Save"}

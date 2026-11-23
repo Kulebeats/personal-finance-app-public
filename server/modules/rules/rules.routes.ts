@@ -6,10 +6,9 @@ import { Router } from "express";
 import { householdGuard } from "../../middleware/householdGuard";
 import { requireRole } from "../../middleware/validateEntity";
 import { rulesController } from "./rules.controller";
-import { generalLimiter, analyticsLimiter } from "../../middleware/rateLimit";
+import { analyticsLimiter } from "../../middleware/rateLimit";
 
 const router = Router();
-router.use(generalLimiter);
 router.use(householdGuard);
 
 router.get("/", rulesController.list);

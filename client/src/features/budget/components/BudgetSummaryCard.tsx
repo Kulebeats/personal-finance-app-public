@@ -7,20 +7,26 @@
 import { Info } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { useFormatters } from "@/contexts/SettingsContext";
+import { useBudgetMoneyDisplay } from "../budgetMoneyDisplay";
 import type { BudgetGroup } from "../types";
+import { groupActual, groupBudgetLimit, remainingBudget } from "../budgetLimits";
+import { subtractMoneyValues } from "@/lib/money";
 
 interface BudgetSummaryCardProps {
-  totalIncomeBudget: number;
+  totalIncomeBudget: number | null;
   totalIncomeActual: number;
-  totalExpenseBudget: number;
+  totalExpenseBudget: number | null;
   totalExpenseActual: number;
-  incomeRemaining: number;
-  expenseRemaining: number;
+  incomeRemaining: number | null;
+  expenseRemaining: number | null;
   incomeGroups: BudgetGroup[];
   expenseGroups: BudgetGroup[];
   summaryTab: "summary" | "income" | "expenses";
   onTabChange: (tab: "summary" | "income" | "expenses") => void;
+  /** Unbudgeted spending in this section could not be converted (missing exchange rate), N3. */
+  isIncomeActualIncomplete?: boolean;
+  isExpenseActualIncomplete?: boolean;
+  currency?: string | null;
 }
 
 export function BudgetSummaryCard({
@@ -34,10 +40,20 @@ export function BudgetSummaryCard({
   expenseGroups,
   summaryTab,
   onTabChange,
+  isIncomeActualIncomplete = false,
+  isExpenseActualIncomplete = false,
+  currency,
 }: BudgetSummaryCardProps) {
-  const { formatCurrency } = useFormatters();
-  const leftToBudget = totalIncomeBudget - totalExpenseBudget;
-  const isPositive = leftToBudget >= 0;
+  const { formatCurrency } = useBudgetMoneyDisplay(currency);
+  const incomeLimitWithheld = incomeGroups.some(group => group.hasWithheldLimit);
+  const expenseLimitWithheld = expenseGroups.some(group => group.hasWithheldLimit);
+  const incomeCurrency = incomeGroups.some(group => group.currency === null) ? null : currency;
+  const expenseCurrency = expenseGroups.some(group => group.currency === null) ? null : currency;
+  const leftUnavailable = incomeLimitWithheld || expenseLimitWithheld || incomeCurrency === null || expenseCurrency === null;
+  const leftToBudget = leftUnavailable || totalIncomeBudget === null || totalExpenseBudget === null
+    ? null : subtractMoneyValues(totalIncomeBudget, totalExpenseBudget).toNumber();
+  const leftLabel = leftToBudget !== null ? formatCurrency(leftToBudget) : leftUnavailable ? "Unavailable" : "Unbudgeted";
+  const isPositive = leftToBudget !== null && leftToBudget >= 0;
 
   return (
     <Card className="shadow-sm border-border/50 bg-card overflow-hidden">
@@ -45,7 +61,7 @@ export function BudgetSummaryCard({
       <div
         className={cn(
           "p-6 text-center border-b",
-          isPositive
+          leftToBudget === null ? "bg-muted/20 border-border" : isPositive
             ? "bg-emerald-50 dark:bg-emerald-950/30 border-emerald-100 dark:border-emerald-900/50"
             : "bg-rose-50 dark:bg-rose-950/30 border-rose-100 dark:border-rose-900/50"
         )}
@@ -53,15 +69,15 @@ export function BudgetSummaryCard({
         <div
           className={cn(
             "text-3xl font-bold mb-1",
-            isPositive ? "text-emerald-700 dark:text-emerald-300" : "text-rose-700 dark:text-rose-300"
+            leftToBudget === null ? "text-muted-foreground" : isPositive ? "text-emerald-700 dark:text-emerald-300" : "text-rose-700 dark:text-rose-300"
           )}
         >
-          {formatCurrency(leftToBudget)}
+          {leftLabel}
         </div>
         <div
           className={cn(
             "text-sm font-medium flex items-center justify-center gap-1",
-            isPositive ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"
+            leftToBudget === null ? "text-muted-foreground" : isPositive ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"
           )}
         >
           Left to budget <Info className="w-3 h-3" aria-hidden="true" />
@@ -78,7 +94,7 @@ export function BudgetSummaryCard({
               aria-label={`View ${tab} tab`}
               aria-current={summaryTab === tab ? "page" : undefined}
               className={cn(
-                "flex-1 py-1 text-xs font-medium rounded-md transition-all capitalize",
+                "flex-1 py-1 max-md:min-h-11 text-xs font-medium rounded-md transition-all capitalize",
                 summaryTab === tab
                   ? "bg-background dark:bg-card shadow-sm text-foreground"
                   : "text-muted-foreground hover:text-foreground"
@@ -100,7 +116,10 @@ export function BudgetSummaryCard({
                 actual={totalIncomeActual}
                 remaining={incomeRemaining}
                 isIncome
-                formatCurrency={formatCurrency}
+                isActualIncomplete={isIncomeActualIncomplete || incomeGroups.some(group => group.actualIncomplete)}
+                unbudgetedUnavailable={isIncomeActualIncomplete}
+                hasWithheldLimit={incomeLimitWithheld}
+                currency={incomeCurrency}
               />
               {/* Expenses Summary */}
               <SummaryRow
@@ -109,7 +128,10 @@ export function BudgetSummaryCard({
                 actual={totalExpenseActual}
                 remaining={expenseRemaining}
                 isIncome={false}
-                formatCurrency={formatCurrency}
+                isActualIncomplete={isExpenseActualIncomplete || expenseGroups.some(group => group.actualIncomplete)}
+                unbudgetedUnavailable={isExpenseActualIncomplete}
+                hasWithheldLimit={expenseLimitWithheld}
+                currency={expenseCurrency}
               />
             </>
           )}
@@ -117,15 +139,9 @@ export function BudgetSummaryCard({
           {summaryTab === "income" && (
             <div className="space-y-6">
               {incomeGroups.map((group) => {
-                const gBudget = group.items.reduce(
-                  (acc, item) => acc + item.budget,
-                  0
-                );
-                const gActual = group.items.reduce(
-                  (acc, item) => acc + item.actual,
-                  0
-                );
-                const gRemaining = gBudget - gActual;
+                const gBudget = groupBudgetLimit(group);
+                const gActual = groupActual(group);
+                const gRemaining = remainingBudget(gBudget, gActual);
                 return (
                   <SummaryRow
                     key={group.id}
@@ -134,7 +150,9 @@ export function BudgetSummaryCard({
                     actual={gActual}
                     remaining={gRemaining}
                     isIncome
-                    formatCurrency={formatCurrency}
+                    isActualIncomplete={group.actualIncomplete}
+                    hasWithheldLimit={group.hasWithheldLimit}
+                    currency={group.currency === undefined ? currency : group.currency}
                   />
                 );
               })}
@@ -144,15 +162,9 @@ export function BudgetSummaryCard({
           {summaryTab === "expenses" && (
             <div className="space-y-6">
               {expenseGroups.map((group) => {
-                const gBudget =
-                  group.isFlexible && group.budget !== undefined
-                    ? group.budget
-                    : group.items.reduce((acc, item) => acc + item.budget, 0);
-                const gActual = group.items.reduce(
-                  (acc, item) => acc + item.actual,
-                  0
-                );
-                const gRemaining = gBudget - gActual;
+                const gBudget = groupBudgetLimit(group);
+                const gActual = groupActual(group);
+                const gRemaining = remainingBudget(gBudget, gActual);
                 const isFlexible = group.id === "flexible-expenses";
                 return (
                   <SummaryRow
@@ -162,8 +174,10 @@ export function BudgetSummaryCard({
                     actual={gActual}
                     remaining={gRemaining}
                     isIncome={false}
+                    isActualIncomplete={group.actualIncomplete}
+                    hasWithheldLimit={group.hasWithheldLimit}
                     isFlexible={isFlexible}
-                    formatCurrency={formatCurrency}
+                    currency={group.currency === undefined ? currency : group.currency}
                   />
                 );
               })}
@@ -182,55 +196,71 @@ function SummaryRow({
   remaining,
   isIncome,
   isFlexible = false,
-  formatCurrency,
+  isActualIncomplete = false,
+  unbudgetedUnavailable = false,
+  hasWithheldLimit = false,
+  currency,
 }: {
   label: string;
-  budget: number;
+  budget: number | null;
   actual: number;
-  remaining: number;
+  remaining: number | null;
   isIncome: boolean;
   isFlexible?: boolean;
-  formatCurrency: (val: number) => string;
+  isActualIncomplete?: boolean;
+  unbudgetedUnavailable?: boolean;
+  hasWithheldLimit?: boolean;
+  currency?: string | null;
 }) {
-  const progress = (actual / (budget || 1)) * 100;
+  const { formatCurrency, formatLimit } = useBudgetMoneyDisplay(currency);
+  const comparisonIncomplete = currency === null || isActualIncomplete || hasWithheldLimit;
+  const progress = !comparisonIncomplete && budget !== null && budget > 0 ? (actual / budget) * 100 : null;
+  const budgetLabel = currency === null ? "Unavailable" : `${formatLimit(budget, hasWithheldLimit)}${budget === null ? "" : " budget"}`;
+  const actualLabel = currency === null ? "Unavailable" :
+    `${isActualIncomplete ? "At least " : ""}${formatCurrency(actual)} ${isIncome ? "earned" : "spent"}`;
+  const incompleteReason = unbudgetedUnavailable ? "an exchange rate is missing" : "some budget progress is unavailable";
 
   return (
     <div>
       <div className="flex justify-between text-sm mb-2">
         <span className="font-medium">{label}</span>
         <span className="text-muted-foreground">
-          {formatCurrency(budget)} budget
+          {budgetLabel}
         </span>
       </div>
-      <div className="h-2 w-full bg-muted rounded-full overflow-hidden mb-1" role="progressbar" aria-valuenow={Math.min(100, Math.max(0, progress))} aria-valuemin={0} aria-valuemax={100} aria-label={`${label} progress: ${Math.round(progress)}%`}>
+      {progress !== null && <div className="h-2 w-full bg-muted rounded-full overflow-hidden mb-1" role="progressbar" aria-valuenow={Math.min(100, Math.max(0, progress))} aria-valuemin={0} aria-valuemax={100} aria-label={`${label} progress: ${Math.round(progress)}%`}>
         <div
           className={cn(
             "h-full rounded-full",
             isFlexible
               ? "bg-gradient-to-r from-emerald-500 to-yellow-400"
-              : remaining < 0
+              : remaining !== null && remaining < 0
               ? "bg-rose-500"
               : "bg-emerald-500"
           )}
           style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
         />
-      </div>
+      </div>}
       <div className="flex justify-between text-xs">
-        <span className="font-bold text-foreground">
-          {formatCurrency(actual)} {isIncome ? "earned" : "spent"}
+        <span
+          className="font-bold text-foreground"
+          aria-label={currency !== null && isActualIncomplete ? `${label}: ${actualLabel}; total incomplete because ${incompleteReason}` : undefined}
+        >
+          {actualLabel}
         </span>
         <span
           className={cn(
             "font-bold",
-            isFlexible
+            comparisonIncomplete
+              ? "text-muted-foreground"
+              : isFlexible
               ? "text-yellow-600 dark:text-yellow-400"
-              : remaining >= 0
+              : remaining !== null && remaining >= 0
               ? "text-emerald-600 dark:text-emerald-400"
               : "text-rose-600 dark:text-rose-400"
           )}
         >
-          {formatCurrency(Math.abs(remaining))}{" "}
-          {remaining >= 0 ? "remaining" : isIncome ? "extra" : "over"}
+          {comparisonIncomplete ? "Incomplete" : remaining === null ? "Unbudgeted" : `${formatCurrency(Math.abs(remaining))} ${remaining >= 0 ? "remaining" : isIncome ? "extra" : "over"}`}
         </span>
       </div>
     </div>

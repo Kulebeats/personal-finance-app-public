@@ -1,3 +1,5 @@
+import { toastActionError } from "@/lib/actionErrorToast";
+import { protectedFetch } from "@/lib/protected-fetch";
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -5,23 +7,26 @@ import { Badge } from "@/components/ui/badge";
 import { Bell, BellOff, AlertCircle, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { apiCall } from "@/lib/api";
+import { throwIfResNotOk } from "@/lib/queryClient";
+import { assertOperationLifetime, captureOperationLifetime, StaleOperationError, type OperationLifetime } from "@/lib/operation-lifetime";
 
 // Exported for tests: mutations must go through apiCall so they carry
 // x-csrf-token (raw fetch 403s in a real browser session).
 export async function saveSubscription(
   subscription: PushSubscription,
+  operation = captureOperationLifetime(),
 ): Promise<void> {
   await apiCall<unknown>("/notifications/push/subscribe", {
     method: "POST",
     body: JSON.stringify({ subscription: subscription.toJSON() }),
-  });
+  }, true, false, operation);
 }
 
-export async function removeSubscription(endpoint: string): Promise<void> {
+export async function removeSubscription(endpoint: string, operation = captureOperationLifetime()): Promise<void> {
   await apiCall<unknown>("/notifications/push/unsubscribe", {
     method: "DELETE",
     body: JSON.stringify({ endpoint }),
-  });
+  }, true, false, operation);
 }
 
 /**
@@ -73,17 +78,13 @@ export function PushNotificationSetup() {
     return navigator.serviceWorker.register("/sw.js");
   }
 
-  async function fetchVapidPublicKey() {
-    const response = await fetch("/api/notifications/push/vapid-key", {
+  async function fetchVapidPublicKey(operation: OperationLifetime | null) {
+    assertOperationLifetime(operation);
+    const response = await protectedFetch("/api/notifications/push/vapid-key", {
       credentials: "include",
     });
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new Error(
-        error?.error?.message || "Push notifications are not configured",
-      );
-    }
+    await throwIfResNotOk(response);
 
     const payload = await response.json();
     const publicKey = payload?.data?.publicKey ?? payload?.publicKey;
@@ -94,26 +95,38 @@ export function PushNotificationSetup() {
     return publicKey as string;
   }
 
+  // A browser subscription is re-sent so the server binds it to this session
+  // (after an expiry, a new sign-in, or a row saved before sessions were
+  // recorded). Push shows as on only once the server has it.
   async function checkSubscription() {
+    const operation = captureOperationLifetime();
     try {
       const registration = await ensureServiceWorkerRegistration();
+      assertOperationLifetime(operation);
       const subscription = await registration.pushManager.getSubscription();
-      if (subscription) {
-        setIsSubscribed(true);
-        setSubscriptionEndpoint(subscription.endpoint);
-      } else {
+      assertOperationLifetime(operation);
+      if (!subscription) {
         setIsSubscribed(false);
         setSubscriptionEndpoint(null);
+        return;
       }
+      await saveSubscription(subscription, operation);
+      setIsSubscribed(true);
+      setSubscriptionEndpoint(subscription.endpoint);
     } catch (error) {
+      if (error instanceof StaleOperationError) return;
       console.error("Failed to check push subscription", error);
+      setIsSubscribed(false);
+      setSubscriptionEndpoint(null);
     }
   }
 
   async function handleSubscribe() {
+    const operation = captureOperationLifetime();
     setIsLoading(true);
     try {
       const permission = await Notification.requestPermission();
+      assertOperationLifetime(operation);
 
       if (permission !== "granted") {
         toast.error("Push notifications permission denied");
@@ -121,48 +134,53 @@ export function PushNotificationSetup() {
       }
 
       const registration = await ensureServiceWorkerRegistration();
-      const vapidPublicKey = await fetchVapidPublicKey();
+      assertOperationLifetime(operation);
+      const vapidPublicKey = await fetchVapidPublicKey(operation);
+      assertOperationLifetime(operation);
 
       const subscription = await registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
       });
 
-      await saveSubscription(subscription);
+      assertOperationLifetime(operation);
+      await saveSubscription(subscription, operation);
 
       setIsSubscribed(true);
       setSubscriptionEndpoint(subscription.endpoint);
       toast.success("Push notifications enabled");
     } catch (error) {
+      if (error instanceof StaleOperationError) return;
       console.error("Failed to subscribe to push notifications", error);
-      toast.error(
-        error instanceof Error ? error.message : "Failed to enable push notifications",
-      );
+      toastActionError("Failed to enable push notifications", error);
     } finally {
       setIsLoading(false);
     }
   }
 
   async function handleUnsubscribe() {
+    const operation = captureOperationLifetime();
     setIsLoading(true);
     try {
       const registration = await ensureServiceWorkerRegistration();
+      assertOperationLifetime(operation);
       const subscription = await registration.pushManager.getSubscription();
+      assertOperationLifetime(operation);
 
       if (subscription) {
         const endpoint = subscription.endpoint;
         await subscription.unsubscribe();
-        await removeSubscription(endpoint);
+        assertOperationLifetime(operation);
+        await removeSubscription(endpoint, operation);
       }
 
       setIsSubscribed(false);
       setSubscriptionEndpoint(null);
       toast.success("Unsubscribed from push notifications");
     } catch (error) {
+      if (error instanceof StaleOperationError) return;
       console.error("Failed to unsubscribe from push notifications", error);
-      toast.error(
-        error instanceof Error ? error.message : "Failed to unsubscribe",
-      );
+      toastActionError("Failed to unsubscribe", error);
     } finally {
       setIsLoading(false);
     }

@@ -7,8 +7,6 @@
  */
 
 import sharp from "sharp";
-import * as fs from "fs/promises";
-import * as path from "path";
 import { createHash } from "crypto";
 import { ValidationError } from "../../core/errors";
 import { logger } from "../../utils/logger";
@@ -85,7 +83,10 @@ async function rejectUndecodable<T>(decode: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Optimize image by resizing if dimensions exceed MAX_IMAGE_DIMENSION
+ * Optimize image by resizing if dimensions exceed MAX_IMAGE_DIMENSION.
+ * Returns `buffer` itself when no resize is needed (its type is unchanged);
+ * a resized image is always re-encoded as JPEG. The upload service relies on
+ * both to record the stored type.
  */
 export async function optimizeImage(buffer: Buffer): Promise<Buffer> {
   const metadata = await rejectUndecodable(() => sharp(buffer).metadata());
@@ -112,11 +113,8 @@ export async function optimizeImage(buffer: Buffer): Promise<Buffer> {
 /**
  * Generate thumbnail for receipt list view
  */
-export async function generateThumbnail(
-  buffer: Buffer,
-  outputPath: string
-): Promise<void> {
-  const thumbnail = await rejectUndecodable(() =>
+export async function generateThumbnail(buffer: Buffer): Promise<Buffer> {
+  return rejectUndecodable(() =>
     sharp(buffer)
       .resize(THUMBNAIL_SIZE, THUMBNAIL_SIZE, {
         fit: "cover",
@@ -125,10 +123,6 @@ export async function generateThumbnail(
       .jpeg({ quality: 80 })
       .toBuffer(),
   );
-
-  // Disk errors below are deliberately not mapped to a 400.
-  await fs.mkdir(path.dirname(outputPath), { recursive: true });
-  await fs.writeFile(outputPath, thumbnail);
 }
 
 /**

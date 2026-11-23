@@ -1,24 +1,22 @@
-import { and, asc, desc, eq, gte, inArray, isNull, lte, ne, sql } from "drizzle-orm";
+import { readVisibleHoldings, valueVisibleHoldings, type HoldingReadSession } from "./investmentHoldingRead";
+import { postInvestmentLotSale } from "./investmentLotSale";
+import { checkRecordedDisposals, recordPurchaseLot } from "./investmentTradeHistory";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { db } from "../../db";
 import {
   securities,
   holdings,
   accounts,
-  securityPrices,
   investmentTransactions,
-  taxLots,
-  taxLotDisposals,
   fxRates,
-  type InsertHolding,
   type InsertInvestmentTransaction,
-  type InsertTaxLot,
-  type InsertTaxLotDisposal,
-  type InsertFxRate,
+
 } from "@shared/schema";
 import {
   ListSecuritiesQuery,
   GetSecurityPricesQuery,
   CreateSecurityInput,
+  createSecuritySchema,
   UpdateSecurityPriceInput,
   ListHoldingsQuery,
   CreateHoldingInput,
@@ -27,231 +25,85 @@ import {
   ListInvestmentTransactionsQuery,
   ListTaxLotsQuery,
   ListFxRatesQuery,
-  CreateFxRateInput,
   FxHistoricalQuery,
 } from "./investments.validation";
 import { portfolioValuationService } from "../../services/PortfolioValuationService";
+import { businessAuditService } from "../../services/BusinessAuditService";
 import { getLatestFxRates } from "../../core/calculations";
 import { withTransaction } from "../../utils/withTransaction";
-import { Money } from "../../core/money";
-import { ConflictError, NotFoundError } from "../../core/errors";
+import { Money, toMoneyDto } from "../../core/money";
+import { ConflictError, NotFoundError, UnauthorizedError, ValidationError } from "../../core/errors";
+import type { HouseholdContext } from "../../middleware/householdGuard";
+import { listVisibleInvestmentTransactions } from "./investmentTransactionRead";
+import { isInvestmentIncome } from "../../core/money/investment-income";
+import { logInvestmentTransactionCreate, resolveInvestmentTransactionCurrency } from "./investmentIncomeWrite";
+import {
+  lockInvestmentTransactionSources,
+  lockInvestmentWriterIdentity,
+  type InvestmentSourceSession,
+} from "./investmentTransactionAccess";
+import { listVisibleInvestmentTaxLots } from "./investmentTaxLotRead";
+import { lockHoldingRemainingBasis } from "./investmentHoldingBasisSource";
+import { createDeclaredOpeningHolding } from "./investmentHoldingOpening";
+import { updateDeclaredHolding } from "./investmentHoldingUpdate";
+import { deleteAuthorizedHolding } from "./investmentHoldingDeletion";
+import { recordHouseholdSecurityPrice } from "./investmentSecurityPriceWrite";
+import { listVisibleFxRates, recordHouseholdFxRate } from "./investmentFxRateWrite";
+import { readHouseholdSecurities, readVisibleSecurityPriceHistory } from "./investmentSecurityRead";
+import { insertCatalogueSecurity } from "./investmentSecurityCreate";
+import type { InvestmentReadSession } from "./investmentReadAuthority";
+import { convertInvestmentEventToZmw } from "./investmentDatedFx";
 
 export class InvestmentService {
-  // =========================================================================
-  // Private Helpers
-  // =========================================================================
-
-  /**
-   * Validates that an account belongs to the specified household
-   * @throws NotFoundError if account doesn't exist or doesn't belong to household
-   */
-  private async validateAccountOwnership(
-    accountId: string,
-    householdId: string
-  ): Promise<void> {
-    const [account] = await db
-      .select({ id: accounts.id })
-      .from(accounts)
-      .where(
-        and(
-          eq(accounts.id, accountId),
-          eq(accounts.householdId, householdId),
-          isNull(accounts.deletedAt)
-        )
-      )
-      .limit(1);
-
-    if (!account) {
-      throw new NotFoundError("Account not found");
-    }
-  }
-
-  /**
-   * Validates that a holding belongs to the specified household
-   * @throws NotFoundError if holding doesn't exist or doesn't belong to household
-   */
-  private async validateHoldingOwnership(
-    holdingId: string,
-    householdId: string,
-    accountId?: string,
-    securityId?: string | null
-  ): Promise<void> {
-    const conditions = [
-      eq(holdings.id, holdingId),
-      eq(holdings.householdId, householdId),
-    ];
-
-    if (accountId) {
-      conditions.push(eq(holdings.accountId, accountId));
-    }
-    if (securityId) {
-      conditions.push(eq(holdings.securityId, securityId));
-    }
-
-    const [holding] = await db
-      .select({ id: holdings.id })
-      .from(holdings)
-      .where(and(...conditions))
-      .limit(1);
-
-    if (!holding) {
-      throw new NotFoundError("Holding not found");
-    }
-  }
-
   // =========================================================================
   // Securities
   // =========================================================================
 
-  async listSecurities(filters: ListSecuritiesQuery) {
-    let query = db.select().from(securities).$dynamic();
-
-    // Note: Drizzle dynamic query filtering is basic, normally we'd build conditions
-    // Since we are moving from in-memory filtering (current controller) to DB filtering where possible
-    // we can implement basic DB filters.
-
-    // For now, to match existing behavior exactly, we'll fetch all and filter in memory if complex,
-    // or apply simple where clauses.
-
-    // Existing controller implementation was: fetch all, then filter.
-    // Let's improve it to use WHERE clauses where possible.
-
-    const conditions = [];
-    if (filters.type) conditions.push(eq(securities.type, filters.type));
-    if (filters.exchange)
-      conditions.push(eq(securities.exchange, filters.exchange));
-    if (filters.currency)
-      conditions.push(eq(securities.currency, filters.currency));
-
-    let results = await db
-      .select()
-      .from(securities)
-      .where(and(...conditions));
-
-    if (filters.search) {
-      const searchLower = filters.search.toLowerCase();
-      results = results.filter(
-        (s) =>
-          s.symbol?.toLowerCase().includes(searchLower) ||
-          s.name.toLowerCase().includes(searchLower)
-      );
-    }
-
-    return results;
+  async listSecurities(filters: ListSecuritiesQuery, caller: HouseholdContext, session: InvestmentReadSession) {
+    return readHouseholdSecurities(caller, session, filters);
   }
 
-  async getSecurityById(id: string) {
-    const [security] = await db
-      .select()
-      .from(securities)
-      .where(eq(securities.id, id))
-      .limit(1);
+  async getSecurityById(id: string, caller: HouseholdContext, session: InvestmentReadSession) {
+    const [security] = await readHouseholdSecurities(caller, session, {}, id);
     return security;
   }
 
-  async getSecurityPrices(id: string, options: GetSecurityPricesQuery) {
-    // ISSUE-013: Implement date filtering
-    const conditions = [eq(securityPrices.securityId, id)];
-
-    if (options.startDate) {
-      conditions.push(gte(securityPrices.date, options.startDate));
-    }
-    if (options.endDate) {
-      conditions.push(lte(securityPrices.date, options.endDate));
-    }
-
-    return await db
-      .select()
-      .from(securityPrices)
-      .where(and(...conditions))
-      .orderBy(desc(securityPrices.date))
-      .limit(options.limit || 365);
+  async getSecurityPrices(id: string, options: GetSecurityPricesQuery, caller: HouseholdContext, session: InvestmentReadSession) {
+    return readVisibleSecurityPriceHistory(caller, session, id, options);
   }
 
-  async createSecurity(data: CreateSecurityInput) {
-    const [security] = await db
-      .insert(securities)
-      .values({
-        symbol: data.symbol,
-        name: data.name,
-        type: data.type,
-        currency: data.currency,
-        exchange: data.exchange ?? null,
-        isOffshore: data.isOffshore ?? false,
-        sector: data.sector ?? null,
-        cusipIsin: data.cusipIsin ?? null,
-        currentPrice: data.currentPrice ?? null,
-        withholdingTaxRate: data.withholdingTaxRate ?? null,
-        lastPriceUpdate: data.currentPrice ? new Date() : null,
-      })
-      .returning();
-    return security;
-  }
-
-  async updateSecurityPrice(id: string, data: UpdateSecurityPriceInput) {
-    const priceDate = data.date || new Date().toISOString().split("T")[0];
-
-    return await withTransaction(async (tx) => {
-      // Update current price on security
-      const [updated] = await tx
-        .update(securities)
-        .set({
-          currentPrice: data.price,
-          lastPriceUpdate: new Date(),
-        })
-        .where(eq(securities.id, id))
-        .returning();
-
-      if (!updated) {
-        throw new NotFoundError("Security not found");
-      }
-
-      // Add to price history
-      await tx.insert(securityPrices).values({
-        securityId: id,
-        price: data.price,
-        date: priceDate,
-        source: "manual",
-      });
-
-      return updated;
+  async createSecurity(data: CreateSecurityInput, caller: HouseholdContext, ipAddress: string | undefined, session: InvestmentSourceSession) {
+    const parsed = createSecuritySchema.safeParse(data);
+    if (!parsed.success) {
+      throw new ValidationError("Invalid request data", parsed.error.errors);
+    }
+    if (!session?.snapshot || !session.sessionId) {
+      throw new UnauthorizedError("Authentication changed; sign in again");
+    }
+    return withTransaction(async (tx) => {
+      const { userId, householdId } = await lockInvestmentWriterIdentity(tx, caller, session);
+      // NEW-13: a member's security is that household's custom row; only an
+      // operator adds to the curated list (POST /api/admin/securities).
+      return insertCatalogueSecurity(tx, parsed.data, householdId, { userId, householdId, ipAddress });
     });
+  }
+
+  async updateSecurityPrice(id: string, data: UpdateSecurityPriceInput, caller: HouseholdContext,
+    ipAddress: string | undefined, session: InvestmentSourceSession) {
+    return recordHouseholdSecurityPrice(id, data, caller, ipAddress, session);
   }
 
   // =========================================================================
   // FX Rates
   // =========================================================================
 
-  async listFxRates(filters: ListFxRatesQuery) {
-    const conditions = [];
-
-    if (filters.from) {
-      conditions.push(eq(fxRates.fromCurrency, filters.from));
-    }
-    if (filters.to) {
-      conditions.push(eq(fxRates.toCurrency, filters.to));
-    }
-
-    return await db
-      .select()
-      .from(fxRates)
-      .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(fxRates.date));
+  async listFxRates(householdId: string, filters: ListFxRatesQuery) {
+    return listVisibleFxRates(householdId, filters);
   }
 
-  async createFxRate(data: CreateFxRateInput) {
-    const rateDate = data.date || new Date().toISOString().split("T")[0];
-
-    const insertData: InsertFxRate = {
-      fromCurrency: data.fromCurrency,
-      toCurrency: data.toCurrency,
-      rate: data.rate,
-      date: rateDate,
-      source: data.source || "manual",
-    };
-
-    const [rate] = await db.insert(fxRates).values(insertData).returning();
-    return rate;
+  async createFxRate(input: unknown, caller: HouseholdContext,
+    ipAddress: string | undefined, session: InvestmentSourceSession) {
+    return recordHouseholdFxRate(input, caller, ipAddress, session);
   }
 
   async getFxHistorical(options: FxHistoricalQuery) {
@@ -280,63 +132,49 @@ export class InvestmentService {
   // Holdings
   // =========================================================================
 
-  async getHoldings(
-    householdId: string,
-    filters: ListHoldingsQuery,
-    baseCurrencyRequest: string
-  ) {
-    const { accountId } = filters;
-
-    let whereConditions = and(
-      eq(accounts.householdId, householdId),
-      isNull(accounts.deletedAt),
-      ne(accounts.isHidden, true)
-    );
-
-    if (accountId) {
-      whereConditions = and(whereConditions, eq(holdings.accountId, accountId));
-    }
-
-    const results = await db
-      .select({ holding: holdings, security: securities })
-      .from(holdings)
-      .innerJoin(securities, eq(securities.id, holdings.securityId))
-      .innerJoin(accounts, eq(accounts.id, holdings.accountId))
-      .where(whereConditions);
-
-    // Get FX rates
-    const currencies = new Set(
-      results
-        .map((r) => r.security.currency)
-        .filter((c): c is string => Boolean(c) && c !== baseCurrencyRequest)
-    );
-
-    const fxRatesByCurrency = await getLatestFxRates(
-      Array.from(currencies),
-      baseCurrencyRequest
-    );
-
-    // Calculate values
-    return results.map(({ holding, security }) => {
-      const metrics = portfolioValuationService.computeHoldingMetrics(
-        holding,
-        security,
-        baseCurrencyRequest,
-        fxRatesByCurrency
+  async getHoldings(caller: HouseholdContext, filters: ListHoldingsQuery, baseCurrencyRequest: string, session: HoldingReadSession) {
+    return valueVisibleHoldings(caller, session, filters, async results => {
+      // Only authorized custody contributes denominations to the FX request.
+      const currencies = new Set(
+        results
+          .map((r) => r.security.currency)
+          .filter((c): c is string => Boolean(c) && c !== baseCurrencyRequest)
       );
 
-      return {
-        ...holding,
-        security,
-        currentValue: metrics.currentValueBase,
-        costBasis: metrics.costBasisBase,
-        fxRateUsed: metrics.fxRateUsed,
-        gainLoss: metrics.gainLoss,
-        gainLossPercent: metrics.gainLossPercent,
-      };
+      const fxRatesByCurrency = await getLatestFxRates(
+        Array.from(currencies),
+        baseCurrencyRequest,
+        caller.householdId
+      );
+
+      return results.map(({ holding, security, verifiedOpeningRate }) => {
+        const metrics = portfolioValuationService.computeHoldingMetrics(
+          { ...holding, verifiedOpeningRate },
+          security,
+          baseCurrencyRequest,
+          fxRatesByCurrency
+        );
+
+        return {
+          ...holding,
+          security,
+          // Base-currency MoneyDto; the stored local costBasis string is left as it is.
+          currentValue: toMoneyDto(metrics.currentValueBase),
+          costBasisBase: metrics.costBasisBase && toMoneyDto(metrics.costBasisBase),
+          fxRateUsed: metrics.fxRateUsed,
+          gainLoss: metrics.gainLoss && toMoneyDto(metrics.gainLoss),
+          gainLossPercent: metrics.gainLossPercent,
+        };
+      });
     });
   }
 
+  async getVisibleHoldingById(id: string, caller: HouseholdContext, session: HoldingReadSession) {
+    const [row] = await readVisibleHoldings(caller, session, { holdingId: id });
+    return row ? { ...row.holding, security: row.security } : null;
+  }
+
+  /** Mutation pre-read; HTTP GET uses the actor-scoped reader above. */
   async getHoldingById(id: string, householdId: string) {
     const [result] = await db
       .select({ holding: holdings, security: securities })
@@ -358,56 +196,16 @@ export class InvestmentService {
     return null;
   }
 
-  async createHolding(data: CreateHoldingInput, householdId: string) {
-    // H1 FIX: Validate account belongs to household before creating holding
-    await this.validateAccountOwnership(data.accountId, householdId);
-
-    const insertData: InsertHolding = {
-      householdId,
-      accountId: data.accountId,
-      securityId: data.securityId,
-      quantity: data.quantity,
-      costBasis: data.costBasis,
-      costBasisZmw: data.costBasisZmw,
-      acquiredDate: data.acquiredDate,
-      acquisitionFxRate: data.acquisitionFxRate,
-    };
-
-    const [holding] = await db.insert(holdings).values(insertData).returning();
-    return holding;
+  async createHolding(data: CreateHoldingInput, actor: HouseholdContext, ipAddress: string | undefined, session: InvestmentSourceSession) {
+    return createDeclaredOpeningHolding(data, actor, ipAddress, session);
   }
 
-  async updateHolding(id: string, data: UpdateHoldingInput, householdId: string) {
-    // P0-3 FIX: Added householdId check to prevent cross-household modification
-    const [updated] = await db
-      .update(holdings)
-      .set({
-        ...data,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(holdings.id, id),
-          eq(holdings.householdId, householdId)
-        )
-      )
-      .returning();
-    return updated;
+  async updateHolding(id: string, data: UpdateHoldingInput, actor: HouseholdContext, ipAddress: string | undefined, session: InvestmentSourceSession) {
+    return updateDeclaredHolding(id, data, actor, ipAddress, session);
   }
 
-  async deleteHolding(id: string, householdId: string): Promise<boolean> {
-    // P0-4 FIX: Added householdId check to prevent cross-household deletion
-    const result = await db
-      .delete(holdings)
-      .where(
-        and(
-          eq(holdings.id, id),
-          eq(holdings.householdId, householdId)
-        )
-      )
-      .returning({ id: holdings.id });
-
-    return result.length > 0;
+  async deleteHolding(id: string, actor: HouseholdContext, ipAddress: string | undefined, session: InvestmentSourceSession): Promise<boolean> {
+    return deleteAuthorizedHolding(id, actor, ipAddress, session);
   }
 
   // =========================================================================
@@ -415,86 +213,38 @@ export class InvestmentService {
   // =========================================================================
 
   async getTransactions(
-    householdId: string,
+    actor: HouseholdContext,
     filters: ListInvestmentTransactionsQuery
   ) {
-    const { limit } = filters;
-
-    const results = await db
-      .select()
-      .from(investmentTransactions)
-      .innerJoin(accounts, eq(accounts.id, investmentTransactions.accountId))
-      .where(
-        and(eq(accounts.householdId, householdId), isNull(accounts.deletedAt))
-      )
-      .orderBy(desc(investmentTransactions.transactionDate))
-      .limit(limit || 100);
-
-    return results.map((r) => r.investment_transactions);
+    return listVisibleInvestmentTransactions(actor, filters);
   }
 
-  async getTaxLots(householdId: string, filters: ListTaxLotsQuery) {
-    const conditions = [eq(taxLots.householdId, householdId)];
-    if (filters.holdingId) {
-      conditions.push(eq(taxLots.holdingId, filters.holdingId));
-    }
-
-    const lots = await db
-      .select({
-        lot: taxLots,
-        holding: holdings,
-        security: securities,
-      })
-      .from(taxLots)
-      .innerJoin(holdings, eq(holdings.id, taxLots.holdingId))
-      .innerJoin(securities, eq(securities.id, holdings.securityId))
-      .where(and(...conditions))
-      .limit(filters.limit);
-
-    if (!filters.includeDisposals) {
-      return lots.map(({ lot, holding, security }) => ({
-        ...lot,
-        holding,
-        security,
-      }));
-    }
-
-    const withDisposals = [];
-    for (const { lot, holding, security } of lots) {
-      const disposals = await db
-        .select()
-        .from(taxLotDisposals)
-        .where(eq(taxLotDisposals.taxLotId, lot.id))
-        .orderBy(desc(taxLotDisposals.disposedDate));
-
-      withDisposals.push({
-        ...lot,
-        holding,
-        security,
-        disposals,
-      });
-    }
-
-    return withDisposals;
+  getTaxLots(actor: HouseholdContext, filters: ListTaxLotsQuery) {
+    return listVisibleInvestmentTaxLots(actor, filters);
   }
 
   async createTransaction(
     data: CreateInvestmentTransactionInput,
-    householdId: string
+    caller: HouseholdContext,
+    ipAddress?: string,
   ) {
-    // H1 FIX: Validate account and holding ownership BEFORE starting transaction
-    await this.validateAccountOwnership(data.accountId, householdId);
-    if (data.holdingId) {
-      await this.validateHoldingOwnership(
-        data.holdingId,
-        householdId,
-        data.accountId,
-        data.securityId
-      );
-    }
-
+    const householdId = caller.householdId;
     // P0-1 & P0-2 FIX: Use transaction for atomicity, update holdings, validate overdraft
     return await withTransaction(async (tx) => {
+      const { actor, account, holding } = await lockInvestmentTransactionSources(tx, caller, data);
+      const sourceCurrency = await resolveInvestmentTransactionCurrency(tx, data, householdId);
+      // NEW-21: a foreign event stores the dated rate for its own date; a missing rate is a 422.
+      const conversion = await convertInvestmentEventToZmw(tx, householdId, sourceCurrency, data.transactionDate, data.amount,
+        { fxRate: data.fxRate, amountZmw: data.amountZmw });
+      // F3: a ZMW row of any type carries its own amount and a unit rate, never a typed base.
+      if (sourceCurrency === "ZMW" && ((data.amountZmw !== undefined && !new Money(data.amount).equals(data.amountZmw))
+        || (data.fxRate !== undefined && !new Money(data.fxRate).equals("1")))) {
+        throw new ValidationError("A ZMW investment event must use its native amount and a unit conversion rate");
+      }
+      if (data.type === "sell" || data.type === "buy") {
+        if (data.type === "sell") await checkRecordedDisposals(tx, householdId, data);
+        if (holding) await lockHoldingRemainingBasis(tx, holding, sourceCurrency);
+      }
       // P0-2 FIX: Overdraft validation for SELL transactions
       if (data.type === "sell" && data.holdingId && data.quantity) {
         // Lock the holding row to prevent race conditions
@@ -523,7 +273,7 @@ export class InvestmentService {
 
         if (currentQuantity.lt(sellQuantity)) {
           throw new ConflictError(
-            `Insufficient shares to sell. Available: ${currentQuantity.toString()}, Requested: ${sellQuantity.toString()}`
+            "Insufficient shares to sell"
           );
         }
       }
@@ -538,9 +288,11 @@ export class InvestmentService {
         quantity: data.quantity ? String(data.quantity) : null,
         price: data.price ? String(data.price) : null,
         amount: data.amount,
-        currency: data.currency,
-        amountZmw: data.amountZmw ?? null,
-        fxRate: data.fxRate ?? null,
+        currency: sourceCurrency,
+        fees: data.fees,
+        withholdingTax: isInvestmentIncome(data.type) ? data.withholdingTax ?? null : "0.00",
+        amountZmw: conversion?.amountZmw ?? data.amountZmw ?? null,
+        fxRate: conversion?.fxRate ?? data.fxRate ?? null,
         transactionDate: data.transactionDate,
       };
 
@@ -551,152 +303,31 @@ export class InvestmentService {
 
       // Tax lot tracking for buy/sell transactions.
       if (data.holdingId && data.quantity && (data.type === "buy" || data.type === "sell")) {
-        const quantity = new Money(String(data.quantity));
-        const amount = new Money(String(data.amount));
 
         if (data.type === "buy") {
-          const taxLotInsert: InsertTaxLot = {
-            householdId,
-            holdingId: data.holdingId,
-            transactionId: transaction.id,
-            quantity: this.toQtyString(data.quantity),
-            costBasis: amount.toString(),
-            costBasisZmw: data.amountZmw ? new Money(String(data.amountZmw)).toString() : null,
-            acquiredDate: data.transactionDate,
-            acquisitionFxRate: data.fxRate ? String(data.fxRate) : null,
-            remainingQuantity: this.toQtyString(data.quantity),
-          };
-          await tx.insert(taxLots).values(taxLotInsert);
+          await recordPurchaseLot(tx, transaction);
         } else {
-          const lots = await tx
-            .select()
-            .from(taxLots)
-            .where(
-              and(
-                eq(taxLots.householdId, householdId),
-                eq(taxLots.holdingId, data.holdingId),
-                sql`CAST(${taxLots.remainingQuantity} AS DECIMAL) > 0`
-              )
-            )
-            .orderBy(asc(taxLots.acquiredDate), asc(taxLots.createdAt));
-
-          const availableQuantity = lots.reduce(
-            (sum, lot) => sum.add(lot.remainingQuantity ?? "0"),
-            Money.zero()
-          );
-
-          if (availableQuantity.lt(quantity)) {
-            throw new ConflictError(
-              `Insufficient tax lot quantity. Available: ${availableQuantity.amount.toFixed(8)}, Requested: ${quantity.amount.toFixed(8)}`
-            );
-          }
-
-          let remainingToDispose = Money.from(quantity);
-          const proceedsPerShare = amount.divide(quantity.amount);
-          const proceedsPerShareZmw = data.amountZmw
-            ? new Money(String(data.amountZmw)).divide(quantity.amount)
-            : null;
-
-          for (const lot of lots) {
-            if (remainingToDispose.isZero()) break;
-
-            const lotRemaining = new Money(lot.remainingQuantity ?? "0");
-            if (lotRemaining.isZero()) continue;
-
-            const disposeQuantity = lotRemaining.lte(remainingToDispose)
-              ? lotRemaining
-              : remainingToDispose;
-
-            const lotTotalQuantity = new Money(lot.quantity ?? "0");
-            const lotCostBasis = new Money(lot.costBasis ?? "0");
-            const disposalCostBasis = lotCostBasis
-              .multiply(disposeQuantity.amount)
-              .divide(lotTotalQuantity.amount);
-
-            const disposalProceeds = proceedsPerShare.multiply(disposeQuantity.amount);
-            const disposalProceedsZmw = proceedsPerShareZmw
-              ? proceedsPerShareZmw.multiply(disposeQuantity.amount)
-              : null;
-            const disposalCostBasisZmw =
-              lot.costBasisZmw !== null && lot.costBasisZmw !== undefined
-                ? new Money(lot.costBasisZmw)
-                    .multiply(disposeQuantity.amount)
-                    .divide(lotTotalQuantity.amount)
-                : null;
-
-            const disposalInsert: InsertTaxLotDisposal = {
-              householdId,
-              holdingId: data.holdingId,
-              taxLotId: lot.id,
-              transactionId: transaction.id,
-              quantity: disposeQuantity.amount.toFixed(8),
-              proceeds: disposalProceeds.toString(),
-              proceedsZmw: disposalProceedsZmw ? disposalProceedsZmw.toString() : null,
-              costBasis: disposalCostBasis.toString(),
-              costBasisZmw: disposalCostBasisZmw ? disposalCostBasisZmw.toString() : null,
-              realizedGain: disposalProceeds.subtract(disposalCostBasis).toString(),
-              realizedGainZmw:
-                disposalProceedsZmw && disposalCostBasisZmw
-                  ? disposalProceedsZmw.subtract(disposalCostBasisZmw).toString()
-                  : null,
-              disposedDate: data.transactionDate,
-            };
-
-            await tx.insert(taxLotDisposals).values(disposalInsert);
-
-            const newRemaining = lotRemaining.subtract(disposeQuantity);
-            await tx
-              .update(taxLots)
-              .set({
-                remainingQuantity: newRemaining.amount.toFixed(8),
-                updatedAt: new Date(),
-              })
-              .where(eq(taxLots.id, lot.id));
-
-            remainingToDispose = remainingToDispose.subtract(disposeQuantity);
-          }
+          await postInvestmentLotSale(tx, transaction, actor);
         }
       }
 
-      // P0-1 FIX: Update holding quantity for BUY/SELL transactions
-      if (data.holdingId && data.quantity) {
-        if (data.type === "buy") {
-          await tx
-            .update(holdings)
-            .set({
-              quantity: sql`CAST(${holdings.quantity} AS DECIMAL) + ${data.quantity}`,
-              updatedAt: new Date(),
-            })
-            .where(
-              and(
-                eq(holdings.id, data.holdingId),
-                eq(holdings.householdId, householdId)
-              )
-            );
-        } else if (data.type === "sell") {
-          await tx
-            .update(holdings)
-            .set({
-              quantity: sql`CAST(${holdings.quantity} AS DECIMAL) - ${data.quantity}`,
-              updatedAt: new Date(),
-            })
-            .where(
-              and(
-                eq(holdings.id, data.holdingId),
-                eq(holdings.householdId, householdId)
-              )
-            );
-        }
-        // DIVIDEND and SPLIT transactions don't affect quantity directly
+      // Reconcile acquisition costs less actual booked FIFO allocations, then
+      // commit quantity and basis together under the original holding lock.
+      if (holding && data.quantity && (data.type === "buy" || data.type === "sell")) {
+        const shares = new Money(holding.quantity);
+        const quantity = (data.type === "buy" ? shares.add(data.quantity) : shares.subtract(data.quantity)).amount.toFixed(8);
+        const basis = await lockHoldingRemainingBasis(tx, { ...holding, quantity }, sourceCurrency);
+        await tx.update(holdings).set({ ...basis, updatedAt: new Date() })
+          .where(and(eq(holdings.id, holding.id), eq(holdings.householdId, householdId)));
       }
 
+      await logInvestmentTransactionCreate(tx, transaction, data, sourceCurrency, { userId: actor.userId, ipAddress }, account.isPrivate ? null : actor.householdId,
+        conversion?.source);
       return transaction;
     });
   }
 
-  private toQtyString(value: string | number): string {
-    return new Money(String(value)).amount.toFixed(8);
-  }
+
 }
 
 export const investmentService = new InvestmentService();

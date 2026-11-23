@@ -104,7 +104,7 @@ describe("ForgotPassword page", () => {
     fireEvent.click(screen.getByRole("button", { name: /send reset link/i }));
 
     await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent(/too many requests/i);
+      expect(screen.getByRole("alert")).toHaveTextContent(/too many attempts/i);
     });
     // Still on the form - no success state.
     expect(screen.getByLabelText(/email/i)).toBeInTheDocument();

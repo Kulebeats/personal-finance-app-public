@@ -9,131 +9,82 @@
 
 import type { Account } from "@shared/schema";
 import { accountRepository } from "../../repositories/AccountRepository";
+import { lockAccountHousehold } from "../../repositories/AccountCreationGrant";
 import {
   AuthorizationError,
   NotFoundError,
 } from "../../utils/errorHandler";
 import { logger } from "../../utils/logger";
+import { withTransaction } from "../../utils/withTransaction";
 import { businessAuditService } from "../BusinessAuditService";
 
+type ArchiveOperation = "archive" | "unarchive";
+
 /**
- * Archive an account
+ * Archive or unarchive one account and write its single audit row in the same
+ * transaction (NEW-32): a failed audit insert rolls the change back.
  *
- * Uses TOCTOU-safe ownership check in the WHERE clause to prevent race
- * conditions where visibility could change between the check and archive.
+ * Uses a TOCTOU-safe ownership check in the WHERE clause, so a visibility
+ * change between the check and the write cannot touch another user's account.
  */
-export async function archiveAccount(
+async function setArchived(
+  operation: ArchiveOperation,
   id: string,
   householdId: string,
   userId: string,
+  ipAddress?: string,
 ): Promise<Account> {
-  // Initial visibility check (for user-friendly error messages)
-  const existing = await accountRepository.findByIdWithVisibility(
-    id,
-    householdId,
-    userId,
-  );
+  // Initial visibility check (privacy-preserving: missing and hidden are both 404)
+  const existing = await accountRepository.findByIdWithVisibility(id, householdId, userId);
   if (!existing) {
     throw new NotFoundError("Account not found");
   }
-
-  // Check ownership for private accounts
   if (existing.isPrivate && existing.ownerUserId !== userId) {
-    throw new AuthorizationError(
-      "Only the owner can archive a private account",
-    );
+    throw new AuthorizationError(`Only the owner can ${operation} a private account`);
   }
 
-  // Use atomic ownership check for TOCTOU-safe archive
-  const { account, unauthorized } = await accountRepository.archive(
-    id,
-    householdId,
-    { userId }, // Ownership check: must be public OR owned by this user
-  );
-
-  if (unauthorized) {
-    throw new AuthorizationError(
-      "Cannot archive private account owned by another user",
-    );
-  }
-
-  if (!account) {
-    throw new NotFoundError("Account not found");
-  }
-
-  // Audit logging
-  await businessAuditService.logUpdate({
-    householdId,
-    userId,
-    entityType: "account",
-    entityId: id,
-    oldValue: { isArchived: false },
-    newValue: { isArchived: true },
+  const isArchived = operation === "archive";
+  const account = await withTransaction(async (tx) => {
+    // Household first: the audit row's household FK takes a key-share lock on it.
+    await lockAccountHousehold(tx, householdId);
+    // The audit's before-state is read under the account row lock.
+    const before = await accountRepository.lockForAudit(tx, id, householdId);
+    if (!before) {
+      throw new NotFoundError("Account not found");
+    }
+    const { account: changed, unauthorized } = isArchived
+      ? await accountRepository.archive(id, householdId, { userId }, tx)
+      : await accountRepository.unarchive(id, householdId, { userId }, tx);
+    if (unauthorized) {
+      throw new AuthorizationError(`Cannot ${operation} private account owned by another user`);
+    }
+    if (!changed) {
+      throw new NotFoundError("Account not found");
+    }
+    await businessAuditService.logUpdate({
+      tx,
+      householdId: changed.isPrivate ? null : householdId,
+      userId,
+      entityType: "account",
+      entityId: id,
+      oldValue: { isArchived: before.isArchived },
+      newValue: { isArchived: changed.isArchived },
+      ipAddress,
+      metadata: { operation },
+    });
+    return changed;
   });
 
-  logger.info("Account archived", { householdId, accountId: id });
-
+  logger.info(isArchived ? "Account archived" : "Account unarchived", { householdId, accountId: id });
   return account;
 }
 
-/**
- * Unarchive an account
- *
- * Uses TOCTOU-safe ownership check in the WHERE clause to prevent race
- * conditions where visibility could change between the check and unarchive.
- */
-export async function unarchiveAccount(
-  id: string,
-  householdId: string,
-  userId: string,
-): Promise<Account> {
-  // Check visibility first (privacy-preserving check)
-  const existing = await accountRepository.findByIdWithVisibility(
-    id,
-    householdId,
-    userId,
-  );
+/** Archive an account (one audit row, in the write's transaction). */
+export function archiveAccount(id: string, householdId: string, userId: string, ipAddress?: string): Promise<Account> {
+  return setArchived("archive", id, householdId, userId, ipAddress);
+}
 
-  if (!existing) {
-    // Returns NotFoundError for both missing AND not-visible (privacy-preserving)
-    throw new NotFoundError("Account not found");
-  }
-
-  // Owner check for private accounts
-  if (existing.isPrivate && existing.ownerUserId !== userId) {
-    throw new AuthorizationError(
-      "Only the owner can unarchive a private account",
-    );
-  }
-
-  // Use atomic ownership check for TOCTOU-safe unarchive
-  const { account, unauthorized } = await accountRepository.unarchive(
-    id,
-    householdId,
-    { userId }, // Ownership check: must be public OR owned by this user
-  );
-
-  if (unauthorized) {
-    throw new AuthorizationError(
-      "Cannot unarchive private account owned by another user",
-    );
-  }
-
-  if (!account) {
-    throw new NotFoundError("Account not found");
-  }
-
-  // Audit logging
-  await businessAuditService.logUpdate({
-    householdId,
-    userId,
-    entityType: "account",
-    entityId: id,
-    oldValue: { isArchived: true },
-    newValue: { isArchived: false },
-  });
-
-  logger.info("Account unarchived", { householdId, accountId: id });
-
-  return account;
+/** Unarchive an account (one audit row, in the write's transaction). */
+export function unarchiveAccount(id: string, householdId: string, userId: string, ipAddress?: string): Promise<Account> {
+  return setArchived("unarchive", id, householdId, userId, ipAddress);
 }

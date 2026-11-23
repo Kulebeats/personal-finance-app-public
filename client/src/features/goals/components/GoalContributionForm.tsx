@@ -4,6 +4,7 @@ import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { useAddContribution } from "@/hooks/useGoals";
 import type { Goal } from "../types";
+import { OverfundConfirm, wouldOverfund } from "./OverfundConfirm";
 
 interface GoalContributionFormProps {
   goal: Goal;
@@ -17,6 +18,8 @@ export function GoalContributionForm({
   const [contributionAmount, setContributionAmount] = useState("");
   const [contributionDate, setContributionDate] = useState("");
   const [contributionNotes, setContributionNotes] = useState("");
+  const [confirmOverfund, setConfirmOverfund] = useState(false);
+  const overfunds = wouldOverfund(goal, contributionAmount);
 
   const addContribution = useAddContribution();
 
@@ -33,6 +36,7 @@ export function GoalContributionForm({
           },
           date: contributionDate || undefined,
           notes: contributionNotes || undefined,
+          confirmOverfund: overfunds && confirmOverfund ? true : undefined,
         },
       },
       {
@@ -40,6 +44,7 @@ export function GoalContributionForm({
           setContributionAmount("");
           setContributionDate("");
           setContributionNotes("");
+          setConfirmOverfund(false);
           onSuccess?.();
         },
       }
@@ -75,11 +80,14 @@ export function GoalContributionForm({
           />
         </div>
       </div>
+      {overfunds ? (
+        <OverfundConfirm goal={goal} checked={confirmOverfund} onCheckedChange={setConfirmOverfund} />
+      ) : null}
       <div className="flex justify-end">
         <Button
           size="sm"
           onClick={handleContribution}
-          disabled={!contributionAmount || addContribution.isPending}
+          disabled={!contributionAmount || (overfunds && !confirmOverfund) || addContribution.isPending}
         >
           Add Contribution
         </Button>

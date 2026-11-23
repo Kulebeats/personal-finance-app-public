@@ -1,7 +1,7 @@
 # Production-Readiness Remediation Playbook
 
 **Repository:** Personal Finance App (DPA-regulated, GRZ securities)
-**Owner:** Kuwani Banda (solo maintainer)
+**Owner:** the maintainer (solo maintainer)
 **Basis:** Independent multi-agent audit, 2026-06-04
 **Toolchain:** Claude Code on Max, Opus 4.8, Dynamic Workflows, `/goal`, Linear
 

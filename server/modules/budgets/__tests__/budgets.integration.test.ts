@@ -897,6 +897,7 @@ describe("Budgets Integration Tests", () => {
         {
           id: randomUUID(),
           householdId,
+          currency: "ZMW",
           accountId: testAccountId,
           categoryId: progressCategoryId,
           date: dateStr,
@@ -908,6 +909,7 @@ describe("Budgets Integration Tests", () => {
         {
           id: randomUUID(),
           householdId,
+          currency: "ZMW",
           accountId: testAccountId,
           categoryId: progressCategoryId,
           date: dateStr,
@@ -943,6 +945,7 @@ describe("Budgets Integration Tests", () => {
       await db.insert(transactions).values({
         id: randomUUID(),
         householdId,
+        currency: "ZMW",
         accountId: testAccountId,
         categoryId: progressCategoryId,
         date: dateStr,
@@ -976,6 +979,7 @@ describe("Budgets Integration Tests", () => {
       await db.insert(transactions).values({
         id: randomUUID(),
         householdId,
+        currency: "ZMW",
         accountId: testAccountId,
         categoryId: progressCategoryId,
         date: dateStr,
@@ -1008,6 +1012,7 @@ describe("Budgets Integration Tests", () => {
       await db.insert(transactions).values({
         id: randomUUID(),
         householdId,
+        currency: "ZMW",
         accountId: testAccountId,
         categoryId: progressCategoryId,
         date: dateStr,
@@ -1041,6 +1046,7 @@ describe("Budgets Integration Tests", () => {
         {
           id: randomUUID(),
           householdId,
+          currency: "ZMW",
           accountId: testAccountId,
           categoryId: progressCategoryId,
           date: dateStr,
@@ -1052,6 +1058,7 @@ describe("Budgets Integration Tests", () => {
         {
           id: randomUUID(),
           householdId,
+          currency: "ZMW",
           accountId: testAccountId,
           categoryId: progressCategoryId,
           date: dateStr,
@@ -1313,6 +1320,7 @@ describe("Budgets Integration Tests", () => {
       await db.insert(transactions).values({
         id: randomUUID(),
         householdId,
+        currency: "ZMW",
         accountId: testAccountId,
         categoryId: alertCategoryId,
         date: dateStr,
@@ -1360,6 +1368,7 @@ describe("Budgets Integration Tests", () => {
       await db.insert(transactions).values({
         id: randomUUID(),
         householdId,
+        currency: "ZMW",
         accountId: testAccountId,
         categoryId: alertCategoryId,
         date: dateStr,
@@ -1408,6 +1417,7 @@ describe("Budgets Integration Tests", () => {
       await db.insert(transactions).values({
         id: randomUUID(),
         householdId,
+        currency: "ZMW",
         accountId: testAccountId,
         categoryId: alertCategoryId,
         date: dateStr,
@@ -1451,6 +1461,7 @@ describe("Budgets Integration Tests", () => {
       await db.insert(transactions).values({
         id: randomUUID(),
         householdId,
+        currency: "ZMW",
         accountId: testAccountId,
         categoryId: alertCategoryId,
         date: dateStr,
@@ -1656,7 +1667,10 @@ describe("Budgets Integration Tests", () => {
   // Recalculate and Clear
   // ===========================================================================
   describe("Recalculate and Clear Operations", () => {
-    it("should recalculate budgets based on transaction history", async () => {
+    it("should preview historical estimates without overwriting budgets or periods", async () => {
+      const before = await db.select().from(budgets).where(eq(budgets.householdId, householdId)).orderBy(budgets.id);
+      const budgetIds = before.map(row => row.id);
+      const periodsBefore = await db.select().from(budgetPeriods).where(inArray(budgetPeriods.budgetId, budgetIds)).orderBy(budgetPeriods.id);
       const res = await request(app)
         .post("/api/budgets/recalculate")
         .set("Cookie", authCookie)
@@ -1665,9 +1679,11 @@ describe("Budgets Integration Tests", () => {
         .expect(200);
 
       expect(res.body.success).toBe(true);
-      expect(res.body.data).toHaveProperty("updated");
-      expect(res.body.data).toHaveProperty("created");
-      expect(res.body.data).toHaveProperty("cleared");
+      expect(res.body.data).toMatchObject({ mode: "preview", scope: "visible_posted_activity" });
+      expect(res.body.data.periods).toHaveLength(3);
+      expect(Array.isArray(res.body.data.suggestions)).toBe(true);
+      expect(await db.select().from(budgets).where(eq(budgets.householdId, householdId)).orderBy(budgets.id)).toEqual(before);
+      expect(await db.select().from(budgetPeriods).where(inArray(budgetPeriods.budgetId, budgetIds)).orderBy(budgetPeriods.id)).toEqual(periodsBefore);
     });
 
     it("should clear all budgets except flex budget", async () => {

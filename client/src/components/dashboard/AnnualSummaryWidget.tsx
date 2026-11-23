@@ -4,6 +4,7 @@ import { useFormatters } from "@/contexts/SettingsContext";
 import { useReportsAnnual } from "@/hooks/use-reports";
 import { toMoneyNumber } from "@/lib/money";
 import { cn } from "@/lib/utils";
+import { useCalendarYearMonth } from "@/lib/calendarZone";
 import { WidgetErrorState } from "./WidgetErrorState";
 
 /**
@@ -17,7 +18,8 @@ import { WidgetErrorState } from "./WidgetErrorState";
  */
 export default function AnnualSummaryWidget() {
   const { formatCurrency } = useFormatters();
-  const currentYear = new Date().getFullYear();
+  // The household calendar's year, never the browser's (NEW-15).
+  const { year: currentYear } = useCalendarYearMonth();
 
   const { data: annualData, isLoading, error, refetch } = useReportsAnnual({
     year: currentYear,

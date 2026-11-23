@@ -20,7 +20,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { randomUUID } from "crypto";
 import { db } from "../../db";
 import { and, eq } from "drizzle-orm";
-import { accounts, transactions, users, households } from "@shared/schema";
+import { accounts, transactions, users, households, householdMembers } from "@shared/schema";
 import { transactionRepository } from "../../repositories/TransactionRepository";
 import { transactionService } from "../TransactionService";
 import { transferService } from "../TransferService";
@@ -57,6 +57,7 @@ describe("Deletion / balance-adjustment concurrency (§4b)", () => {
       failedLoginAttempts: user.failedLoginAttempts,
       lockedUntil: user.lockedUntil,
     });
+    await db.insert(householdMembers).values({ householdId, userId, role: "owner" });
   });
 
   afterAll(async () => {

@@ -11,8 +11,10 @@ import { useCurrentYearRange, useReportsNetWorth } from "@/hooks/use-reports";
 import { useFormatters } from "@/contexts/SettingsContext";
 import { Loader2 } from "lucide-react";
 import { toMoneyNumber } from "@/lib/money";
+import { shortMonthLabel } from "@/features/reports/chartSeries";
 import { WidgetErrorState } from "./WidgetErrorState";
 import { LastUpdated } from "./LastUpdated";
+import { NetWorthIncompleteNotice } from "./NetWorthIncompleteNotice";
 
 export default function NetWorthWidget() {
   const { formatCurrency } = useFormatters();
@@ -49,7 +51,7 @@ export default function NetWorthWidget() {
   // netWorthData.series is Array<{ id: "Net Worth", data: Array<{ x: string; y: number }> }>
   const chartData =
     netWorthData?.series[0]?.data.map((item) => ({
-      date: new Date(item.x).toLocaleDateString("en-US", { month: "short" }),
+      date: shortMonthLabel(item.x),
       value: toMoneyNumber(item.y),
     })) ?? [];
 
@@ -93,6 +95,10 @@ export default function NetWorthWidget() {
         <div className="text-3xl font-bold mb-4 text-foreground tracking-tight">
           {formatCurrency(currentNetWorth)}
         </div>
+        <NetWorthIncompleteNotice
+          incomplete={netWorthData?.incomplete}
+          omittedValuations={netWorthData?.omittedValuations}
+        />
         <div className="h-[200px] w-full">
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={chartData}>

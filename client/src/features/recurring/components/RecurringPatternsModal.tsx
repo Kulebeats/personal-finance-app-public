@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Sparkles, Loader2, Check, AlertCircle } from "lucide-react";
 import {
   Dialog,
@@ -17,71 +17,86 @@ import {
 import { formatCurrency } from "@/lib/money";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useAccounts } from "@/hooks/useAccounts";
+import { useSession } from "@/contexts/SessionContext";
+import { assertOperationLifetime, type OperationLifetime } from "@/lib/operation-lifetime";
+
+const emptyPreview = (identity: string | null, epoch = 0) => ({ identity, epoch, rows: [] as DetectedPattern[], destinations: {} as Record<string, string> });
 
 export function RecurringPatternsModal({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const { lifetime } = useSession();
+  const identity = lifetime?.key ?? null;
   const [open, setOpen] = useState(false);
-  const [patterns, setPatterns] = useState<DetectedPattern[]>([]);
+  const [preview, setPreview] = useState(() => emptyPreview(identity));
+  const currentIdentity = useRef(identity), requestEpoch = useRef(0), isOpen = useRef(false);
+  currentIdentity.current = identity;
   const detectMutation = useDetectPatterns();
   const confirmMutation = useConfirmPattern();
+  const accounts = useAccounts({ ownerUserId: "all", includeHidden: true }, open && identity !== null);
+  const patterns = preview.identity === identity && identity !== null ? preview.rows : [];
+  const destinations = preview.identity === identity ? preview.destinations : {};
+  const keyFor = (pattern: DetectedPattern) => pattern.selection?.fingerprint ?? `${pattern.name}:${pattern.type}:${pattern.estimatedAmount.currency}`;
+  useEffect(() => {
+    ++requestEpoch.current;
+    isOpen.current = false;
+    setOpen(false);
+    setPreview(emptyPreview(identity));
+    detectMutation.reset?.();
+    confirmMutation.reset?.();
+  }, [identity, detectMutation.reset, confirmMutation.reset]);
+  useEffect(() => () => { ++requestEpoch.current; isOpen.current = false; }, []);
+
+  const fresh = (key: string | null, epoch: number, operation: OperationLifetime | null) => {
+    if (!key || !operation || key !== currentIdentity.current || epoch !== requestEpoch.current || !isOpen.current) return false;
+    try { assertOperationLifetime(operation); return true; } catch { return false; }
+  };
+  const scan = () => {
+    const key = identity, epoch = ++requestEpoch.current, operation = lifetime?.operation ?? null;
+    setPreview(emptyPreview(key, epoch));
+    detectMutation.reset?.();
+    confirmMutation.reset?.();
+    if (!fresh(key, epoch, operation)) return;
+    detectMutation.mutate({}, {
+      onSuccess: rows => { if (fresh(key, epoch, operation)) setPreview({ identity: key, epoch, rows, destinations: {} }); },
+      onError: () => { if (fresh(key, epoch, operation)) setPreview(emptyPreview(key)); },
+    });
+  };
 
   const handleOpenChange = (newOpen: boolean) => {
+    ++requestEpoch.current;
+    isOpen.current = newOpen;
     setOpen(newOpen);
-    if (newOpen && patterns.length === 0) {
-      // Auto-scan on open if no patterns yet? Or wait for user action?
-      // Let's auto-scan to be helpful.
-      detectMutation.mutate(
-        {},
-        {
-          onSuccess: (data) => setPatterns(data),
-        },
-      );
-    }
+    setPreview(emptyPreview(identity));
+    if (newOpen) scan();
+    else { detectMutation.reset?.(); confirmMutation.reset?.(); }
   };
 
   const handleConfirm = (pattern: DetectedPattern) => {
+    const key = identity, epoch = preview.epoch, operation = lifetime?.operation ?? null;
+    const accountId = destinations[keyFor(pattern)];
+    if (!fresh(key, epoch, operation)) {
+      if (key === currentIdentity.current && epoch === requestEpoch.current) setPreview(emptyPreview(key));
+      return;
+    }
+    if (preview.identity !== key || !accountId || !pattern.selection || pattern.confirmationIssue) return;
     confirmMutation.mutate(
       {
         pattern,
-        accountId: pattern.sampleTransactionIds[0] || "", // Using first transaction's account would be ideal, but pattern doesn't strictly have accountId. Backend confirm uses generic logic or needs accountId.
-        // Backend confirmPattern logic: needs accountId.
-        // DetectedPattern doesn't have accountId?
-        // Let's check the type definition again.
+        accountId,
       },
       {
         onSuccess: () => {
-          // Remove from list
-          setPatterns((prev) => prev.filter((p) => p !== pattern));
+          if (fresh(key, epoch, operation)) setPreview(previous => previous.identity === key
+            ? { ...previous, rows: previous.rows.filter(item => keyFor(item) !== keyFor(pattern)) } : previous);
         },
+        onError: () => { if (fresh(key, epoch, operation)) setPreview(emptyPreview(key)); },
       },
     );
   };
-
-  // The hook detectedPattern type:
-  // export interface DetectedPattern { ... }
-  // It doesn't seem to have accountId.
-  // The 'detect' endpoint scans transactions across accounts or specific?
-  // "detectAndSuggest(householdId, options)"
-  // It groups by merchant. It might not return accountId if mixed?
-  // But usually recurring is per account.
-  // I might need to ask the user to select Account if not present?
-  // Or the backend infers it.
-
-  // Actually, let's verify DetectedPattern type in useRecurring.ts again.
-  // It has sampleTransactionIds.
-  // I can't easily get accountId from that without fetching transactions.
-  // However, `confirmPattern` in controller takes `accountId`.
-  // Wait, line 67 in controller: `parseResult.data.accountId`.
-  // If I don't pass accountId, it might fail?
-  // The UI should probably ask for account or I should update backend to include accountId in pattern.
-  // Inspecting backend `detectAndSuggest` would be good, but I'll assume I need to handle it.
-
-  // For now, I'll assume the pattern detection returns items that imply an account or I need to fetch it.
-  // Or I can just pass the first transaction ID?
-  // Backend `confirmPattern` calls `recurringService.confirmPattern`.
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -106,9 +121,9 @@ export function RecurringPatternsModal({
           ) : patterns.length > 0 ? (
             <ScrollArea className="h-[400px] pr-4">
               <div className="space-y-4">
-                {patterns.map((pattern, idx) => (
+                {patterns.map(pattern => (
                   <div
-                    key={idx}
+                    key={keyFor(pattern)}
                     className="flex flex-col sm:flex-row items-start sm:items-center justify-between p-4 border rounded-lg bg-card hover:bg-muted/20 transition-colors gap-4"
                   >
                     <div className="flex-1 min-w-0">
@@ -119,12 +134,12 @@ export function RecurringPatternsModal({
                         <span
                           className={cn(
                             "text-[10px] px-1.5 py-0.5 rounded-full uppercase tracking-wider font-medium",
-                            pattern.confidence > 0.8
+                            pattern.confidence >= 80
                               ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300"
                               : "bg-yellow-100 text-yellow-700",
                           )}
                         >
-                          {Math.round(pattern.confidence * 100)}% Match
+                          {pattern.confidence}% Match
                         </span>
                       </div>
                       <div className="text-sm text-muted-foreground flex gap-4">
@@ -137,16 +152,35 @@ export function RecurringPatternsModal({
                               : "text-foreground"
                           }
                         >
-                          {formatCurrency(pattern.estimatedAmount)}
+                          {pattern.estimatedAmount.currency ? formatCurrency(pattern.estimatedAmount) : `${pattern.estimatedAmount.amount} (currency missing)`}
                         </span>
                         <span>•</span>
                         <span>{pattern.occurrences} detected</span>
                       </div>
+                      {pattern.selection && <p className="text-sm">Personal history window: {pattern.selection.startDate} to {pattern.selection.endDate} ({pattern.selection.timezone}).</p>}
+                      {pattern.confirmationIssue ? <p role="status" className="text-sm text-destructive">{pattern.confirmationIssue}</p> : (
+                        <label className="block text-sm mt-2">
+                          Destination account for {pattern.name}
+                          <select aria-label={`Destination account for ${pattern.name}`} className="block w-full border rounded p-2 bg-background"
+                            value={destinations[keyFor(pattern)] ?? ""}
+                            onChange={event => { const value = event.target.value; setPreview(previous => previous.identity === identity
+                              ? { ...previous, destinations: { ...previous.destinations, [keyFor(pattern)]: value } } : previous); }}>
+                            <option value="">Choose an account</option>
+                            {(accounts.data ?? []).filter(account => account.currency === pattern.estimatedAmount.currency && !account.isArchived && !account.deletedAt)
+                              .map(account => <option key={account.id} value={account.id}>{account.name} ({account.currency})</option>)}
+                          </select>
+                        </label>
+                      )}
+                      {pattern.amountTolerance !== undefined && pattern.amountVariance > 0 && (
+                        <p className="text-sm">Measured relative deviation: {pattern.amountVariance.toFixed(2)}%. Rule tolerance: {pattern.amountTolerance}% (maximum 50%).</p>
+                      )}
+                      {!pattern.selection && !pattern.confirmationIssue && <p role="status" className="text-sm">Scan again to obtain a complete selection.</p>}
+                      {accounts.isError && <p role="alert" className="text-sm text-destructive">Unable to load destination accounts.</p>}
                     </div>
                     <Button
                       size="sm"
                       onClick={() => handleConfirm(pattern)}
-                      disabled={confirmMutation.isPending}
+                      disabled={confirmMutation.isPending || !pattern.selection || !!pattern.confirmationIssue || !destinations[keyFor(pattern)]}
                       className="shrink-0"
                     >
                       {confirmMutation.isPending ? (
@@ -175,13 +209,15 @@ export function RecurringPatternsModal({
               <Button
                 variant="outline"
                 className="mt-4"
-                onClick={() => detectMutation.mutate({})}
+                onClick={scan}
               >
                 Scan Again
               </Button>
             </div>
           )}
         </div>
+        {patterns.length > 0 && <Button variant="outline" onClick={scan} disabled={detectMutation.isPending}>Scan Again</Button>}
+        {confirmMutation.isError && <p role="alert" className="text-sm text-destructive">{confirmMutation.error.message} Scan again to refresh this selection.</p>}
       </DialogContent>
     </Dialog>
   );

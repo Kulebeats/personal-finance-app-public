@@ -1,5 +1,5 @@
-import { requireAuth } from "../auth";
+import { requireAuth, requireAuthForExplicitHousehold } from "../auth";
 import { householdGuard, householdGuardWithId } from "./householdGuard";
 import { requireRole } from "./validateEntity";
 
-export { requireAuth, householdGuard, householdGuardWithId, requireRole };
+export { requireAuth, requireAuthForExplicitHousehold, householdGuard, householdGuardWithId, requireRole };

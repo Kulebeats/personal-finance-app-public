@@ -1,0 +1,29 @@
+# R19 selected logging callsite amendment
+
+This is a separate local logging slice after inactive storage 184c1da/e0c1a29. Parent explicitly assigned only logging in the rule service, app request logger, scheduler, named receipt/goal jobs and cron metrics, plus logger route helpers/redaction and output tests. No route, middleware order, financial mutation, job schedule, lock, delivery, session or authentication behavior changed. R01 auth/security email callsites were not edited.
+
+## Reproduced gaps
+
+Four actual-output regressions failed before repair. RuleService.applyRules emitted the synthetic rule name and full transaction ID in its message despite context redaction. Real app HTTP output included arbitrary unknown paths and matched parameter values both in the interpolated message and in request middleware's allowlisted route field. The scheduler security-report failure embedded the full synthetic user ID in its message. Reviewed numeric outcome fields were discarded as redacted rather than preserving counts. Fixtures used synthetic sentinel names/values and isolated dependency mocks, real structured logger serialization and real Express/express-session/Supertest; no real database or recipient was used.
+
+## Changes
+
+Rule logging now emits the static event "Rule updates prepared", masked rule/transaction/household identifiers and updatesCount. It does not emit the rule name or financial update object. The label deliberately describes preparation inside the existing transaction; it is not a durable commit-success claim. The transaction wrapper, actions, returned values and persistence flow remain unchanged.
+
+App request messages are static "HTTP request completed" with method/status/duration/request ID. Logger request(), requestError() and requestIdMiddleware use the source-declared req.route.path template. Only exact reviewed static API mount prefixes may precede the template; arbitrary dynamic baseUrl/originalUrl/path/query values are never used. Dynamic mounts use the constant mounted label plus the controlled leaf template; unmatched requests use unmatched. Wildcards normalize to a controlled parameter label. Future unlisted mounts lose prefix specificity rather than leaking path data. Request extra context cannot override the normalized route or trusted request identity.
+
+Scheduler messages are static, user IDs pass through the existing mask, and errors preserve only safe class/code. Existing numeric aliases were explicitly classified as counts: matched, households, totalAlerts, notificationsSent, totalGoals, updatedCount, statusChanges, remindersSent, reminderDays, archived, purged, updatesCount and linkGoalIdsCount. Each remains restricted to finite nonnegative safe integers, including under metrics. Strings, arrays, nested objects, negative/fractional values and financial aliases remain redacted. Named job/cron completion events gain stable job context; unsupported legacy batch outcomes remain omitted. No arbitrary result object is admitted.
+
+## Verification and limits
+
+Protected focused checks select utils/__tests__/completion-r19.log-callsites.test.ts, completion-r19.logger.test.ts, modules/health/__tests__/completion-r19.app-order.test.ts and __tests__/scheduler.lock.test.ts: 4 files /23 tests passed. The suite includes the four original red cases, actual HTTP matched/static and dynamic mounts, arbitrary unknown path/query/parameter sentinels, request()/requestError() serialized output and override resistance, actual scheduler callbacks under owned service stubs, unchanged rule-result values, reviewed count validation and existing privacy/health/session/lock controls. A node-cron missing-source sourcemap warning occurred; tests passed without schedule or transport dispatch.
+
+Fresh npm run check passed TypeScript and all repository guards. Rule atomicity/visibility real-DB suites were inspected but not executed: this logging-only amendment has no assigned manifest and does not infer production/persistence proof from unit stubs. No broad suite was run by this worker.
+
+This closes the reproduced selected-callsite gaps only. The logger still accepts an event-message string, so freeform messages in unreviewed callsites remain audit scope; the context allowlist alone is not proof that every message is safe. Other job/delivery/financial business outcomes, complete operational metrics and external alert delivery require their governing packets and runtime evidence. R19/OPS-014 full closure and hosted enablement remain OPEN.
+
+## Review correction: legacy batch outcomes
+
+Independent review found the new unconditional success outcome was unsupported for budget alerts (per-household errors are caught) and receipt matching (the real matching service catches per-receipt errors and returns successful processed/matched counts). Only those outcome fields were removed; no failure-aware business redesign is inferred. New actual-output tests invoke the real cron router and the real receipt matching service plus background worker with owned failing item dependencies. Budget partial/all-household failure and receipt partial failure produced three behavioral red failures; receipt all-item failure was already a passing negative because processed=0 emits no completion event. After repair all four negatives pass, count/response semantics are unchanged and no success outcome is emitted for those batches. The budget endpoint's existing response success flag is intentionally unchanged and is not certified by this logging-only repair.
+
+Final correction verification selects the new batch-outcomes file plus callsite/logger output files: 3 files /20 tests passed. Fresh npm run check passed. Earlier health-order/scheduler lock checks remain recorded above; no additional DB or broad suite was run. Full batch truth/delivery semantics remain with their governing packets.

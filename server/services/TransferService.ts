@@ -1,19 +1,28 @@
+import { businessAuditService } from "./BusinessAuditService";
 import { accountRepository } from "../repositories/AccountRepository";
 import { transactionRepository } from "../repositories/TransactionRepository";
 import { accounts, transactions, type Transaction } from "@shared/schema";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   AuthorizationError,
+  ConflictError,
   NotFoundError,
   ValidationError,
 } from "../utils/errorHandler";
 import { logger } from "../utils/logger";
+import { EventTypes, outboxEventService } from "../core/events";
 import { withTransaction } from "../utils/withTransaction";
 import { goalAccountAssignmentService } from "./GoalAccountAssignmentService";
-import { invalidateOnChange } from "./CacheInvalidation";
+import { invalidateOnChangeAfterCommit } from "./CacheInvalidation";
 import { Money, roundMoney } from "../core/money";
 import Decimal from "decimal.js";
-import { calculateFxData, type FxData } from "./TransferFxService";
+import { TransferCreateRequest, serviceTransferTerms, transferAmount, validateTransferRate, type TransferOptions } from "./TransferCreateRequest";
+import { authorizedTransferReplay, transferQuoteAccounts } from "../repositories/TransferReplay";
+
+import { lockTransactionCreateGrant } from "../repositories/TransactionCreateBoundary";
+import { requireTransferPair, requireTransferVisibility } from "../repositories/TransactionTransferRepository";
+import { nextTransactionVersion } from "../repositories/TransactionUpdateWriter";
+import { buildPostingReceipt, readPostingEffect } from "../repositories/TransactionPostingEffect";
 
 export class TransferService {
   /**
@@ -25,23 +34,25 @@ export class TransferService {
     amount: number | string,
     householdId: string,
     userId: string,
-    options?: {
-      date?: string;
-      name?: string;
-      notes?: string;
-      idempotencyKey?: string;
-      currency?: string;
-      fxRate?: string | null;
-      fxSource?: string;
-    },
+    input?: TransferOptions,
   ): Promise<{
     outflow: Transaction;
     inflow: Transaction;
     isDuplicate: boolean;
   }> {
-    // SCP-320: idempotency is now resolved INSIDE the repository transaction,
-    // under the account FOR UPDATE locks, so a concurrent retry can't race past a
-    // read-then-write window. (Previously this check ran here, outside any txn.)
+    const options = structuredClone(input ?? {});
+    fromAccountId = fromAccountId.toLowerCase();
+    toAccountId = toAccountId.toLowerCase();
+    householdId = householdId.toLowerCase();
+    userId = userId.toLowerCase();
+    const moneyAmount = transferAmount(amount);
+    validateTransferRate(options.fxRate);
+    if (options.idempotencyKey) {
+      const replay = await authorizedTransferReplay(householdId, userId, options.idempotencyKey,
+        serviceTransferTerms(fromAccountId, toAccountId, moneyAmount, options),
+        { fromAccountId, toAccountId, amount, currency: options.currency });
+      if (replay) return replay;
+    }
 
     // Validate accounts
     if (fromAccountId === toAccountId) {
@@ -50,17 +61,7 @@ export class TransferService {
       ]);
     }
 
-    // Verify both accounts exist and are accessible
-    const fromAccount = await accountRepository.findByIdWithVisibility(
-      fromAccountId,
-      householdId,
-      userId,
-    );
-    const toAccount = await accountRepository.findByIdWithVisibility(
-      toAccountId,
-      householdId,
-      userId,
-    );
+    const { from: fromAccount, to: toAccount } = await transferQuoteAccounts(householdId, userId, fromAccountId, toAccountId);
 
     if (!fromAccount) {
       throw new NotFoundError("Source account not found");
@@ -69,69 +70,9 @@ export class TransferService {
       throw new NotFoundError("Destination account not found");
     }
 
-    // Validate amount
-    const moneyAmount = new Money(amount);
-    if (moneyAmount.isZero() || !moneyAmount.isPositive()) {
-      throw new ValidationError("Amount must be positive", [
-        { field: "amount", message: "Must be greater than 0" },
-      ]);
-    }
-
-    // Cross-currency transfer validation and FX calculation
-    const isCrossCurrency = fromAccount.currency !== toAccount.currency;
-    let fxData: FxData | null = null;
-
-    if (isCrossCurrency) {
-      // Get household base currency for consistent reporting
-      const { householdRepository } =
-        await import("../repositories/HouseholdRepository");
-      const household = await householdRepository.findById(householdId);
-      const baseCurrency = household?.currency ?? "ZMW";
-
-      // Delegate FX calculation to TransferFxService
-      fxData = await calculateFxData({
-        amount: moneyAmount,
-        fromCurrency: fromAccount.currency,
-        toCurrency: toAccount.currency,
-        baseCurrency,
-        householdId,
-        fxRate: options?.fxRate,
-        fxSource: options?.fxSource,
-      });
-    }
-
-    // FIX DATA-TRANSFER-001: Pass converted amount for cross-currency destination balance
-    // For cross-currency transfers, destination account should receive converted amount
-    const destinationAmount = fxData
-      ? roundMoney(new Decimal(moneyAmount.toString()).times(fxData.fxRate), 2)
-      : moneyAmount.toString();
-
-    // Create transfer - use toString() for DB storage (CLAUDE.md Money/Arithmetic Rule)
-    const result = await transactionRepository.createTransfer(
-      fromAccountId,
-      toAccountId,
-      moneyAmount.toString(),
-      {
-        householdId,
-        ownerUserId: userId,
-        date: options?.date || new Date().toISOString().split("T")[0],
-        name: options?.name,
-        notes: options?.notes,
-        idempotencyKey: options?.idempotencyKey,
-        currency: options?.currency || fromAccount.currency,
-        destinationCurrency: toAccount.currency,
-        destinationAmount,
-        // FX data for cross-currency transfers
-        ...(fxData && {
-          fxRate: fxData.fxRate,
-          fxBaseCurrency: fxData.fxBaseCurrency,
-          fxQuoteCurrency: fxData.fxQuoteCurrency,
-          fxTimestamp: fxData.fxTimestamp,
-          fxSource: fxData.fxSource,
-          convertedAmount: fxData.convertedAmount,
-        }),
-      },
-    );
+    const request = await TransferCreateRequest.prepare(fromAccountId, toAccountId, moneyAmount, householdId, userId,
+      fromAccount.currency, toAccount.currency, options);
+    const result = await transactionRepository.createTransfer(fromAccountId, toAccountId, moneyAmount.toString(), request);
 
     logger.info("Transfer created", {
       householdId,
@@ -146,7 +87,8 @@ export class TransferService {
    */
   async updateTransfer(
     id: string,
-    data: {
+    input: {
+      expectedUpdatedAt?: string;
       fromAccountId: string;
       toAccountId: string;
       amount: number | string;
@@ -158,7 +100,9 @@ export class TransferService {
     },
     householdId: string,
     userId: string,
+    audit?: { ipAddress?: string },
   ): Promise<{ outflow: Transaction; inflow: Transaction }> {
+    const { expectedUpdatedAt, ...data } = input;
     const existing = await transactionRepository.findByIdWithVisibility(
       id,
       householdId,
@@ -208,64 +152,6 @@ export class TransferService {
       throw new NotFoundError("Destination account not found");
     }
 
-    const pair = await transactionRepository.findTransferPair(
-      existing.transferTransactionId,
-      householdId,
-    );
-    const outflow = pair.find((txn) => !txn.isTransferIn);
-    const inflow = pair.find((txn) => txn.isTransferIn);
-
-    if (!outflow || !inflow) {
-      throw new NotFoundError("Transfer pair not found");
-    }
-
-    // R-06: Block currency changes on transfer update (FX recalculation too complex)
-    // Check if accounts are changing and if so, ensure currencies match
-    const originalFromAccountId = outflow.accountId;
-    const originalToAccountId = outflow.transferAccountId!;
-
-    // If changing accounts, verify currencies match the original
-    if (data.fromAccountId !== originalFromAccountId) {
-      // Fetch original from account to compare currency
-      const originalFromAccount =
-        await accountRepository.findByIdWithVisibility(
-          originalFromAccountId,
-          householdId,
-          userId,
-        );
-      if (
-        originalFromAccount &&
-        fromAccount.currency !== originalFromAccount.currency
-      ) {
-        throw new ValidationError(
-          "Cannot change transfer to account with different currency. Delete and recreate the transfer.",
-          [
-            { field: "fromAccountId", message: `Currency mismatch: ${originalFromAccount.currency} → ${fromAccount.currency}` },
-          ],
-        );
-      }
-    }
-
-    if (data.toAccountId !== originalToAccountId) {
-      // Fetch original to account to compare currency
-      const originalToAccount = await accountRepository.findByIdWithVisibility(
-        originalToAccountId,
-        householdId,
-        userId,
-      );
-      if (
-        originalToAccount &&
-        toAccount.currency !== originalToAccount.currency
-      ) {
-        throw new ValidationError(
-          "Cannot change transfer to account with different currency. Delete and recreate the transfer.",
-          [
-            { field: "toAccountId", message: `Currency mismatch: ${originalToAccount.currency} → ${toAccount.currency}` },
-          ],
-        );
-      }
-    }
-
     const newAmount = new Money(data.amount);
 
     // FIX DATA-TRANSFER-002: Validate FX rate for cross-currency transfers
@@ -282,11 +168,9 @@ export class TransferService {
       ? roundMoney(new Decimal(newAmount.toString()).times(data.fxRate), 2)
       : newAmount.toString();
 
-    const newName = data.name?.trim() || outflow.name;
-    const newDate = data.date || outflow.date;
-    const newNotes = data.notes !== undefined ? data.notes : outflow.notes;
 
-    const result = await withTransaction(async (tx) => {
+    const { outflow, inflow, affectedAccountIds } = await withTransaction(async (tx) => {
+      await lockTransactionCreateGrant(tx, householdId, { createActor: { householdId, userId } });
       const lockedPair = await tx
         .select()
         .from(transactions)
@@ -298,20 +182,17 @@ export class TransferService {
           ),
         )
         .orderBy(transactions.id)
-        .limit(2)
         .for("update");
 
-      const lockedOutflow = lockedPair.find((txn) => !txn.isTransferIn);
-      const lockedInflow = lockedPair.find((txn) => txn.isTransferIn);
+      if (lockedPair.length === 0) throw new NotFoundError("Transfer not found");
+      const { outflow: lockedOutflow, inflow: lockedInflow } = requireTransferPair(lockedPair);
 
-      if (!lockedOutflow || !lockedInflow) {
-        throw new NotFoundError("Transfer pair not found");
-      }
-
+      // Drizzle skips undefined fields. Omitted metadata stays on its original leg.
+      const metadata = { name: data.name?.trim() || undefined, date: data.date || undefined, notes: data.notes };
       const affectedAccountIds = Array.from(
         new Set([
           lockedOutflow.accountId,
-          lockedOutflow.transferAccountId!,
+          lockedInflow.accountId,
           data.fromAccountId,
           data.toAccountId,
         ]),
@@ -320,7 +201,7 @@ export class TransferService {
       const lockedAccounts = await tx
         .select()
         .from(accounts)
-        .where(inArray(accounts.id, affectedAccountIds))
+        .where(and(inArray(accounts.id, affectedAccountIds), eq(accounts.householdId, householdId), isNull(accounts.deletedAt)))
         .orderBy(accounts.id)
         .for("update");
 
@@ -328,28 +209,33 @@ export class TransferService {
         throw new NotFoundError("Transfer account not found");
       }
 
+      requireTransferVisibility([...lockedPair, ...lockedAccounts], userId);
+      const selected = lockedPair.find(leg => leg.id === existing.id);
+      if (!selected) throw new NotFoundError("Transfer not found");
+      if (expectedUpdatedAt !== undefined && selected.updatedAt.getTime() !== Date.parse(expectedUpdatedAt)) {
+        throw new ConflictError("Transfer was modified. Refresh before saving your changes.");
+      }
+      const pairVersion = nextTransactionVersion(lockedOutflow.updatedAt > lockedInflow.updatedAt ? lockedOutflow.updatedAt : lockedInflow.updatedAt);
       const balanceDeltas = new Map<string, Money>();
       const addDelta = (accountId: string, delta: Money) => {
         const current = balanceDeltas.get(accountId) ?? Money.zero(delta.currency);
         balanceDeltas.set(accountId, current.add(delta));
       };
 
-      const oldAmount = new Money(
-        lockedOutflow.amount,
-        lockedOutflow.currency ?? undefined,
-      );
-      const oldInflowAmount = new Money(
-        lockedInflow.amount,
-        lockedInflow.currency ?? undefined,
-      );
-      const newOutflowAmount = new Money(newAmount.toString(), fromAccount.currency);
-      const newInflowAmount = new Money(destinationAmount, toAccount.currency);
-
-      // Reverse old transfer effects, then apply the new transfer effects.
-      addDelta(lockedOutflow.accountId, oldAmount);
-      addDelta(lockedOutflow.transferAccountId!, oldInflowAmount.negated());
-      addDelta(data.fromAccountId, newOutflowAmount.negated());
-      addDelta(data.toAccountId, newInflowAmount);
+      const accountById = new Map(lockedAccounts.map(account => [account.id, account]));
+      const lockedFrom = accountById.get(data.fromAccountId)!;
+      const lockedTo = accountById.get(data.toAccountId)!;
+      if (lockedFrom.currency !== fromAccount.currency || lockedTo.currency !== toAccount.currency ||
+          lockedFrom.currency !== lockedOutflow.currency || lockedTo.currency !== lockedInflow.currency ||
+          (data.currency && data.currency !== lockedFrom.currency)) {
+        throw new ValidationError("Transfer denominations changed", [{ field: "currency", message: "Refresh the account and transfer quote" }]);
+      }
+      const outgoing = buildPostingReceipt(lockedFrom, { type: "transfer", amount: newAmount.toString(), currency: lockedFrom.currency, isTransferIn: false });
+      const incoming = buildPostingReceipt(lockedTo, { type: "transfer", amount: destinationAmount, currency: lockedTo.currency, isTransferIn: true });
+      addDelta(lockedOutflow.accountId, readPostingEffect(accountById.get(lockedOutflow.accountId)!, lockedOutflow).delta.negated());
+      addDelta(lockedInflow.accountId, readPostingEffect(accountById.get(lockedInflow.accountId)!, lockedInflow).delta.negated());
+      addDelta(data.fromAccountId, new Money(outgoing.postedBalanceDelta, outgoing.currency));
+      addDelta(data.toAccountId, new Money(incoming.postedBalanceDelta, incoming.currency));
 
       for (const lockedAccount of lockedAccounts) {
         const delta = balanceDeltas.get(lockedAccount.id);
@@ -395,13 +281,11 @@ export class TransferService {
           accountId: data.fromAccountId,
           transferAccountId: data.toAccountId,
           amount: newAmount.toString(),
-          date: newDate,
-          name: newName,
-          notes: newNotes,
-          currency: fromAccount.currency, // Use source account currency
+          ...metadata,
+          ...outgoing,
           convertedAmount: isCrossCurrency ? destinationAmount : null, // Store destination amount
           fxRate: isCrossCurrency && data.fxRate ? data.fxRate.toString() : null,
-          updatedAt: new Date(),
+          updatedAt: pairVersion,
         })
         .where(eq(transactions.id, lockedOutflow.id))
         .returning();
@@ -413,31 +297,36 @@ export class TransferService {
           accountId: data.toAccountId,
           transferAccountId: data.fromAccountId,
           amount: destinationAmount, // Use converted amount for cross-currency
-          date: newDate,
-          name: newName,
-          notes: newNotes,
-          currency: toAccount.currency, // Use destination account currency
+          ...metadata,
+          ...incoming,
           convertedAmount: isCrossCurrency ? newAmount.toString() : null, // Store source amount
           fxRate: isCrossCurrency && data.fxRate ? data.fxRate.toString() : null,
-          updatedAt: new Date(),
+          updatedAt: pairVersion,
         })
         .where(eq(transactions.id, lockedInflow.id))
         .returning();
 
-      return { outflow: updatedOutflow, inflow: updatedInflow };
+      if (audit) {
+        await businessAuditService.logUpdate({ tx, userId, householdId, entityId: id, entityType: "transaction",
+          oldValue: { fromAccountId: lockedOutflow.accountId, toAccountId: lockedInflow.accountId, amount: lockedOutflow.amount,
+            currency: lockedOutflow.currency, date: lockedOutflow.date, name: lockedOutflow.name, notes: lockedOutflow.notes },
+          newValue: data, ipAddress: audit.ipAddress, metadata: { transfer: true } });
+      }
+      const fields = ["accountId", "transferAccountId", "amount", "date", "name", "notes", "fxRate", "convertedAmount"] as const;
+      for (const [before, after] of [[lockedOutflow, updatedOutflow], [lockedInflow, updatedInflow]]) {
+        const changes = fields.filter(field => before[field] !== after[field]);
+        await outboxEventService.publish({
+          eventType: EventTypes.TRANSACTION_UPDATED, aggregateType: "transaction",
+          aggregateId: after.id, householdId, payload: { id: after.id, changes },
+        }, tx);
+      }
+      return { outflow: updatedOutflow, inflow: updatedInflow, affectedAccountIds };
     });
 
     logger.info("Transfer updated", { householdId });
-    await invalidateOnChange("transaction", householdId);
+    await invalidateOnChangeAfterCommit("transaction", householdId);
 
-    const accountsToSync = new Set<string>([
-      outflow.accountId,
-      outflow.transferAccountId!,
-      data.fromAccountId,
-      data.toAccountId,
-    ]);
-
-    for (const accountId of accountsToSync) {
+    for (const accountId of affectedAccountIds) {
       try {
         await goalAccountAssignmentService.syncGoalsForAccount(
           accountId,
@@ -451,7 +340,7 @@ export class TransferService {
       }
     }
 
-    return result;
+    return { outflow, inflow };
   }
 }
 

@@ -10,7 +10,7 @@ import { useReportsGoalsProgress } from "@/hooks/use-reports";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 import { Target, CheckCircle2, Clock, AlertTriangle } from "lucide-react";
-import { toMoneyNumber } from "@/lib/money";
+import { formatCurrency, toMoneyNumber, type MoneyDto } from "@/lib/money";
 import { useFormatters } from "@/contexts/SettingsContext";
 
 // ============================================================================
@@ -29,15 +29,16 @@ function GoalItem({
   name: string;
   type: "save_up" | "pay_down" | "investment";
   targetAmount: number;
-  currentAmount: number;
+  currentAmount: MoneyDto;
   progress: number;
   onTrack: boolean;
   monthlyRequired: number | null;
 }) {
   const isComplete = progress >= 100;
+  const isPayDown = type === "pay_down";
   const { currency } = useFormatters();
 
-  const formatCurrency = (amount: number) =>
+  const formatSavedAmount = (amount: number) =>
     new Intl.NumberFormat("en-US", {
       style: "currency",
       currency,
@@ -72,15 +73,33 @@ function GoalItem({
       />
 
       <div className="flex justify-between text-xs text-muted-foreground">
-        <span>{formatCurrency(currentAmount)} saved</span>
-        <span>of {formatCurrency(targetAmount)}</span>
+        {isPayDown ? (
+          <span>{formatCurrency(currentAmount, currency, "en-US")} remaining</span>
+        ) : (
+          <>
+            <span>{formatSavedAmount(toMoneyNumber(currentAmount))} saved</span>
+            <span>of {formatSavedAmount(targetAmount)}</span>
+          </>
+        )}
       </div>
 
-      {!isComplete && monthlyRequired && (
+      {!isComplete && !isPayDown && monthlyRequired && (
         <p className="text-xs text-muted-foreground">
-          {formatCurrency(monthlyRequired)}/mo needed
+          {formatSavedAmount(monthlyRequired)}/mo needed
         </p>
       )}
+    </div>
+  );
+}
+
+/** A goal some of whose progress sources the viewer cannot see: no amount or percent. */
+function UnavailableGoalItem({ name }: { name: string }) {
+  return (
+    <div className="space-y-1">
+      <span className="text-sm font-medium truncate block">{name}</span>
+      <p className="text-xs text-muted-foreground">
+        Progress unavailable: it includes sources you cannot see.
+      </p>
     </div>
   );
 }
@@ -114,22 +133,27 @@ export function GoalsProgressWidget({
     >
       {hasGoals ? (
         <div className="space-y-4">
-          {data.goals.slice(0, 4).map((goal) => (
-            <GoalItem
-              key={goal.id}
-              name={goal.name}
-              type={goal.type}
-              targetAmount={toMoneyNumber(goal.targetAmount)}
-              currentAmount={toMoneyNumber(goal.currentAmount)}
-              progress={goal.progress}
-              onTrack={goal.onTrack}
-              monthlyRequired={
-                goal.monthlyRequired
-                  ? toMoneyNumber(goal.monthlyRequired)
-                  : null
-              }
-            />
-          ))}
+          {data.goals.slice(0, 4).map((goal) =>
+            goal.progressAvailability === "unavailable" || goal.progress === null ||
+            !goal.currentAmount || !goal.targetAmount ? (
+              <UnavailableGoalItem key={goal.id} name={goal.name} />
+            ) : (
+              <GoalItem
+                key={goal.id}
+                name={goal.name}
+                type={goal.type}
+                targetAmount={toMoneyNumber(goal.targetAmount)}
+                currentAmount={goal.currentAmount}
+                progress={goal.progress}
+                onTrack={goal.onTrack === true}
+                monthlyRequired={
+                  goal.monthlyRequired
+                    ? toMoneyNumber(goal.monthlyRequired)
+                    : null
+                }
+              />
+            ),
+          )}
 
           {data.goals.length > 4 && (
             <p className="text-xs text-muted-foreground text-center">

@@ -26,16 +26,13 @@ describe("Auth Property-Based Tests", () => {
     // Arbitrary for valid passwords
     const validPasswordArb = fc
       .tuple(
-        charSetString('abcdefghijklmnopqrstuvwxyz', 1, 50),
-        charSetString('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 1, 50),
-        charSetString('0123456789', 1, 50)
+        charSetString('abcdefghijklmnopqrstuvwxyz', 1, 1),
+        charSetString('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 1, 1),
+        charSetString('0123456789', 1, 1),
+        charSetString('!@#$%^&*(),.?":{}|<>', 1, 1),
+        charSetString('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*(),.?":{}|<>', 4, 124)
       )
-      .map(([lower, upper, num]) => {
-        // Ensure minimum length and shuffle
-        const combined = lower + upper + num;
-        return combined.length >= 8 ? combined : combined + 'x'.repeat(8 - combined.length);
-      })
-      .filter((p) => p.length >= 8 && p.length <= 128);
+      .map(parts => parts.join('')); // Required classes plus a generated suffix: 8–128.
 
     it("should accept any password meeting complexity requirements", () => {
       fc.assert(
@@ -46,12 +43,22 @@ describe("Auth Property-Based Tests", () => {
             password,
             fullName: "Test User",
           });
-          // Should only fail if password equals email (which it won't with our generator)
-          return result.success ||
-            result.error.issues.some(i => i.message.includes("same as your email"));
+          return result.success;
         }),
         { numRuns: 100 }
       );
+    });
+
+    it("should reject passwords missing only the required special character", () => {
+      const noSpecialArb = fc.tuple(
+        charSetString('abcdefghijklmnopqrstuvwxyz', 1, 1),
+        charSetString('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 1, 1),
+        charSetString('0123456789', 1, 1),
+        charSetString('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', 5, 125)
+      ).map(parts => parts.join(''));
+      fc.assert(fc.property(noSpecialArb, password => !registerSchema.safeParse({
+        email: "test@example.com", username: "testuser", password, fullName: "Test User",
+      }).success), { numRuns: 100 });
     });
 
     it("should reject any password under 8 characters", () => {
@@ -382,7 +389,7 @@ describe("Auth Property-Based Tests", () => {
           const result = registerSchema.safeParse({
             email: "test@example.com",
             username,
-            password: "Password123",
+            password: "Password123!",
             fullName: "Test",
           });
           return result.success;

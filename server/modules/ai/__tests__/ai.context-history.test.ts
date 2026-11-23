@@ -179,7 +179,7 @@ describe("selectHistoryTurns — token budget", () => {
   it("still yields zero history when the reservation OVERSHOOTS the budget", () => {
     const result = selectHistoryTurns({
       messages: thread(4),
-      reservedTokens: 5000,
+      reservedTokens: DEFAULT_AI_REQUEST_TOKEN_BUDGET + 1000,
       tokenBudget: DEFAULT_AI_REQUEST_TOKEN_BUDGET,
     });
 
@@ -187,9 +187,9 @@ describe("selectHistoryTurns — token budget", () => {
     expect(result.historyTokens).toBe(0);
   });
 
-  it("does not raise the shipped request budget", () => {
-    // Regression guard: the whole design fits history INSIDE the existing cap.
-    expect(DEFAULT_AI_REQUEST_TOKEN_BUDGET).toBe(2000);
+  it("ships the owner-ruled request budget (21 Nov: 8000)", () => {
+    // Regression guard: history is fitted INSIDE this cap, never added on top.
+    expect(DEFAULT_AI_REQUEST_TOKEN_BUDGET).toBe(8000);
   });
 });
 

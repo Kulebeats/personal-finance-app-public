@@ -3,6 +3,9 @@ import { holdings, priceAlerts, securities, securityPrices } from "@shared/schem
 import { and, desc, eq } from "drizzle-orm";
 import { notificationService } from "./NotificationService";
 import { NOTIFICATION_TYPES } from "@shared/notificationTypes";
+import { withTransaction } from "../utils/withTransaction";
+import { businessAuditService } from "./BusinessAuditService";
+import { securityHoldingAudience, stalePriceDispatchHold } from "./notification/audience";
 
 const STALE_PRICE_THRESHOLDS: Record<string, number> = {
   stock: 7,
@@ -103,10 +106,26 @@ export class PriceAlertService {
         }
       );
 
-      await db
-        .update(priceAlerts)
-        .set({ lastTriggered: new Date(), updatedAt: new Date() })
-        .where(eq(priceAlerts.id, alert.id));
+      // NEW-32: the trigger stamp and its system audit row commit together.
+      // The notification above is deduplicated by its key, so a rolled-back
+      // stamp re-notifies nothing on the next run.
+      await withTransaction(async (tx) => {
+        const triggeredAt = new Date();
+        await tx
+          .update(priceAlerts)
+          .set({ lastTriggered: triggeredAt, updatedAt: triggeredAt })
+          .where(eq(priceAlerts.id, alert.id));
+        await businessAuditService.logUpdate({
+          tx,
+          userId: null,
+          householdId: alert.householdId,
+          entityType: "price_alert",
+          entityId: alert.id,
+          oldValue: { lastTriggered: alert.lastTriggered ? new Date(alert.lastTriggered).toISOString() : null },
+          newValue: { lastTriggered: triggeredAt.toISOString() },
+          metadata: { securityId: security.id, alertType: alert.alertType, source: "price_alert_check" },
+        });
+      });
 
       triggered++;
     }
@@ -159,10 +178,11 @@ export class PriceAlertService {
       }
 
       for (const householdId of householdIds) {
-        await notificationService.notifyHousehold(
-          householdId,
-          NOTIFICATION_TYPES.STALE_PRICE,
-          {
+        // A-57: the notice names the security, so only members who can see a holding of it.
+        const recipients = await securityHoldingAudience(householdId, security.id);
+        if (!recipients.length) continue;
+        for (const userId of recipients) {
+          await notificationService.notifyDetailed(userId, householdId, NOTIFICATION_TYPES.STALE_PRICE, {
             title: `Stale price: ${security.symbol || security.name}`,
             body: `${security.name} price is ${diffDays} days old`,
             actionUrl: "/investments",
@@ -171,9 +191,13 @@ export class PriceAlertService {
               lastPriceUpdate: security.lastPriceUpdate,
               diffDays,
             },
-            dedupeKey: `stale_price:${householdId}:${security.id}:${security.lastPriceUpdate}`,
-          }
-        );
+            // Epoch milliseconds fit the 150-character inbox key and are independent of the process time zone.
+            dedupeKey: `stale_price:${householdId}:${security.id}:${lastUpdate.getTime()}:user:${userId}`,
+            // The old inbox insert overflowed, but the wider ledger could hold an external-only delivery.
+            legacyDeliveryEventKey: `stale_price:${householdId}:${security.id}:${security.lastPriceUpdate}:user:${userId}`,
+            dispatchHold: tx => stalePriceDispatchHold(householdId, userId, security.id, lastUpdate, tx),
+          });
+        }
 
         triggered++;
       }

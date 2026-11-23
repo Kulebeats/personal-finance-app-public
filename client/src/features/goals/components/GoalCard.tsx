@@ -19,6 +19,7 @@ import {
   MoreHorizontal,
 } from "lucide-react";
 import { cn, parseMoney } from "@/lib/utils";
+import { GoalProgressHidden, isGoalProgressHidden } from "./GoalProgressHidden";
 
 const GOAL_TYPE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   vacation: Plane,
@@ -67,6 +68,7 @@ export function GoalCard({ goal, onClick, compact = false }: GoalCardProps) {
       : 0;
 
   const displayProgress = Math.min(100, Math.max(0, progress));
+  const isProgressHidden = isGoalProgressHidden(goal);
 
   const IconComponent = GOAL_TYPE_ICONS[goal.goalType ?? "other"] ?? Target;
 
@@ -110,18 +112,24 @@ export function GoalCard({ goal, onClick, compact = false }: GoalCardProps) {
             <span className="font-medium text-sm truncate">{goal.name}</span>
             <GoalStatusBadge status={goal.status} size="sm" />
           </div>
-          <div className="flex items-center justify-between mt-1">
-            <span className="text-xs text-muted-foreground">
-              {formatCurrency(isPayDown ? effectiveTarget - currentAmount : currentAmount)} /{" "}
-              {formatCurrency(effectiveTarget)}
-            </span>
-            <span className="text-xs font-medium">{displayProgress}%</span>
-          </div>
-          <GoalProgressBar
-            current={isPayDown ? effectiveTarget - currentAmount : currentAmount}
-            target={effectiveTarget}
-            color={goal.color}
-          />
+          {isProgressHidden ? (
+            <GoalProgressHidden className="mt-1" />
+          ) : (
+            <>
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-xs text-muted-foreground">
+                  {formatCurrency(isPayDown ? effectiveTarget - currentAmount : currentAmount)} /{" "}
+                  {formatCurrency(effectiveTarget)}
+                </span>
+                <span className="text-xs font-medium">{displayProgress}%</span>
+              </div>
+              <GoalProgressBar
+                current={isPayDown ? effectiveTarget - currentAmount : currentAmount}
+                target={effectiveTarget}
+                color={goal.color}
+              />
+            </>
+          )}
         </div>
       </div>
     );
@@ -174,17 +182,21 @@ export function GoalCard({ goal, onClick, compact = false }: GoalCardProps) {
           <GoalStatusBadge status={goal.status} />
         </div>
 
-        <div className="space-y-1">
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-muted-foreground">Progress</span>
-            <span className="font-medium">{displayProgress}%</span>
+        {isProgressHidden ? (
+          <GoalProgressHidden />
+        ) : (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">Progress</span>
+              <span className="font-medium">{displayProgress}%</span>
+            </div>
+            <GoalProgressBar
+              current={isPayDown ? effectiveTarget - currentAmount : currentAmount}
+              target={effectiveTarget}
+              color={goal.color}
+            />
           </div>
-          <GoalProgressBar
-            current={isPayDown ? effectiveTarget - currentAmount : currentAmount}
-            target={effectiveTarget}
-            color={goal.color}
-          />
-        </div>
+        )}
 
         <div className="flex items-center justify-between text-xs">
           <div>
@@ -192,7 +204,7 @@ export function GoalCard({ goal, onClick, compact = false }: GoalCardProps) {
               {isPayDown ? "Remaining" : "Saved"}
             </span>
             <p className="font-semibold text-sm">
-              {formatCurrency(isPayDown ? currentAmount : currentAmount)}
+              {isProgressHidden ? "—" : formatCurrency(currentAmount)}
             </p>
           </div>
           <div className="text-right">

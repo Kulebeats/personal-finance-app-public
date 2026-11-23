@@ -1,122 +1,97 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AddMemberDialog } from "../AddMemberDialog";
 
-// Mock hooks
-const mockMutate = vi.fn();
-vi.mock("@/hooks/use-settings", () => ({
-  useAddMember: () => ({
+// AH-05: Add Member sends an email invitation (POST /api/household/invite).
+const { mockMutate } = vi.hoisted(() => ({ mockMutate: vi.fn() }));
+vi.mock("@/hooks/use-household-membership", () => ({
+  useInviteMember: () => ({
     mutate: mockMutate,
     isPending: false,
   }),
 }));
 
+async function openDialog(canInviteAdmin = true) {
+  const user = userEvent.setup();
+  render(<AddMemberDialog canInviteAdmin={canInviteAdmin} />);
+  await user.click(screen.getByText("Add Member"));
+  return user;
+}
+
+async function openRoleOptions(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByLabelText("Select role for new member"));
+  // Radix Select renders the selected value in the trigger AND the matching
+  // option in the listbox portal; scope to the listbox to query options.
+  return within(screen.getByRole("listbox"));
+}
+
 describe("AddMemberDialog", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("renders trigger button by default", () => {
-    render(<AddMemberDialog />);
+    render(<AddMemberDialog canInviteAdmin />);
 
     expect(screen.getByText("Add Member")).toBeInTheDocument();
   });
 
-  it("opens dialog when trigger is clicked", async () => {
-    const user = userEvent.setup();
-    render(<AddMemberDialog />);
+  it("explains that the person is invited by email", async () => {
+    await openDialog();
 
-    await user.click(screen.getByText("Add Member"));
-
-    expect(screen.getByText("Add Household Member")).toBeInTheDocument();
-    expect(
-      screen.getByText(/Add an existing user to your household/)
-    ).toBeInTheDocument();
+    expect(screen.getByText("Invite a household member")).toBeInTheDocument();
+    expect(screen.getByText(/We'll email them an invitation/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Email address")).toBeInTheDocument();
   });
 
-  it("has email input field", async () => {
-    const user = userEvent.setup();
-    render(<AddMemberDialog />);
+  it("offers every invitable role to the owner, with Professional as read-only (AH-13)", async () => {
+    const user = await openDialog(true);
+    const listbox = await openRoleOptions(user);
 
-    await user.click(screen.getByText("Add Member"));
-
-    expect(screen.getByLabelText("Email or Username")).toBeInTheDocument();
-  });
-
-  it("has role selector with all roles", async () => {
-    const user = userEvent.setup();
-    render(<AddMemberDialog />);
-
-    await user.click(screen.getByText("Add Member"));
-
-    const roleSelect = screen.getByLabelText("Select role for new member");
-    expect(roleSelect).toBeInTheDocument();
-
-    // Open select
-    await user.click(roleSelect);
-
-    // Radix Select renders the selected value in the trigger AND the matching
-    // option in the listbox portal, so the default "Member" label appears twice.
-    // Scope assertions to the open listbox to query the option set unambiguously.
-    const listbox = within(screen.getByRole("listbox"));
-
-    // Check all role options are present
     expect(listbox.getByText(/Admin - Can manage members/)).toBeInTheDocument();
     expect(listbox.getByText(/Member - Can add\/edit/)).toBeInTheDocument();
     expect(listbox.getByText(/View Only - Read-only/)).toBeInTheDocument();
-    expect(listbox.getByText(/Professional - Advisor/)).toBeInTheDocument();
+    expect(listbox.getByText(/Professional - Read-only access for an outside adviser/)).toBeInTheDocument();
+    expect(listbox.queryByText(/Owner/)).not.toBeInTheDocument();
   });
 
-  it("defaults to member role", async () => {
-    const user = userEvent.setup();
-    render(<AddMemberDialog />);
+  it("does not offer admin to an admin (spec §A3)", async () => {
+    const user = await openDialog(false);
+    const listbox = await openRoleOptions(user);
 
-    await user.click(screen.getByText("Add Member"));
-
-    // The select should have "member" as default
-    const roleSelect = screen.getByLabelText("Select role for new member");
-    expect(roleSelect).toBeInTheDocument();
+    expect(listbox.queryByText(/Admin - Can manage members/)).not.toBeInTheDocument();
+    expect(listbox.getByText(/Professional - Read-only access for an outside adviser/)).toBeInTheDocument();
   });
 
-  it("disables add button when email is empty", async () => {
-    const user = userEvent.setup();
-    render(<AddMemberDialog />);
+  it("disables the send button until an email is entered", async () => {
+    const user = await openDialog();
+    const sendButton = screen.getByRole("button", { name: "Send invitation" });
+    expect(sendButton).toBeDisabled();
 
-    await user.click(screen.getByText("Add Member"));
-
-    const addButton = screen.getByRole("button", { name: "Add Member" });
-    expect(addButton).toBeDisabled();
+    await user.type(screen.getByLabelText("Email address"), "test@example.com");
+    expect(sendButton).not.toBeDisabled();
   });
 
-  it("enables add button when email is entered", async () => {
-    const user = userEvent.setup();
-    render(<AddMemberDialog />);
+  it("sends the invite request shape the server accepts", async () => {
+    const user = await openDialog();
+    await user.type(screen.getByLabelText("Email address"), "  partner@example.com ");
+    await user.click(screen.getByRole("button", { name: "Send invitation" }));
 
-    await user.click(screen.getByText("Add Member"));
-
-    const emailInput = screen.getByLabelText("Email or Username");
-    await user.type(emailInput, "test@example.com");
-
-    const addButton = screen.getByRole("button", { name: "Add Member" });
-    expect(addButton).not.toBeDisabled();
+    expect(mockMutate).toHaveBeenCalledWith(
+      { email: "partner@example.com", role: "member" },
+      expect.anything(),
+    );
   });
 
   it("renders custom trigger when provided", () => {
     render(
-      <AddMemberDialog>
+      <AddMemberDialog canInviteAdmin>
         <button>Custom Trigger</button>
       </AddMemberDialog>
     );
 
     expect(screen.getByText("Custom Trigger")).toBeInTheDocument();
     expect(screen.queryByText("Add Member")).not.toBeInTheDocument();
-  });
-
-  it("has helpful description text", async () => {
-    const user = userEvent.setup();
-    render(<AddMemberDialog />);
-
-    await user.click(screen.getByText("Add Member"));
-
-    expect(
-      screen.getByText(/The user must already have a registered account/)
-    ).toBeInTheDocument();
   });
 });

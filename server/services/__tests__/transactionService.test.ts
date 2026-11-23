@@ -1,4 +1,19 @@
+import type { Transaction } from "@shared/schema";
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { readPreparedTransfer, TransferCreateRequest } from "../TransferCreateRequest";
+
+vi.mock("../../repositories/TransferReplay", async importOriginal => ({
+  ...await importOriginal<typeof import("../../repositories/TransferReplay")>(),
+  transferQuoteAccounts: vi.fn(async (householdId: string, userId: string, from: string, to: string) => {
+    const { accountRepository } = await import("../../repositories/AccountRepository");
+    return { from: await accountRepository.findByIdWithVisibility(from, householdId, userId),
+      to: await accountRepository.findByIdWithVisibility(to, householdId, userId) };
+  }),
+}));
+
+vi.mock("../transaction/idempotentReplay", () => ({
+  readVisibleIdempotentReplay: vi.fn(async (transaction: unknown) => transaction),
+}));
 
 /**
  * Transaction Service Tests
@@ -9,6 +24,10 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
  * - Privacy enforcement
  */
 
+vi.mock("../../repositories/TransactionSummaryInputs", async importOriginal => ({
+  ...await importOriginal<typeof import("../../repositories/TransactionSummaryInputs")>(),
+  readTransactionSummaryInputs: vi.fn(),
+}));
 // Mock repositories
 vi.mock("../../repositories/TransactionRepository", () => ({
   transactionRepository: {
@@ -43,7 +62,6 @@ vi.mock("../../repositories/MerchantRepository", () => ({
     findByNameOrAlias: vi.fn(),
     search: vi.fn(),
     getAliases: vi.fn(),
-    addAlias: vi.fn(),
   },
 }));
 
@@ -85,6 +103,8 @@ describe("TransactionService", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    const { accountRepository } = await import("../../repositories/AccountRepository");
+    vi.mocked(accountRepository.findByIdWithVisibility).mockReset();
 
     const { merchantRepository } =
       await import("../../repositories/MerchantRepository");
@@ -94,7 +114,6 @@ describe("TransactionService", () => {
     (merchantRepository.findByNameOrAlias as any).mockResolvedValue(undefined);
     (merchantRepository.search as any).mockResolvedValue([]);
     (merchantRepository.getAliases as any).mockResolvedValue([]);
-    (merchantRepository.addAlias as any).mockResolvedValue(undefined);
   });
 
   describe("createTransaction", () => {
@@ -102,6 +121,7 @@ describe("TransactionService", () => {
       const { transactionService } = await import("../TransactionService");
       const { transactionRepository } =
         await import("../../repositories/TransactionRepository");
+      const { readVisibleIdempotentReplay } = await import("../transaction/idempotentReplay");
 
       const existingTxn = {
         id: "existing-txn",
@@ -129,6 +149,7 @@ describe("TransactionService", () => {
 
       expect(result.isDuplicate).toBe(true);
       expect(result.transaction.id).toBe(existingTxn.id);
+      expect(readVisibleIdempotentReplay).toHaveBeenCalledWith(existingTxn, testHouseholdId, testUserId, undefined, undefined, expect.stringMatching(/^v1:[0-9a-f]{64}$/), undefined);
     });
 
     it("creates new transaction when no idempotency key exists", async () => {
@@ -567,14 +588,16 @@ describe("TransactionService", () => {
         "acc-1",
         "acc-2",
         "100.00", // Money string format
-        expect.objectContaining({
+        expect.any(TransferCreateRequest),
+      );
+      expect(readPreparedTransfer(vi.mocked(transactionRepository.createTransfer).mock.lastCall![3] as TransferCreateRequest).posting)
+        .toMatchObject({
           fxRate: "25.50",
           fxBaseCurrency: "USD",
           fxQuoteCurrency: "ZMW",
           fxSource: "manual",
           convertedAmount: "2550.00", // 100 * 25.50
-        }),
-      );
+        });
     });
 
     it("converts to base currency when neither side is base", async () => {
@@ -630,11 +653,13 @@ describe("TransactionService", () => {
         "acc-1",
         "acc-2",
         "100.00",
-        expect.objectContaining({
+        expect.any(TransferCreateRequest),
+      );
+      expect(readPreparedTransfer(vi.mocked(transactionRepository.createTransfer).mock.lastCall![3] as TransferCreateRequest).posting)
+        .toMatchObject({
           fxRate: "0.9",
           convertedAmount: "2000.00", // 100 USD * 20 USD->ZMW
-        }),
-      );
+        });
     });
 
     it("does not require fxRate for same-currency transfer", async () => {
@@ -1057,9 +1082,6 @@ describe("TransactionService", () => {
   describe("getTransactionSummary", () => {
     it("correctly calculates income and expense totals", async () => {
       const { transactionService } = await import("../TransactionService");
-      const { transactionRepository } =
-        await import("../../repositories/TransactionRepository");
-
       const transactions = [
         {
           id: "1",
@@ -1098,10 +1120,11 @@ describe("TransactionService", () => {
           isExcludedFromReports: true,
         }, // Excluded from reports
       ];
-      (
-        transactionRepository.findByHouseholdWithVisibility as any
-      ).mockResolvedValue(transactions);
-
+      const { readTransactionSummaryInputs } = await import("../../repositories/TransactionSummaryInputs");
+      vi.mocked(readTransactionSummaryInputs).mockResolvedValue({
+        currency: "ZMW",
+        rows: transactions.map(row => ({ ...row, currency: "ZMW", date: "2024-01-15" })) as Transaction[],
+      });
       const result = await transactionService.getTransactionSummary(
         testHouseholdId,
         testUserId,
@@ -1109,9 +1132,9 @@ describe("TransactionService", () => {
         "2024-01-31",
       );
 
-      expect(result.totalIncome).toBe(1500);
-      expect(result.totalExpenses).toBe(500);
-      expect(result.netFlow).toBe(1000);
+      expect(result.totalIncome).toBe("1500.00");
+      expect(result.totalExpenses).toBe("500.00");
+      expect(result.netFlow).toBe("1000.00");
       expect(result.transactionCount).toBe(6);
     });
   });

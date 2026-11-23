@@ -55,6 +55,10 @@ describe('AI Sanitizer', () => {
       const result = sanitizeSpendingData(data, currency);
 
       expect(result.categories.length).toBe(20);
+      expect(result.total).toBe('3000.00');
+
+      data[29].amount = null;
+      expect(sanitizeSpendingData(data, currency)).toMatchObject({ total: null, rankingAvailability: 'unavailable' });
     });
 
     it('should calculate total correctly', () => {
@@ -324,6 +328,7 @@ describe('AI Sanitizer', () => {
         accountName: `Account ${i}`,
         accountType: 'checking',
         balance: Money.from('1000.00', currency),
+        currency,
         isActive: true
       }));
 
@@ -339,6 +344,7 @@ describe('AI Sanitizer', () => {
           accountName: "John's Checking",
           accountType: 'checking',
           balance: Money.from('5000.00', currency),
+          currency,
           isActive: true
         }
       ];
@@ -355,6 +361,7 @@ describe('AI Sanitizer', () => {
           accountName: "John's Personal Savings at ABC Bank",
           accountType: 'savings',
           balance: Money.from('10000.00', currency),
+          currency,
           isActive: true
         }
       ];

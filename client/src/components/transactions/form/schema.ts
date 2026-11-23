@@ -47,6 +47,7 @@ export const transactionFormSchema = z
     notes: z.string().optional(),
     tags: z.array(z.string()).optional().default([]),
     ownerUserId: z.string().nullable().optional(),
+    isPrivate: z.boolean().optional(),
   })
   .superRefine((data, ctx) => {
     if (data.isRecurring && !data.recurringFrequency) {
@@ -110,3 +111,12 @@ export const transactionFormSchema = z
   });
 
 export type TransactionFormValues = z.infer<typeof transactionFormSchema>;
+
+/** Human names for the invalid-submit alert. */
+export const TRANSACTION_FIELD_LABELS = {
+  amount: "Amount",
+  merchantName: "Merchant / Name",
+  date: "Date",
+  accountId: "Account",
+  toAccountId: "To Account",
+};

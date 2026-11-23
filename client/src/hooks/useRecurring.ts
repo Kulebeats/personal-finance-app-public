@@ -4,11 +4,15 @@
  * TanStack Query hooks for recurring transaction operations.
  */
 
+import { userErrorMessage } from "@/lib/errorCopy";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import type { Transaction } from "@/lib/api";
 import { accountKeys } from "./useAccounts";
+import { RECURRING_TRANSACTION_ENDPOINT, mapServerFieldErrors } from "@/lib/recurringTransactionRequest";
 import { type MoneyDto } from "@shared/money";
+import type { CalendarDateRange } from "@shared/household-calendar";
+import type { PatternSelection } from "@shared/recurring-pattern";
 
 // Types matching server schema
 export interface RecurringTransaction {
@@ -17,6 +21,8 @@ export interface RecurringTransaction {
   accountId: string;
   name: string;
   amount: MoneyDto;
+  verifiedCurrency?: "ZMW" | null;
+  definitionToken?: string;
   amountType?: "fixed" | "variable" | null;
   amountTolerance?: number | null;
   type: "income" | "expense";
@@ -57,6 +63,14 @@ export interface RecurringTransaction {
   notes?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface RecurringCalendarOccurrence {
+  id: string;
+  date: string;
+  status: "upcoming" | "due" | "overdue" | "pending" | "paid" | "received" | "skipped";
+  rule: RecurringTransaction;
+  amount: MoneyDto | null;
 }
 
 export interface CreateRecurringInput {
@@ -143,6 +157,8 @@ export interface CreateRecurringForExistingTransactionInput {
 }
 
 export interface UpdateRecurringInput {
+  confirmDenomination?: boolean;
+  expectedDefinition?: string;
   accountId?: string;
   name?: string;
   amount?: MoneyDto;
@@ -203,6 +219,9 @@ export interface DetectionOptions {
 }
 
 export interface DetectedPattern {
+  selection?: PatternSelection;
+  confirmationIssue?: string;
+  amountTolerance?: number;
   name: string;
   type: "income" | "expense";
   merchantId?: string | null;
@@ -269,6 +288,7 @@ export const recurringKeys = {
   list: (params?: { includeInactive?: boolean; includePaused?: boolean }) =>
     [...recurringKeys.lists(), params] as const,
   detail: (id: string) => [...recurringKeys.all, "detail", id] as const,
+  calendar: () => [...recurringKeys.all, "calendar"] as const,
   summary: () => [...recurringKeys.all, "summary"] as const,
   upcoming: (days?: number) =>
     [...recurringKeys.all, "upcoming", days] as const,
@@ -278,6 +298,21 @@ export const recurringKeys = {
 };
 
 // Hooks
+export function useRecurringCalendar({ from, to }: CalendarDateRange, enabled: boolean) {
+  return useQuery({
+    queryKey: [...recurringKeys.calendar(), from, to],
+    enabled,
+    staleTime: 0,
+    queryFn: async ({ signal }) => {
+      const query = new URLSearchParams({ from, to });
+      const res = await apiCall<ApiResponse<RecurringCalendarOccurrence[]>>(
+        `/recurring/calendar?${query}`, { signal },
+      );
+      return res.data;
+    },
+  });
+}
+
 export function useRecurring(params?: {
   includeInactive?: boolean;
   includePaused?: boolean;
@@ -364,7 +399,7 @@ export function useDetectPatterns() {
     onError: (error: Error) => {
       toast({
         title: "Pattern detection failed",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -402,7 +437,7 @@ export function useConfirmPattern() {
     onError: (error: Error) => {
       toast({
         title: "Failed to confirm pattern",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -439,6 +474,7 @@ export function useLinkTransaction() {
       queryClient.invalidateQueries({
         queryKey: recurringKeys.detail(variables.recurringId),
       });
+      queryClient.invalidateQueries({ queryKey: recurringKeys.calendar() });
       toast({
         title: "Transaction linked",
       });
@@ -446,7 +482,7 @@ export function useLinkTransaction() {
     onError: (error: Error) => {
       toast({
         title: "Failed to link transaction",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -477,12 +513,13 @@ export function useUnlinkTransaction() {
       queryClient.invalidateQueries({
         queryKey: recurringKeys.links(recurringId),
       });
+      queryClient.invalidateQueries({ queryKey: recurringKeys.calendar() });
       toast({ title: "Transaction unlinked" });
     },
     onError: (error: Error) => {
       toast({
         title: "Failed to unlink transaction",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -541,7 +578,7 @@ export function useCreateRecurring() {
     onError: (error: Error) => {
       toast({
         title: "Failed to create rule",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -558,15 +595,17 @@ export function useCreateRecurringTransaction() {
         ApiResponse<{
           transaction: Transaction;
           recurringRule: RecurringTransaction;
-        }> & { isDuplicate?: boolean }
-      >("/recurring", {
+          isDuplicate?: boolean;
+        }>
+      >(RECURRING_TRANSACTION_ENDPOINT, {
         method: "POST",
         body: JSON.stringify(data),
       });
       return {
         transaction: res.data.transaction,
         recurringRule: res.data.recurringRule,
-        isDuplicate: res.isDuplicate ?? false,
+        // The combined route reports a replay inside data (recurring.controller createWithTransaction).
+        isDuplicate: res.data.isDuplicate ?? false,
       };
     },
     onSuccess: (result) => {
@@ -585,7 +624,7 @@ export function useCreateRecurringTransaction() {
     onError: (error: Error) => {
       toast({
         title: "Failed to create recurring transaction",
-        description: error.message,
+        description: mapServerFieldErrors(error).summary ?? userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -629,7 +668,7 @@ export function useCreateRecurringForTransaction() {
     onError: (error: Error) => {
       toast({
         title: "Failed to create recurring rule",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -660,6 +699,7 @@ export function useUpdateRecurring() {
     onSuccess: (rule) => {
       queryClient.setQueryData(recurringKeys.detail(rule.id), rule);
       queryClient.invalidateQueries({ queryKey: recurringKeys.list() });
+      queryClient.invalidateQueries({ queryKey: recurringKeys.calendar() });
       toast({
         title: "Rule updated",
         description: `${rule.name} has been updated.`,
@@ -668,7 +708,7 @@ export function useUpdateRecurring() {
     onError: (error: Error) => {
       toast({
         title: "Failed to update rule",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -680,11 +720,13 @@ export function useSkipRecurring() {
   const { toast } = useToast();
 
   return useMutation({
-    mutationFn: async (id: string) => {
+    // Naming the occurrence makes a double click an idempotent no-op on the server (R14).
+    mutationFn: async ({ id, occurrenceDate }: { id: string; occurrenceDate: string }) => {
       const res = await apiCall<ApiResponse<RecurringTransaction>>(
         `/recurring/${id}/skip`,
         {
           method: "POST",
+          body: JSON.stringify({ occurrenceDate }),
         }
       );
       return res.data;
@@ -693,6 +735,7 @@ export function useSkipRecurring() {
       queryClient.setQueryData(recurringKeys.detail(rule.id), rule);
       queryClient.invalidateQueries({ queryKey: recurringKeys.list() });
       queryClient.invalidateQueries({ queryKey: recurringKeys.upcoming() });
+      queryClient.invalidateQueries({ queryKey: recurringKeys.calendar() });
       toast({
         title: "Occurrence skipped",
         description: `Next due: ${rule.nextDueDate}`,
@@ -701,7 +744,7 @@ export function useSkipRecurring() {
     onError: (error: Error) => {
       toast({
         title: "Failed to skip",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -727,7 +770,7 @@ export function usePauseRecurring() {
     onError: (error: Error) => {
       toast({
         title: "Operation failed",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -767,7 +810,7 @@ export function useEndRecurring() {
     onError: (error: Error) => {
       toast({
         title: "Failed to end rule",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -800,7 +843,7 @@ export function useProcessRecurring() {
     onError: (error: Error) => {
       toast({
         title: "Processing failed",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -824,7 +867,7 @@ export function useDeleteRecurring() {
     onError: (error: Error) => {
       toast({
         title: "Failed to delete",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },

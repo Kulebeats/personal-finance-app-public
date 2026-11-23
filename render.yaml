@@ -3,8 +3,10 @@
 # Deploys the Express backend as a SINGLE Web Service. In production the same
 # Node process serves the API and the built React client (see server/index-prod.ts),
 # so there is no separate static host. Managed Postgres and Render Key Value are
-# provisioned alongside it. Redis is required in production so rate limits,
-# scheduler locks, and AI cost counters are cluster-wide if the service scales.
+# provisioned alongside it. Redis is required in production so rate limits
+# and AI cost counters are cluster-wide if the service scales. Scheduler locks
+# are Postgres advisory locks, never Redis keys: Key Value runs allkeys-lru,
+# which may evict any key, so it holds no coordination state (OPS-013).
 #
 # Blueprint spec: https://render.com/docs/blueprint-spec
 # After first deploy, confirm the assigned URL and update CLIENT_URL/APP_URL below
@@ -20,13 +22,35 @@ services:
     buildCommand: npm ci && npm run build
     preDeployCommand: npm run db:migrate # apply versioned migrations before traffic shifts
     startCommand: npm run start
-    healthCheckPath: /healthz
+    # Readiness, not liveness: the database (and Redis when configured) must answer.
+    # A stale scheduled job reports "degraded" with HTTP 200, so it never fails a deploy.
+    healthCheckPath: /health/ready
     autoDeploy: true
+    # Persistent disk for personal-data exports (R07.1): a ready export must
+    # survive deploys and restarts for its 7-day download window. The export
+    # directory is a sibling of the app's uploads/ root, never inside it, so
+    # /uploads/* can never serve it. A disk keeps the service at one instance
+    # and makes deploys stop-then-start (no zero-downtime overlap).
+    disk:
+      name: app-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
+      # Created at boot (mode 0700) by the app user; boot logs an error and
+      # POST /api/settings/privacy/export answers 503 if it is not writable.
+      - key: PERSONAL_EXPORT_DIR
+        value: /var/data/personal-exports
+      - key: NODE_VERSION
+        value: 24.22.0
       - key: NODE_ENV
         value: production
       - key: TRUST_PROXY
         value: "1"
+      # Verify the database certificate and hostname (server/dbSsl.ts). This is
+      # already the default; stating it keeps the policy explicit, and "false"
+      # is rejected at boot.
+      - key: DATABASE_SSL_REJECT_UNAUTHORIZED
+        value: "true"
       - key: DATABASE_URL
         fromDatabase:
           name: personal-finance-db
@@ -42,18 +66,28 @@ services:
         value: https://personal-finance-app.onrender.com # update if Render assigns a different host
       - key: APP_URL
         value: https://personal-finance-app.onrender.com # update if Render assigns a different host
+      # Scheduled jobs (OPS-003): this single instance runs every scheduled
+      # financial job and the outbox processor in-process (server/scheduler.ts),
+      # each under Postgres advisory locks (one per job, one per scheduled period,
+      # renewed by a heartbeat), so no Render cron service is needed.
+      - key: SCHEDULER_ENABLED
+        value: "true"
+      # Opens the HTTP /api/cron/* door; without it every request is refused (403).
+      # Set CRON_HTTP_ENABLED=false to unmount the door instead.
+      - key: CRON_SECRET
+        generateValue: true
       # Optional feature vars — set in the Render dashboard when enabling each feature:
       #   SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, SMTP_FROM  (email / weekly recap)
-      #   GEMINI_API_KEY                                                      (AI assistant)
+      #   ANTHROPIC_API_KEY, ANTHROPIC_MODEL, AI_ANTHROPIC_DAILY_CALL_CAP     (AI assistant, Claude primary)
+      #   GEMINI_API_KEY, GEMINI_MODEL, AI_GEMINI_DAILY_CALL_CAP              (AI assistant, Gemini fallback)
       #   VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY                                 (web push)
-      #   CRON_SECRET                                                         (HTTP cron endpoints)
       #
-      # DB TLS certificate verification is staging-gated until W9:
-      #   1. Add Render/Postgres CA PEM as a Render Secret File.
-      #   2. Set DATABASE_SSL_CA_FILE to that mounted PEM path.
-      #   3. Set DATABASE_SSL_REJECT_UNAUTHORIZED="true".
-      # Do not enable this in the blueprint until connectivity is proven against
-      # the real Render database target and the W9 smoke checklist passes.
+      # Application and migration DB TLS verify certificates/hostnames by default.
+      # If the provider needs a custom CA, add its PEM as a Secret File and set
+      # DATABASE_SSL_CA_FILE to the mounted path (or use DATABASE_SSL_CA_CERT).
+      # Insecure verification/plaintext production overrides are rejected.
+      # Actual Render CA/hostname connectivity and staging smoke evidence remain
+      # required before production enablement; local fixtures do not prove them.
 
   - type: keyvalue
     name: personal-finance-cache
@@ -65,4 +99,4 @@ databases:
   - name: personal-finance-db
     plan: basic-256mb # smallest paid tier; `free` is available but expires after 90 days
     region: oregon # MUST match the web service region for private networking
-    postgresMajorVersion: "16"
+    postgresMajorVersion: "18"

@@ -36,6 +36,16 @@ const mockNotificationService = vi.hoisted(() => ({
 vi.mock("../../../repositories/UserRepository", () => ({
   userRepository: mockUserRepository,
 }));
+vi.mock("../auth.mfa-credential", () => ({
+  storeMfaChallenge: (user: { id: string }, hash: string, expiry: Date) => mockUserRepository.update(user.id, { mfaCode: hash, mfaCodeExpiry: expiry }),
+  consumeMfaCredential: vi.fn(),
+}));
+// Durable identity storage is covered by completion-r01's real PG store tests.
+vi.mock("../../../services/session-identity", () => ({
+  assertCurrentCredential: vi.fn().mockResolvedValue(undefined),
+  registerSessionIdentity: (_user: unknown, data: unknown) => mockUserRepository.upsertSession(data),
+  revokeLoginSession: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock("../../../auth", () => ({
   hashPassword: vi.fn().mockResolvedValue("hashed_password"),
@@ -174,7 +184,7 @@ describe("Auth Module Integration Tests", () => {
       const res = await request(app).post("/api/auth/register").send({
         email: "new@example.com",
         username: "newuser",
-        password: "Password123",
+        password: "Password123!",
         fullName: "New User",
       });
 
@@ -190,7 +200,7 @@ describe("Auth Module Integration Tests", () => {
       const res = await request(app).post("/api/auth/register").send({
         email: "test@example.com",
         username: "differentuser",
-        password: "Password123",
+        password: "Password123!",
       });
 
       expect(res.status).toBe(409);
@@ -204,7 +214,7 @@ describe("Auth Module Integration Tests", () => {
       const res = await request(app).post("/api/auth/register").send({
         email: "different@example.com",
         username: "testuser",
-        password: "Password123",
+        password: "Password123!",
       });
 
       expect(res.status).toBe(409);

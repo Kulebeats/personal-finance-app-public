@@ -9,6 +9,7 @@
 
 import {
   isRedisEnabled,
+  productionRedis,
   redisDeleteByPrefix,
   redisDeleteKey,
   redisGetJson,
@@ -48,6 +49,8 @@ export interface CacheConfig {
 }
 
 export interface CacheRedisBackend {
+  /** Required-component policy/fencing only; never establishes service admission. */
+  assertCurrent?: () => void;
   isEnabled: () => boolean;
   getJson: <T>(key: string) => Promise<T | null>;
   setJson: <T>(key: string, value: T, ttlSeconds: number) => Promise<boolean>;
@@ -55,7 +58,7 @@ export interface CacheRedisBackend {
   deleteByPrefix: (prefix: string) => Promise<number>;
 }
 
-const DEFAULT_REDIS_BACKEND: CacheRedisBackend = {
+const DEFAULT_REDIS_BACKEND: CacheRedisBackend = productionRedis?.cache ?? {
   isEnabled: isRedisEnabled,
   getJson: redisGetJson,
   setJson: redisSetJson,
@@ -93,6 +96,7 @@ export class CacheStore {
   };
   private config: CacheConfig;
   private redisBackend: CacheRedisBackend;
+  private readonly requiredAssert: (() => void) | undefined;
   private cleanupInterval: NodeJS.Timeout | null = null;
   private readonly redisKeyPrefix = "core-cache:";
 
@@ -102,13 +106,28 @@ export class CacheStore {
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.redisBackend = redisBackend;
-    this.startCleanup();
+    this.requiredAssert = redisBackend.assertCurrent?.bind(redisBackend);
+    if (!this.requiresRemote) this.startCleanup();
+  }
+
+  assertCurrent(): void { this.requiredAssert?.(); }
+  private get requiresRemote(): boolean { return this.requiredAssert !== undefined; }
+  private localOnly(): void {
+    this.assertCurrent();
+    if (this.requiresRemote) throw new Error("CACHE_REQUIRED_ASYNC_ONLY");
+  }
+  private remoteEnabled(): boolean {
+    this.assertCurrent();
+    const enabled = this.redisBackend.isEnabled(); this.assertCurrent();
+    if (this.requiresRemote && !enabled) throw new Error("CACHE_REQUIRED_BACKEND_REFUSED");
+    return enabled;
   }
 
   /**
    * Get a value from the cache
    */
   get<T>(key: string): T | undefined {
+    this.localOnly();
     const entry = this.cache.get(key);
 
     if (!entry) {
@@ -134,8 +153,9 @@ export class CacheStore {
    * Get a value from Redis when configured, otherwise the local fallback.
    */
   async getAsync<T>(key: string): Promise<T | undefined> {
-    if (this.redisBackend.isEnabled()) {
+    if (this.remoteEnabled()) {
       const value = await this.redisBackend.getJson<T>(this.redisKey(key));
+      this.assertCurrent();
       if (value !== null) {
         this.stats.hits++;
         return value;
@@ -152,6 +172,7 @@ export class CacheStore {
    * Set a value in the cache
    */
   set<T>(key: string, value: T, ttlMs?: number): void {
+    this.localOnly();
     const ttl = ttlMs ?? this.config.defaultTtlMs;
     const now = Date.now();
 
@@ -185,18 +206,20 @@ export class CacheStore {
   async setAsync<T>(key: string, value: T, ttlMs?: number): Promise<void> {
     const ttl = ttlMs ?? this.config.defaultTtlMs;
 
-    if (this.redisBackend.isEnabled()) {
+    if (this.remoteEnabled()) {
       const ttlSeconds = Math.max(1, Math.ceil(ttl / 1000));
       const stored = await this.redisBackend.setJson(
         this.redisKey(key),
         value,
         ttlSeconds,
       );
+      this.assertCurrent();
 
       if (stored) {
         this.stats.sets++;
         return;
       }
+      if (this.requiresRemote) throw new Error("CACHE_REQUIRED_WRITE_REFUSED");
     }
 
     this.set(key, value, ttl);
@@ -206,6 +229,7 @@ export class CacheStore {
    * Delete a value from the cache
    */
   delete(key: string): boolean {
+    this.localOnly();
     const deleted = this.cache.delete(key);
     if (deleted) {
       this.stats.deletes++;
@@ -218,12 +242,16 @@ export class CacheStore {
    * Delete a value from Redis when configured, otherwise the local fallback.
    */
   async deleteAsync(key: string): Promise<boolean> {
-    if (this.redisBackend.isEnabled()) {
+    if (this.remoteEnabled()) {
+      const localDeleted = this.requiresRemote ? false : this.delete(key);
       const deleted = await this.redisBackend.deleteKey(this.redisKey(key));
+      this.assertCurrent();
       if (deleted) {
         this.stats.deletes++;
         return true;
       }
+      if (this.requiresRemote) return false;
+      return localDeleted;
     }
 
     return this.delete(key);
@@ -233,6 +261,7 @@ export class CacheStore {
    * Delete all keys matching a pattern
    */
   deletePattern(pattern: string): number {
+    this.localOnly();
     const regex = new RegExp(pattern.replace(/\*/g, ".*"));
     let count = 0;
 
@@ -256,16 +285,20 @@ export class CacheStore {
    * configured, otherwise the local fallback.
    */
   async deletePatternAsync(pattern: string): Promise<number> {
-    if (this.redisBackend.isEnabled()) {
-      const redisPrefix = this.redisPrefixFromPattern(pattern);
+    if (this.remoteEnabled()) {
+      const redisPrefix = this.requiresRemote ? this.requiredRedisPrefix(pattern) : this.redisPrefixFromPattern(pattern);
       if (redisPrefix !== null) {
+        const localDeleted = this.requiresRemote ? 0 : this.deletePattern(pattern);
         const deleted = await this.redisBackend.deleteByPrefix(
           this.redisKey(redisPrefix),
         );
+        this.assertCurrent();
         if (deleted > 0) {
           this.stats.deletes += deleted;
           return deleted;
         }
+        if (this.requiresRemote) return 0;
+        return localDeleted;
       }
     }
 
@@ -276,6 +309,7 @@ export class CacheStore {
    * Clear all cache entries
    */
   clear(): void {
+    this.localOnly();
     const size = this.cache.size;
     this.cache.clear();
     this.stats.deletes += size;
@@ -301,6 +335,7 @@ export class CacheStore {
    * Check if a key exists
    */
   has(key: string): boolean {
+    this.localOnly();
     const entry = this.cache.get(key);
     if (!entry) return false;
     if (Date.now() > entry.expiresAt) {
@@ -402,6 +437,15 @@ export class CacheStore {
 
   private redisKey(key: string): string {
     return `${this.redisKeyPrefix}${key}`;
+  }
+
+  private requiredRedisPrefix(pattern: string): string {
+    if (!pattern.startsWith("^")) throw new Error("CACHE_REQUIRED_PATTERN_REFUSED");
+    let prefix = pattern.slice(1);
+    if (prefix.endsWith(".*")) prefix = prefix.slice(0, -2);
+    else if (prefix.endsWith("*")) prefix = prefix.slice(0, -1);
+    if (!/^[\x21-\x7e]{1,512}$/.test(prefix) || /[\\[\]()+?{}|$^.*]/.test(prefix)) throw new Error("CACHE_REQUIRED_PATTERN_REFUSED");
+    return prefix;
   }
 
   private redisPrefixFromPattern(pattern: string): string | null {

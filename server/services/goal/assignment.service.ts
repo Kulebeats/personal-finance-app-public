@@ -22,16 +22,21 @@ import {
   calculatePercentComplete,
 } from "../goalCalculations";
 import { Money } from "../../core/money";
+import { applyProgressAdjustment } from "./GoalProgressAdjustments";
+import type { RefoldResult } from "./GoalProgressFold";
 
 // Import extracted modules
 import {
   getGoal,
   getAccount,
   getAssignments as queryAssignments,
+  getVisibleAssignments as queryVisibleAssignments,
   getAssignmentsForHousehold as queryAssignmentsForHousehold,
   getAvailableFunds as queryAvailableFunds,
   getExistingAssignment,
+  lockExistingAssignment,
 } from "./assignment.queries";
+import type { HouseholdContext } from "../../middleware/householdGuard";
 import {
   validateAssignmentRules,
   ensureAssignmentConstraints,
@@ -42,6 +47,22 @@ import {
   calculateAssignmentBalance,
 } from "./assignment.calculations";
 import { syncGoalsForAccount as doSyncGoalsForAccount } from "./assignment.sync";
+import { hasCountedSources } from "./GoalProgressSources";
+import { logAssignmentAudit, type GoalAuditRequest } from "./GoalWriteAudit";
+import { lockAccountHousehold } from "../../repositories/AccountCreationGrant";
+import { householdToday } from "../householdCalendarToday";
+
+/** The assignment an update leaves: the requested fields over `current`. */
+function nextAssignmentData(
+  accountId: string, current: Omit<AssignmentData, "accountId">, data: Partial<AssignmentData>,
+): AssignmentData {
+  return {
+    accountId,
+    assignmentType: data.assignmentType ?? current.assignmentType,
+    partialAmount: data.partialAmount !== undefined ? data.partialAmount : current.partialAmount,
+    autoUpdate: data.autoUpdate !== undefined ? data.autoUpdate : current.autoUpdate,
+  };
+}
 
 export class GoalAccountAssignmentService {
   // Delegate to queries module
@@ -50,8 +71,12 @@ export class GoalAccountAssignmentService {
     return queryAssignments(goalId, householdId, userId);
   }
 
-  async getAssignmentsForHousehold(householdId: string, userId: string) {
-    return queryAssignmentsForHousehold(householdId, userId);
+  async getVisibleAssignments(goalId: string, actor: HouseholdContext) {
+    return queryVisibleAssignments(goalId, actor);
+  }
+
+  async getAssignmentsForHousehold(actor: HouseholdContext) {
+    return queryAssignmentsForHousehold(actor);
   }
 
   async getAvailableFunds(householdId: string, userId: string) {
@@ -62,7 +87,9 @@ export class GoalAccountAssignmentService {
     goalId: string,
     householdId: string,
     userId: string,
-    data: AssignmentData
+    data: AssignmentData,
+    /** Request context for the goal's UPDATE audit row, written in the same transaction (FIN-13). */
+    audit?: GoalAuditRequest,
   ) {
     const goal = await getGoal(goalId, householdId);
     // FIX AUTH-GOAL-ASSIGN-001: Pass userId for visibility check
@@ -72,6 +99,8 @@ export class GoalAccountAssignmentService {
     validateAssignmentRules(goal, account, data);
 
     return await withTransaction(async (tx) => {
+      // Household first: the audit FK lock order (FIN-13, see GoalWriteAudit).
+      await lockAccountHousehold(tx, householdId);
       // Run constraint check inside transaction with FOR UPDATE locks
       await ensureAssignmentConstraints(goalId, account, data, null, tx);
 
@@ -122,6 +151,7 @@ export class GoalAccountAssignmentService {
         null
       );
 
+      await logAssignmentAudit(tx, { goalId, householdId, userId, operation: "assignAccount", after: assignment, audit });
       return { assignment, goal: updatedGoal };
     });
   }
@@ -131,7 +161,9 @@ export class GoalAccountAssignmentService {
     accountId: string,
     householdId: string,
     userId: string,
-    data: Partial<AssignmentData>
+    data: Partial<AssignmentData>,
+    /** Request context for the goal's UPDATE audit row, written in the same transaction (FIN-13). */
+    audit?: GoalAuditRequest,
   ) {
     const goal = await getGoal(goalId, householdId);
     // FIX AUTH-GOAL-ASSIGN-001: Pass userId for visibility check
@@ -142,35 +174,27 @@ export class GoalAccountAssignmentService {
       throw new NotFoundError("Assignment not found");
     }
 
-    const nextAssignmentType = data.assignmentType ?? existing.assignmentType;
-    const nextPartialAmount =
-      data.partialAmount !== undefined
-        ? data.partialAmount
-        : existing.partialAmount;
-    const nextAutoUpdate =
-      data.autoUpdate !== undefined ? data.autoUpdate : existing.autoUpdate;
-
-    const nextData: AssignmentData = {
-      accountId,
-      assignmentType: nextAssignmentType,
-      partialAmount: nextPartialAmount,
-      autoUpdate: nextAutoUpdate,
-    };
-
-    // Pure validation (no DB queries)
-    validateAssignmentRules(goal, account, nextData);
+    // Pure validation (no DB queries); repeated on the locked row below.
+    validateAssignmentRules(goal, account, nextAssignmentData(accountId, existing, data));
 
     return await withTransaction(async (tx) => {
+      // Household first: the audit FK lock order (FIN-13, see GoalWriteAudit).
+      await lockAccountHousehold(tx, householdId);
+      // The row as committed when this write holds it: a change made while it
+      // waited is what this write replaces, applies against, and audits.
+      const locked = await lockExistingAssignment(tx, goalId, accountId);
+      const nextData = nextAssignmentData(accountId, locked, data);
+      validateAssignmentRules(goal, account, nextData);
       // Run constraint check inside transaction with FOR UPDATE locks
-      await ensureAssignmentConstraints(goalId, account, nextData, existing, tx);
+      await ensureAssignmentConstraints(goalId, account, nextData, locked, tx);
 
       const [updatedAssignment] = await tx
         .update(goalAccountAssignments)
         .set({
-          assignmentType: nextAssignmentType,
-          partialAmount: nextPartialAmount,
+          assignmentType: nextData.assignmentType,
+          partialAmount: nextData.partialAmount,
           autoUpdate:
-            nextAssignmentType === "full_balance" ? nextAutoUpdate : false,
+            nextData.assignmentType === "full_balance" ? nextData.autoUpdate : false,
           updatedAt: new Date(),
         })
         .where(
@@ -192,9 +216,12 @@ export class GoalAccountAssignmentService {
           accountName: account.name,
           assignmentType: updatedAssignment.assignmentType,
         },
-        existing
+        locked
       );
 
+      await logAssignmentAudit(tx, {
+        goalId, householdId, userId, operation: "updateAssignment", before: locked, after: updatedAssignment, audit,
+      });
       return { assignment: updatedAssignment, goal: updatedGoal };
     });
   }
@@ -203,18 +230,19 @@ export class GoalAccountAssignmentService {
     goalId: string,
     accountId: string,
     householdId: string,
-    userId: string
+    userId: string,
+    /** Request context for the goal's UPDATE audit row, written in the same transaction (FIN-13). */
+    audit?: GoalAuditRequest,
   ) {
     const goal = await getGoal(goalId, householdId);
     // FIX AUTH-GOAL-ASSIGN-001: Pass userId for visibility check
     const account = await getAccount(accountId, householdId, userId);
 
-    const existing = await getExistingAssignment(goalId, accountId);
-    if (!existing) {
-      throw new NotFoundError("Assignment not found");
-    }
-
     return await withTransaction(async (tx) => {
+      // Household first: the audit FK lock order (FIN-13, see GoalWriteAudit).
+      await lockAccountHousehold(tx, householdId);
+      // The row as committed when this removal holds it is what it releases and audits.
+      const existing = await lockExistingAssignment(tx, goalId, accountId);
       await tx
         .delete(goalAccountAssignments)
         .where(
@@ -232,6 +260,7 @@ export class GoalAccountAssignmentService {
         { accountId: account.id, accountName: account.name }
       );
 
+      await logAssignmentAudit(tx, { goalId, householdId, userId, operation: "removeAssignment", before: existing, audit });
       return { success: true, goal: updatedGoal };
     });
   }
@@ -244,6 +273,7 @@ export class GoalAccountAssignmentService {
     tx: TransactionType,
     goal: Goal,
     assignment: {
+      accountId: string;
       assignmentType: "full_balance" | "partial_balance";
       partialAmount: string | null;
       autoUpdate: boolean;
@@ -274,25 +304,34 @@ export class GoalAccountAssignmentService {
     const hasAutoSync = await hasAutoSyncAssignments(lockedGoal.id, tx);
     let newBalanceMoney = previousBalanceMoney;
 
+    // R10.3: an auto-synced balance replaces progress, so it may not be added
+    // on top of links or contributions the goal already counts.
+    if (hasAutoSync && await hasCountedSources(tx, lockedGoal.id)) {
+      throw new ConflictError(
+        "This goal already counts linked transactions or contributions. Unlink or reverse them before assigning an auto-synced account."
+      );
+    }
+
+    let partialChange: Money | null = null;
     if (hasAutoSync) {
       newBalanceMoney = await calculateAssignmentBalance(lockedGoal.id, tx);
     } else if (assignment.assignmentType === "partial_balance") {
       const nextPartial = assignment.partialAmount
-        ? new Money(assignment.partialAmount)
-        : Money.zero();
+        ? new Money(assignment.partialAmount, lockedGoal.currency)
+        : Money.zero(lockedGoal.currency);
       const previousPartial =
         previousAssignment?.assignmentType === "partial_balance" &&
         previousAssignment.partialAmount
-          ? new Money(previousAssignment.partialAmount)
-          : Money.zero();
-      newBalanceMoney = previousBalanceMoney.add(
-        nextPartial.subtract(previousPartial)
-      );
+          ? new Money(previousAssignment.partialAmount, lockedGoal.currency)
+          : Money.zero(lockedGoal.currency);
+      partialChange = nextPartial.subtract(previousPartial);
     }
 
+    const placed = await this.placePartialChange(tx, lockedGoal, assignment.accountId, partialChange, userId);
+    if (placed) newBalanceMoney = placed.write.next;
     const newBalance = newBalanceMoney.toNumber();
     const previousBalance = previousBalanceMoney.toNumber();
-    const update = buildGoalBalanceUpdate(lockedGoal, newBalance);
+    const update = buildGoalBalanceUpdate(lockedGoal, newBalanceMoney, await householdToday(tx, lockedGoal.householdId));
 
     const [updatedGoal] = await tx
       .update(goals)
@@ -321,23 +360,32 @@ export class GoalAccountAssignmentService {
 
     const percentBefore = calculatePercentComplete(lockedGoal, previousBalance);
     const percentAfter = calculatePercentComplete(lockedGoal, newBalance);
-    notificationService
-      .triggerGoalMilestone(
-        lockedGoal.householdId,
-        updatedGoal.id,
-        updatedGoal.name,
-        percentBefore,
-        percentAfter
-      )
-      .catch(() => undefined);
+    // The audience is decided on this transaction (#235 R2-1); the send is not awaited.
+    await notificationService.triggerGoalMilestone(
+      lockedGoal.householdId, updatedGoal.id, updatedGoal.name, percentBefore, percentAfter, tx,
+    );
 
     return updatedGoal;
+  }
+
+  /**
+   * A partial-balance change is a progress adjustment at its own place in
+   * the goal's applied order (GoalProgressAdjustments), so a later replay
+   * keeps it after the sources that came before it.
+   */
+  private async placePartialChange(
+    tx: TransactionType, goal: Goal, accountId: string, change: Money | null, userId: string,
+  ): Promise<RefoldResult | null> {
+    if (!change || change.isZero()) return null;
+    // A release takes back what progress still holds of it, never refused (#235 M3).
+    return applyProgressAdjustment(tx, goal, { kind: "assignment", amount: change, refId: accountId, createdBy: userId });
   }
 
   private async applyRemovalBalanceUpdate(
     tx: TransactionType,
     goal: Goal,
     assignment: {
+      accountId: string;
       assignmentType: "full_balance" | "partial_balance";
       partialAmount: string | null;
     },
@@ -367,15 +415,16 @@ export class GoalAccountAssignmentService {
       newBalanceMoney = await calculateAssignmentBalance(lockedGoal.id, tx);
     } else if (assignment.assignmentType === "partial_balance") {
       const deltaMoney = assignment.partialAmount
-        ? new Money(assignment.partialAmount)
-        : Money.zero();
-      const subtracted = previousBalanceMoney.subtract(deltaMoney);
-      newBalanceMoney = subtracted.isNegative() ? Money.zero() : subtracted;
+        ? new Money(assignment.partialAmount, lockedGoal.currency)
+        : Money.zero(lockedGoal.currency);
+      // Released at the removal's own place in the applied order.
+      const placed = await this.placePartialChange(tx, lockedGoal, assignment.accountId, deltaMoney.negated(), userId);
+      if (placed) newBalanceMoney = placed.write.next;
     }
 
     const newBalance = newBalanceMoney.toNumber();
     const previousBalance = previousBalanceMoney.toNumber();
-    const update = buildGoalBalanceUpdate(lockedGoal, newBalance);
+    const update = buildGoalBalanceUpdate(lockedGoal, newBalanceMoney, await householdToday(tx, lockedGoal.householdId));
 
     const [updatedGoal] = await tx
       .update(goals)
@@ -404,15 +453,10 @@ export class GoalAccountAssignmentService {
 
     const percentBefore = calculatePercentComplete(lockedGoal, previousBalance);
     const percentAfter = calculatePercentComplete(lockedGoal, newBalance);
-    notificationService
-      .triggerGoalMilestone(
-        lockedGoal.householdId,
-        updatedGoal.id,
-        updatedGoal.name,
-        percentBefore,
-        percentAfter
-      )
-      .catch(() => undefined);
+    // The audience is decided on this transaction (#235 R2-1); the send is not awaited.
+    await notificationService.triggerGoalMilestone(
+      lockedGoal.householdId, updatedGoal.id, updatedGoal.name, percentBefore, percentAfter, tx,
+    );
 
     return updatedGoal;
   }

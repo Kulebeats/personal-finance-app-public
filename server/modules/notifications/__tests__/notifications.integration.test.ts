@@ -546,7 +546,7 @@ describe("Notifications Integration Tests", () => {
   // ==========================================================================
 
   describe("Push Subscriptions", () => {
-    const pushEndpoint = "https://push.example.test/subscriptions/raw-endpoint";
+    const pushEndpoint = "https://fcm.googleapis.com/fcm/send/raw-endpoint-token";
     const subscription = {
       endpoint: pushEndpoint,
       keys: {
@@ -564,6 +564,7 @@ describe("Notifications Integration Tests", () => {
 
       expect(mockPushNotificationService.saveSubscription).toHaveBeenCalledWith(
         testUser1Id,
+        expect.any(String),
         subscription,
       );
 
@@ -577,7 +578,7 @@ describe("Notifications Integration Tests", () => {
         metadata: { action: "push_subscription_saved" },
       });
       expect(auditArg.entityId).toHaveLength(16);
-      expect(auditArg.entityId).not.toContain("push.example.test");
+      expect(auditArg.entityId).not.toContain("raw-endpoint-token");
       expect(auditArg.newValue).toEqual({ endpointHash: auditArg.entityId });
     });
 
@@ -603,7 +604,7 @@ describe("Notifications Integration Tests", () => {
         metadata: { action: "push_subscription_removed" },
       });
       expect(auditArg.entityId).toHaveLength(16);
-      expect(auditArg.entityId).not.toContain("push.example.test");
+      expect(auditArg.entityId).not.toContain("raw-endpoint-token");
       expect(auditArg.oldValue).toEqual({ endpointHash: auditArg.entityId });
     });
   });

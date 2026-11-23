@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useRecurringInvestments } from "@/hooks/useInvestments";
+import { useRecurringPlanCommands } from "@/hooks/investments/useRecurringInvestments";
 import { useFormat } from "@/hooks/use-format";
 import {
   Repeat,
@@ -23,10 +24,14 @@ import {
 } from "@/components/ui/dialog";
 import { toMoneyNumber } from "@/lib/money";
 import { AddRecurringInvestmentForm } from "./AddRecurringInvestmentForm";
+import { authorizationLabels, RecurringInvestmentDetails, RecurringPlanFeedback } from "./RecurringInvestmentDetails";
 
 export function RecurringInvestmentSetup() {
-  const { data: recurring, isLoading } = useRecurringInvestments();
+  const { data: recurring, isLoading, isError, refetch } = useRecurringInvestments();
+  const commands = useRecurringPlanCommands();
   const [showAdd, setShowAdd] = useState(false);
+  const [openPlanId, setOpenPlanId] = useState<string | null>(null);
+  const detailOpen = recurring?.some(plan => plan.id === openPlanId);
   const { formatCurrency } = useFormat();
 
   if (isLoading) {
@@ -49,27 +54,37 @@ export function RecurringInvestmentSetup() {
             <Repeat className="h-5 w-5 text-primary" /> Recurring Investments
           </h2>
           <p className="text-sm text-muted-foreground">
-            Automate your wealth building with SIPs and rollovers.
+            Review recurring plans and their terms.
           </p>
         </div>
 
-        <Dialog open={showAdd} onOpenChange={setShowAdd}>
+        {commands.allowed && <Dialog open={showAdd} onOpenChange={setShowAdd}>
           <DialogTrigger asChild>
             <Button size="sm" className="gap-2">
-              <Plus className="h-4 w-4" /> Setup Automation
+              <Plus className="h-4 w-4" /> {commands.pending?.kind === "create" ? "Record plan (resume setup)" : "Record plan"}
             </Button>
           </DialogTrigger>
           <DialogContent className="sm:max-w-[500px]">
             <DialogHeader>
               <DialogTitle>Setup Recurring Investment</DialogTitle>
               <DialogDescription>
-                Create a Systematic Investment Plan (SIP) or Auto-Rollover.
+                Record a systematic investment plan or a pending rollover declaration.
               </DialogDescription>
             </DialogHeader>
             <AddRecurringInvestmentForm onSuccess={() => setShowAdd(false)} />
           </DialogContent>
-        </Dialog>
+        </Dialog>}
       </div>
+
+      {isError && (
+        <div role="alert" className="rounded-lg border p-4 space-y-2">
+          <p>Recurring plans could not be refreshed. Try again to review the current records.</p>
+          <Button variant="outline" onClick={() => void refetch()}>Retry</Button>
+        </div>
+      )}
+      {!detailOpen && !showAdd && commands.pending?.kind !== "create" && (
+        <RecurringPlanFeedback commands={commands} />
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {recurring?.map((item) => (
@@ -88,15 +103,9 @@ export function RecurringInvestmentSetup() {
                     {item.type} Plan
                   </CardTitle>
                 </div>
-                {item.isActive ? (
-                  <span className="text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded-full font-bold">
-                    ACTIVE
-                  </span>
-                ) : (
-                  <span className="text-[10px] bg-muted text-muted-foreground px-1.5 py-0.5 rounded-full font-bold">
-                    PAUSED
-                  </span>
-                )}
+                <span className="text-[10px] bg-muted text-muted-foreground px-1.5 py-0.5 rounded-full font-bold">
+                  {authorizationLabels[item.authorizationStatus] ?? "Authorization unavailable"}
+                </span>
               </div>
             </CardHeader>
             <CardContent>
@@ -106,7 +115,7 @@ export function RecurringInvestmentSetup() {
                     Amount
                   </p>
                   <p className="text-lg font-bold">
-                    {formatCurrency(toMoneyNumber(item.amount))}
+                    {formatCurrency(toMoneyNumber(item.amount), item.currency)}
                   </p>
                 </div>
 
@@ -115,7 +124,7 @@ export function RecurringInvestmentSetup() {
                     <Calendar className="h-3.5 w-3.5" />
                     <span>
                       Next:{" "}
-                      {new Date(item.nextExecutionDate).toLocaleDateString()}
+                      {item.nextExecutionDate}
                     </span>
                   </div>
                   <div className="font-medium text-xs bg-muted px-2 py-0.5 rounded lowercase">
@@ -125,40 +134,49 @@ export function RecurringInvestmentSetup() {
 
                 <div className="pt-2 border-t flex justify-between items-center">
                   <span className="text-xs text-muted-foreground truncate max-w-[150px]">
-                    From: {item.accountName || "Selected Account"}
+                    Custody: {item.accountName || "Selected Account"}
                   </span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 text-xs px-2"
-                  >
-                    Details <ChevronRight className="h-3 w-3 ml-1" />
-                  </Button>
+                  <Dialog open={openPlanId === item.id} onOpenChange={open => setOpenPlanId(open ? item.id : null)}>
+                    <DialogTrigger asChild>
+                      <Button variant="ghost" size="sm" className="h-7 text-xs px-2">
+                        Details <ChevronRight className="h-3 w-3 ml-1" />
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent onOpenAutoFocus={event => {
+                      const title = event.target instanceof HTMLElement
+                        ? event.target.querySelector<HTMLElement>("[data-recurring-plan-title]")
+                        : null;
+                      if (title) {
+                        event.preventDefault();
+                        title.focus();
+                      }
+                    }}>
+                      <RecurringInvestmentDetails plan={item} commands={commands} readFailed={isError} refresh={() => void refetch()} />
+                    </DialogContent>
+                  </Dialog>
                 </div>
               </div>
             </CardContent>
           </Card>
         ))}
 
-        {(!recurring || recurring.length === 0) && (
+        {!isError && (!recurring || recurring.length === 0) && (
           <Card className="md:col-span-2 lg:col-span-3 border-dashed bg-muted/20">
             <CardContent className="flex flex-col items-center justify-center py-12 text-center">
               <div className="p-4 bg-background rounded-full mb-4 shadow-sm">
                 <Repeat className="h-8 w-8 text-muted-foreground opacity-50" />
               </div>
-              <h3 className="font-bold text-lg">No active automations</h3>
+              <h3 className="font-bold text-lg">No recurring plans</h3>
               <p className="text-sm text-muted-foreground max-w-sm mt-1">
-                Start building consistent wealth. Setup your first SIP
-                (Systematic Investment Plan) to automatically invest every
-                month.
+                Record a recurring plan and review its authorization and terms.
               </p>
-              <Button
+              {commands.allowed && <Button
                 variant="outline"
                 className="mt-6"
                 onClick={() => setShowAdd(true)}
               >
                 Get Started
-              </Button>
+              </Button>}
             </CardContent>
           </Card>
         )}
@@ -170,12 +188,12 @@ export function RecurringInvestmentSetup() {
         </div>
         <div>
           <h4 className="text-sm font-bold text-emerald-900">
-            Secure & Reliable
+            Record-only investment plans
           </h4>
           <p className="text-xs text-emerald-800/80 leading-relaxed mt-0.5">
-            Automations are executed on the scheduled morning. If your linked
-            account has insufficient funds, we'll notify you 24 hours before
-            trying again. You can pause or cancel anytime.
+            Scheduled purchases stay pending until an authorized user confirms each
+            actual fill from the final broker statement. This records purchases without placing orders or moving cash. Rollover
+            declarations remain pending while execution terms are unresolved.
           </p>
         </div>
       </div>

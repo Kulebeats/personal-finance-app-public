@@ -9,6 +9,7 @@
  */
 
 import { BaseReportRepository } from "./BaseReportRepository";
+import type { CustomChartQueryConfig } from "@shared/reports";
 import { SpendingReportRepository } from "./SpendingReportRepository";
 import { CashflowReportRepository } from "./CashflowReportRepository";
 import { NetWorthReportRepository } from "./NetWorthReportRepository";
@@ -99,14 +100,7 @@ export class AnalyticsReportRepository extends BaseReportRepository {
   async executeCustomChart(
     householdId: string,
     body: {
-      config: {
-        name: string;
-        chartType: string;
-        primaryMetric: string;
-        secondaryMetric?: string;
-        groupBy?: string;
-        aggregation?: string;
-      };
+      config: CustomChartQueryConfig;
       from: string;
       to: string;
       scope?: string;

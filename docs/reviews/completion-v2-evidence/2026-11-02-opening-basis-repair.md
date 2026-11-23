@@ -1,0 +1,63 @@
+# Declared opening provenance and remaining-basis repair
+
+Author worktree: `C:/Users/USER/.codex/worktrees/capital-r13-manual-holding-basis-nov02`, branch `codex/r13-manual-holding-basis-nov02`.
+
+The inherited candidate is `b2999cb8194df7a80d1ca7752ed39464f06d45a8`. The saved Sol account handoff reports 71/72 protected checks at that revision. This author has not rerun that evidence. Its remaining failure is the unchanged normal opening `POST /holdings` with quantity50/cost7500, followed by a later ordinary BUY which expects201 and instead gets409. That assertion remains unchanged.
+
+## Evidence and bounded policy
+
+`investments.service.ts:createHolding` currently persists only the aggregate holding. `calculateHoldingRemainingBasis` requires attributable BUY/lot quantities to explain the complete position before any manual trade. The failed opening has quantity50 and no lots. The discrepancy is real; suppressing the assertion or bypassing provenance would leave later FIFO sales broken.
+
+The original normal request already declares quantity, total cost and `acquiredDate`. The current client labels these purchase details and sends its purchase date and total cost. The selected security supplies native units under `resolveInvestmentTransactionCurrency`; custody account denomination is a separate fact. The nullable investment transaction price supports an aggregate-cost declaration without fabricating an original unit execution price.
+
+The parent adjudicated this bounded implementation: future opening writes atomically persist the actor-authorized holding, exactly one attributable record-only opening BUY and one FIFO lot for positive quantity, plus actor-only audit evidence. Preserve explicit original date/cost, perform no cash debit, invent no price, and retain absent foreign base/FX as unknown. A zero-quantity shell may have zero/null cost and no purchase/lot; positive cost with no shares is invalid. Existing positive positions without sufficient provenance remain incomplete pending explicit user reconciliation. No automatic historical backfill or new confirmation endpoint is authorized in this slice.
+
+The source guard must recheck current household, membership, capability, verified identity, visible custody and security inside the write transaction, respecting the existing household-erasure lock order. Source locks remain held until holding, BUY, lot and financial audits commit. Audit INSERT failure must roll back all effects. The opening declaration and full dated currency/base provenance belong in actor-only audit rows, including for private custody.
+
+## Test pin and execution boundary
+
+Test-only commit: `fe165136041629d79aae5aed7ae305eb3c69c106`.
+
+The new signed file is `server/routes/__tests__/completion-r13.opening-holding.realdb.integration.test.ts`. Seventeen cases cover normal opening→BUY→FIFO sale, exact remaining basis and unchanged cash rows, explicit historical base cost, private custody owner success/peer denial, role and invalid-input controls, zero shell→BUY, and two real audit INSERT failures. The existing signed remaining-basis and FIFO controls retain private prior-source owner sales and shared peer purchases without response/audit basis disclosure.
+
+The author ran only a TypeScript syntax parser (zero diagnostics) and `git diff --check` before this pin. No database, browser, test suite or broad project check ran here. The parent subsequently reports the exact test pin failed12/passed5 out of17 on protected target run `openingred35f`, with six zero postflight counters. Receipts are in `C:/Users/USER/.codex/worktrees/capital-r04-account-csv-nov02/personal-finance-app/.local/r13-resume-openingred35f/` (`server.json`, `server.log`, `postflight.txt`). These are parent-reported RED results; this author did not rerun them.
+
+The bounded production patch creates `investmentHoldingOpening.ts`, reuses the actor/source lock, and moves holding and opening-purchase financial audits into the same transaction. Original date and declared total cost are retained, the nullable execution price/fee split remain unknown, and foreign base cost is preserved exactly when declared. The existing mocked controller tests now assert the actor/IP handoff to the transactional service; the signed tests assert actual audit rows and rollback. No ordinary accepted201 expectation was weakened. Parent-owned protected GREEN/static execution and independent review remain required. Test preservation and source commits are not acceptance or release evidence.
+
+The parent reports source `9afec6dec9364d8e70ed5e73be5ee1851d638b3d` passed150/150 across six signed/legacy suites in `r13-resume-openingfirst35j`, including the unchanged old201 workflow. Subsequent review identified current-session and contradictory zero/native-base gaps; that earlier pass does not cover these corrections.
+
+Follow-up test-only pin `99090f60e1420497740d303817d84cfe9aee1be7` expands the opening suite to22 cases. It exercises actual selected-device and global-generation revocation after signed admission, rejects native0/base100 without needing an FX rate, and preserves declared zero-cost gifts with zero/unknown base. The opening controller captures the original User snapshot, SID and session generation before awaits, and passes them as a mandatory fourth service argument. Only that controller is a production caller; two mocked controller contracts now assert actor, IP and captured session. The source guard locks membership, current credential and actual persisted SID before custody and finance writes. Credentials remain only in memory. Existing manual-trade callers retain their separate prior signature; this patch does not claim a general mutation-boundary credential review.
+
+Review also identified unresolved persisted foreign FX equations, freely accepted aggregate edits that later trades overwrite, retry/operation identity, and the actual form's binary-number total-cost calculation. These are explicit follow-up dependencies, not cleared by the bounded opening pass. Frontend work is assigned separately by the parent; this author owns no frontend files.
+
+## Explicit legacy confirmation follow-up
+
+The original holding CREATE audit is `audit_logs.details.newValue` with only `accountId`, `securityId`, `quantity` and `costBasis`. It does **not** preserve `acquiredDate`, native currency, `costBasisZmw` or `acquisitionFxRate`. The existing UPDATE endpoint can change date and FX, while its audit preserves only before/after quantity and native cost. An unaudited/mutable current holding date, current security currency, created timestamp or aggregate is not proof of the original historical purchase.
+
+A later reviewed reconciliation should provide an actor-authorized preview and explicit confirmation. It must display the original audit-supported facts separately from the missing user-confirmed facts, bind confirmation to an immutable preview/version, and record the original audit ID plus the new declaration. It must require exact matching household/custody/security and unambiguous original quantity/cost, reject duplicate or contradictory origins, and account for all intervening buys, sales, transfers and existing lots before deriving any missing opening remainder. Missing dates, currency and FX require explicit declarations or remain unknown; never substitute today's date, a later rate, or current aggregate values. Commit only the missing opening provenance under the same holding/source locks with atomic actor-only audit and idempotency. Ambiguous original records need reviewed resolution, not an automatic mutation.
+
+No endpoint, UI, migration or legacy mutation is implemented by this design note. It does not imply that all historical holdings are sellable.
+
+## Separate integration holds
+
+Internal basis maintenance does not confer source read access. Preserve the private-source owner's authorized sale and a peer's authorized new BUY on shared custody. Every matched holdings/portfolio/gain/report reader must prevent reconstructed private prior costs from reaching a peer. The separate custody-read candidate does not itself establish aggregate basis privacy.
+
+Generic GET/read code, SIP worker source, schema, canonical integration, protected execution, production/shared databases, external delivery and release remain outside this author's scope. No FIN-10/FIN-11 or campaign closure follows from this candidate.
+
+## Later approved operation identity contract
+
+The parent subsequently reserved migration0026, schema and matching journal/snapshot ownership for this author. That later bounded allocation supersedes the schema exclusion above only for opening operation receipts. Migration generation was offline with a credential-free Drizzle config; no database connection or migration execution occurred here.
+
+`POST /holdings` now requires explicit `operationId` (client UUID) and `expectedCurrency` (the native currency shown to the user). Currency is normalized to uppercase and checked against the locked security before any money effects; a preview denomination drift is409. The request digest binds normalized account/security UUIDs, currency, quantity8dp, cost/base2dp, rate4dp, date and unknown-versus-zero values. The legacy50/7500→BUY201 scenario and assertions are preserved; its request is explicitly evolved with a UUID and USD confirmation. Existing validation/mocked/signed holding request fixtures gain the same honest required declarations. This is an API contract evolution, not unchanged wire compatibility.
+
+The `investment_opening_operation_receipts` composite identity is household+actor+operation UUID, with versioned digest and an immutable JSON creation snapshot. It retains historical holding identity after deletion, while household/actor deletion cascades. Updates and ordinary deletes are rejected; parent erasure cascades are allowed. There is no backfill and no receipt GET.
+
+The existing current-user UPDATE lock serializes concurrent operations for that actor. A replay first authorizes the original custody, selected credential and current original source, then compares immutable intent. It returns the original creation response and never overwrites current holding state. Strict version1 receipt JSON is response-only evidence, validated against immutable intent and the actual actor-only operation CREATE audit. Its original purchase/lot/current linked cash witnesses are locked; later private acquisitions and disposal changes do not govern its acknowledgment. Missing/rebound/deleted original source or currency drift fails opaquely. A different UUID permits an intentionally identical second position. Receipt INSERT, holding, BUY, lot and actor-only audits are in one transaction.
+
+The separate frontend owner controls the real form's decimal arithmetic and stable payload/key lifetime. This server author changed no frontend files. The operation test suite adds frozen committed receipt assertions, normalized/concurrent/mismatched retries, actual receipt INSERT rollback followed by same-key success, zero shells, original-source rebinding/privacy/currency changes, role/membership/identity/session withdrawal and cross-household denial. Parent runtime/static execution and independent review of the exact composed source remain required.
+
+## Owner-selected retry erasure policy, 3 November
+
+The owner chose **delete an erased member's retry records**. `anonymiseUser` now deletes only that actor's operation receipts across historical households, after irreversibly setting the locked user's `erasedAt`, within the same erasure transaction. The receipt guard allows that actor purge, or physical household/user parent cascades, while continuing to reject every UPDATE and ordinary DELETE for active actors. Shared holdings, BUYs, lots and financial audits are untouched; other actors' receipts remain. A purge fault must roll back the entire membership/identity/session/receipt transaction.
+
+New signed/service tests invoke the actual `eraseAccount` service after genuine signed opening creation in current and historical households. They check shared-member selective purge, retained peer replay, stale signed retry401, last-household physical cascade, and rollback on an actual receipt DELETE failure. They are authored but not run here. The owner decision supplies this specific lifecycle policy; it does not supply a retention duration, legal-compliance claim, production execution or broad R07/erasure acceptance. The changed SQL0026 guard needs fresh independent review and a source-matching protected migration target. Existing failed targets/receipts must be preserved.

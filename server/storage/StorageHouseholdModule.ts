@@ -83,43 +83,10 @@ export class StorageHouseholdModule extends StorageUserModule {
       .where(eq(householdMembers.householdId, householdId));
   }
 
-  async addHouseholdMember(data: {
-    householdId: string;
-    userId: string;
-    role: "owner" | "admin" | "member" | "view_only" | "professional";
-  }) {
-    const result = await db.insert(householdMembers).values(data).returning();
-    return result[0];
-  }
-
-  async updateHouseholdMemberRole(
-    householdId: string,
-    userId: string,
-    role: "owner" | "admin" | "member" | "view_only" | "professional"
-  ) {
-    const result = await db
-      .update(householdMembers)
-      .set({ role })
-      .where(
-        and(
-          eq(householdMembers.householdId, householdId),
-          eq(householdMembers.userId, userId)
-        )
-      )
-      .returning();
-    return result[0];
-  }
-
-  async removeHouseholdMember(householdId: string, userId: string) {
-    await db
-      .delete(householdMembers)
-      .where(
-        and(
-          eq(householdMembers.householdId, householdId),
-          eq(householdMembers.userId, userId)
-        )
-      );
-  }
+  // Membership writes live in modules/household (ownership.service.ts,
+  // invitations.accept.ts) and HouseholdRepository, under the one-owner and
+  // one-household locks. The unguarded writers that used to sit here had no
+  // callers and were removed (NEW-12 / AH-06 follow-up).
 
   // ============================================================================
   // HOUSEHOLD PREFERENCES METHODS

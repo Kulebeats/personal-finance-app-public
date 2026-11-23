@@ -8,13 +8,6 @@ export function cn(...inputs: ClassValue[]) {
 import { type MoneyDto } from "@shared/money";
 import { parseMoneyString } from "./money";
 
-export function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-  }).format(value);
-}
-
 /**
  * Parse monetary values with Decimal precision.
  * Uses parseMoneyString internally to avoid parseFloat precision issues.

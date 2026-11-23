@@ -4,6 +4,7 @@
  * Contains all modal components for the transactions page.
  */
 
+import { useState } from "react";
 import { toast } from "sonner";
 import {
   TransactionDetailModal,
@@ -18,6 +19,24 @@ import { AddTransactionModal } from "@/components/transactions/AddTransactionMod
 import { useCreateRecurringForTransaction } from "@/hooks/useRecurring";
 import { useCreateRule } from "@/hooks/useRules";
 import { useUpdateTransaction } from "@/hooks/useTransactions";
+import type { CreateRuleInput } from "@/lib/api";
+import type { RuleData } from "@/features/transactions/components/RuleCreationModal";
+
+export function buildTransactionRulePayload(rule: RuleData): CreateRuleInput {
+  const actions: CreateRuleInput["actions"] = [];
+  if (rule.categoryId) actions.push({ type: "categorize", value: rule.categoryId });
+  if (rule.tagIds.length > 0) actions.push({ type: "add_tags", value: rule.tagIds });
+  return {
+    name: `Auto: ${rule.merchant}`,
+    conditions: [{
+      type: "merchant_name",
+      operator: rule.matchType === "exact" ? "equals" : "contains",
+      value: rule.merchant,
+    }],
+    actions,
+    applyToPast: rule.applyToExisting,
+  };
+}
 
 interface TransactionsModalsProps {
   // Add modal
@@ -32,6 +51,7 @@ interface TransactionsModalsProps {
   setShowRuleModal: (show: boolean) => void;
   ruleMerchant: string;
   ruleCategory: string;
+  ruleCategoryId: string | null;
   // Recurring modal
   showRecurringModal: boolean;
   setShowRecurringModal: (show: boolean) => void;
@@ -55,7 +75,7 @@ interface TransactionsModalsProps {
   isBulkCategorizePending: boolean;
   isBulkTagPending: boolean;
   // Handler creators
-  onOpenRule: (merchant: string, category: string) => void;
+  onOpenRule: (merchant: string, categoryId: string | null, categoryName: string) => void;
   onOpenRecurring: (tx: TransactionWithDetails) => void;
   onOpenSplit: (tx: TransactionWithDetails) => void;
 }
@@ -70,6 +90,7 @@ export function TransactionsModals({
   setShowRuleModal,
   ruleMerchant,
   ruleCategory,
+  ruleCategoryId,
   showRecurringModal,
   setShowRecurringModal,
   recurringTransaction,
@@ -95,10 +116,14 @@ export function TransactionsModals({
   const createRuleMutation = useCreateRule();
   const createRecurringMutation = useCreateRecurringForTransaction();
   const updateMutation = useUpdateTransaction();
+  const [editingTransaction, setEditingTransaction] = useState<TransactionWithDetails | null>(null);
 
   return (
     <>
-      <AddTransactionModal open={showAddModal} onOpenChange={setShowAddModal} />
+      <AddTransactionModal open={showAddModal} transaction={editingTransaction} onOpenChange={open => {
+        setShowAddModal(open);
+        if (!open) setEditingTransaction(null);
+      }} />
 
       <TransactionDetailModal
         transaction={selectedTransaction}
@@ -107,6 +132,11 @@ export function TransactionsModals({
         onOpenRule={onOpenRule}
         onOpenRecurring={onOpenRecurring}
         onOpenSplit={onOpenSplit}
+        onEdit={transaction => {
+          setEditingTransaction(transaction);
+          setSelectedTransaction(null);
+          setShowAddModal(true);
+        }}
       />
 
       <RuleCreationModal
@@ -114,31 +144,15 @@ export function TransactionsModals({
         onOpenChange={setShowRuleModal}
         initialMerchant={ruleMerchant}
         initialCategory={ruleCategory}
-        onSubmit={(rule) => {
-          createRuleMutation.mutate(
-            {
-              name: `Auto: ${rule.merchant}`,
-              conditions: [
-                {
-                  type: "merchant_name",
-                  operator: rule.matchType === "exact" ? "equals" : "contains",
-                  value: rule.merchant,
-                },
-              ],
-              actions: [
-                { type: "categorize", value: rule.category },
-                ...(rule.tags.length > 0 ? [{ type: "add_tags" as const, value: rule.tags }] : []),
-              ],
-              applyToPast: rule.applyToExisting,
-            },
-            {
-              onSuccess: () => {
-                toast.success("Auto-categorization rule created");
-                setShowRuleModal(false);
-              },
-              onError: () => toast.error("Failed to create rule"),
-            },
-          );
+        initialCategoryId={ruleCategoryId}
+        onSubmit={async (rule) => {
+          try {
+            await createRuleMutation.mutateAsync(buildTransactionRulePayload(rule));
+            toast.success("Auto-categorization rule created");
+            setShowRuleModal(false);
+          } catch {
+            toast.error("Failed to create rule");
+          }
         }}
       />
 
@@ -159,13 +173,14 @@ export function TransactionsModals({
         open={showSplitModal}
         onOpenChange={setShowSplitModal}
         transaction={splitTransaction}
-        onSubmit={(splits) => {
+        onSubmit={(splits, expectedUpdatedAt) => {
           if (!splitTransaction) return;
           updateMutation.mutate(
-            { id: splitTransaction.id, data: { splits } },
+            { id: splitTransaction.id, data: { splits, expectedUpdatedAt } },
             {
               onSuccess: () => {
                 toast.success("Transaction split saved");
+                setSelectedTransaction(null);
                 setShowSplitModal(false);
                 setSplitTransaction(null);
               },

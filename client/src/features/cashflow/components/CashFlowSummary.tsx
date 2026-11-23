@@ -10,14 +10,16 @@ import {
 
 interface CashFlowSummaryProps {
   readonly totals: ReturnType<typeof useCashFlowData>["totals"];
-  readonly actualPeriods: number;
+  /** Savings per period that has started (NEW-34). */
+  /** Null when the response has no elapsed totals to average. */
+  readonly averageSavings: number | null;
   readonly periodLabel: string;
   readonly formatCurrency: (value: number) => string;
 }
 
 export function CashFlowSummary({
   totals,
-  actualPeriods,
+  averageSavings,
   periodLabel,
   formatCurrency,
 }: CashFlowSummaryProps) {
@@ -84,7 +86,7 @@ export function CashFlowSummary({
           Avg. {periodLabel} Savings
         </div>
         <div className="text-2xl font-bold text-foreground">
-          {formatCurrency(totals.savings / actualPeriods)}
+          {averageSavings === null ? "—" : formatCurrency(averageSavings)}
         </div>
       </Card>
     </div>

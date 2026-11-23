@@ -39,7 +39,11 @@ const { auditLog, analyzeQuery, generateResponse, recordExchange } = vi.hoisted(
   auditLog: vi.fn().mockResolvedValue(undefined),
   analyzeQuery: vi.fn(),
   generateResponse: vi.fn(),
-  recordExchange: vi.fn().mockResolvedValue('conversation-1')
+  recordExchange: vi.fn(async (params: { onPersisted?: (tx: never, id: string) => Promise<void> }) => {
+    // Like the store: the hook runs in the exchange write, then the id is persisted.
+    await params.onPersisted?.(undefined as never, 'conversation-1');
+    return { conversationId: 'conversation-1', persisted: true };
+  })
 }));
 
 vi.mock('../../../utils/logger', () => ({
@@ -200,7 +204,13 @@ describe('AI Service - provider failure degrades to keyword fallback', () => {
     const details = auditDetails();
     // Provenance: the reply did NOT come from the provider.
     expect(details.used_gemini).toBe(false);
-    expect(details.provider_error).toBe(AIErrorCode.RATE_LIMIT_EXCEEDED);
+    // R17: provider_error is the typed failure category, not the legacy code.
+    expect(details.provider_error).toBe('rate_limited');
+    expect(details.answer_mode).toBe('local');
+    expect(details.provider_attempts).toEqual([
+      expect.objectContaining({ provider: 'anthropic', outcome: 'skipped', failure_category: 'unconfigured' }),
+      expect.objectContaining({ provider: 'gemini', stage: 'analysis', outcome: 'failed', failure_category: 'rate_limited', dispatched: true })
+    ]);
     // ...but the message WAS transmitted before the call failed. Both facts are
     // recorded, so the audit trail can't be read as "nothing left the boundary".
     expect(details.provider_attempted).toBe(true);

@@ -40,6 +40,7 @@ export const investmentKeys = {
     [...investmentKeys.all, "analytics", "performance", timeframe] as const,
   fxHistorical: (from: string, to: string) =>
     [...investmentKeys.all, "analytics", "fx-historical", from, to] as const,
+  taxYear: () => [...investmentKeys.all, "tax", "year"] as const,
   taxSummary: (year: number) =>
     [...investmentKeys.all, "tax", "summary", year] as const,
   pension: () => [...investmentKeys.all, "pension"] as const,

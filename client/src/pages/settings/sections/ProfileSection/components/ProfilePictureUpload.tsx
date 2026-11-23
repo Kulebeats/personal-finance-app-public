@@ -1,7 +1,14 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import Webcam from "react-webcam";
+import { StaleOperationError } from "@/lib/operation-lifetime";
+import { prepareCameraFile } from "./camera-file";
+import { ProtectedImage } from "@/components/session/ProtectedImage";
+import { isProtectedMediaSource } from "@/lib/protected-media";
+import { useHouseholdAssetsAllowed } from "@/contexts/SessionContext";
+import { getInitials, getInitialsGradient } from "./profile-initials";
 import { Camera, Trash2, X, Loader2, Upload, Video } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ConfirmActionDialog } from "@/components/ConfirmActionDialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useFormContext } from "react-hook-form";
 import {
@@ -9,35 +16,6 @@ import {
   useUploadProfilePicture,
   useDeleteProfilePicture,
 } from "@/hooks/use-settings";
-
-// Generate a gradient background based on initials
-function getInitialsGradient(name: string): string {
-  const gradients = [
-    "from-rose-400 to-pink-500",
-    "from-violet-400 to-purple-500",
-    "from-blue-400 to-indigo-500",
-    "from-cyan-400 to-teal-500",
-    "from-emerald-400 to-green-500",
-    "from-amber-400 to-orange-500",
-    "from-red-400 to-rose-500",
-    "from-fuchsia-400 to-pink-500",
-  ];
-
-  // Use name to generate a consistent gradient
-  const hash = name
-    .split("")
-    .reduce((acc, char) => acc + char.charCodeAt(0), 0);
-  return gradients[hash % gradients.length];
-}
-
-function getInitials(name: string): string {
-  if (!name) return "?";
-  const parts = name.trim().split(/\s+/);
-  if (parts.length === 1) {
-    return parts[0].charAt(0).toUpperCase();
-  }
-  return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
-}
 
 interface InitialsAvatarProps {
   name: string;
@@ -69,12 +47,14 @@ function InitialsAvatar({
 }
 
 export function ProfilePictureUpload() {
+  const householdAssetsAllowed = useHouseholdAssetsAllowed();
   const { setValue, watch } = useFormContext();
   const { data: profile } = useProfile();
   const uploadPicture = useUploadProfilePicture();
   const deletePicture = useDeleteProfilePicture();
 
   const [showPictureModal, setShowPictureModal] = useState(false);
+  const [isRemoveConfirmOpen, setIsRemoveConfirmOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<string>("upload");
   const [hasCamera, setHasCamera] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -87,8 +67,8 @@ export function ProfilePictureUpload() {
   const profilePictureUrl = formValue || profile?.profilePictureUrl;
   const userName = profile?.fullName || profile?.displayName || "";
 
-  // Check for camera availability
   useEffect(() => {
+    if (!householdAssetsAllowed) return;
     async function checkCamera() {
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
@@ -101,7 +81,7 @@ export function ProfilePictureUpload() {
       }
     }
     checkCamera();
-  }, []);
+  }, [householdAssetsAllowed]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -131,19 +111,18 @@ export function ProfilePictureUpload() {
 
   const uploadCapturedPhoto = useCallback(async () => {
     if (!capturedImage) return;
-
-    // Convert base64 to blob
-    const res = await fetch(capturedImage);
-    const blob = await res.blob();
-    const file = new File([blob], "camera-capture.jpg", { type: "image/jpeg" });
-
-    uploadPicture.mutate(file, {
-      onSuccess: (data) => {
-        setValue("profilePicture", data.pictureUrl, { shouldDirty: true });
-        setCapturedImage(null);
-        setShowPictureModal(false);
-      },
-    });
+    try {
+      const file = await prepareCameraFile(capturedImage);
+      uploadPicture.mutate(file, {
+        onSuccess: (data) => {
+          setValue("profilePicture", data.pictureUrl, { shouldDirty: true });
+          setCapturedImage(null);
+          setShowPictureModal(false);
+        },
+      });
+    } catch (error) {
+      if (!(error instanceof StaleOperationError)) setCameraError(error instanceof Error ? error.message : "Unable to prepare photo");
+    }
   }, [capturedImage, uploadPicture, setValue]);
 
   const retakePhoto = () => {
@@ -161,6 +140,17 @@ export function ProfilePictureUpload() {
     setCapturedImage(null);
     setCameraError(null);
   };
+
+  if (!householdAssetsAllowed) {
+    return (
+      <div className="space-y-3">
+        {profilePictureUrl && !isProtectedMediaSource(profilePictureUrl)
+          ? <ProtectedImage src={profilePictureUrl} alt="Profile" className="w-[200px] h-[200px] rounded-full object-cover" />
+          : <InitialsAvatar name={userName || "User"} size="sm" />}
+        <p className="text-sm text-muted-foreground">Create a household to manage uploaded profile images.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -180,7 +170,7 @@ export function ProfilePictureUpload() {
         >
           {/* Main avatar circle */}
           {profilePictureUrl ? (
-            <img
+            <ProtectedImage
               src={profilePictureUrl}
               alt="Profile"
               className="w-[200px] h-[200px] rounded-full object-cover object-center bg-muted border-[6px] border-background shadow-xl transition-transform group-hover:scale-[1.02]"
@@ -262,7 +252,7 @@ export function ProfilePictureUpload() {
                 {/* Large Avatar Preview - 160px */}
                 <div className="p-8 flex justify-center bg-muted/20">
                   {profilePictureUrl ? (
-                    <img
+                    <ProtectedImage
                       src={profilePictureUrl}
                       alt="Profile"
                       className="w-40 h-40 rounded-full object-cover object-center border-4 border-background shadow-lg"
@@ -300,22 +290,7 @@ export function ProfilePictureUpload() {
                     <Button
                       variant="outline"
                       className="w-full text-destructive hover:text-destructive hover:bg-destructive/10"
-                      onClick={() => {
-                        if (
-                          confirm(
-                            "Are you sure you want to remove your profile picture?"
-                          )
-                        ) {
-                          deletePicture.mutate(undefined, {
-                            onSuccess: () => {
-                              setValue("profilePicture", null, {
-                                shouldDirty: true,
-                              });
-                              setShowPictureModal(false);
-                            },
-                          });
-                        }
-                      }}
+                      onClick={() => setIsRemoveConfirmOpen(true)}
                       disabled={deletePicture.isPending}
                     >
                       <Trash2 className="w-4 h-4 mr-2" />
@@ -410,6 +385,22 @@ export function ProfilePictureUpload() {
                 </div>
               </TabsContent>
             </Tabs>
+            {/* Inside the card, whose stopPropagation keeps dialog clicks from closing the modal. */}
+            <ConfirmActionDialog
+              open={isRemoveConfirmOpen}
+              onOpenChange={setIsRemoveConfirmOpen}
+              title="Remove profile picture?"
+              description="Your initials are shown instead. You can upload a new photo at any time."
+              confirmLabel="Remove photo"
+              onConfirm={() =>
+                deletePicture.mutate(undefined, {
+                  onSuccess: () => {
+                    setValue("profilePicture", null, { shouldDirty: true });
+                    setShowPictureModal(false);
+                  },
+                })
+              }
+            />
           </div>
         </div>
       )}

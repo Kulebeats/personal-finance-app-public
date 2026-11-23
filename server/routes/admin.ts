@@ -1,75 +1,21 @@
 import { Router } from "express";
 import { db } from "../db";
-import { sql } from "drizzle-orm";
 import { logger } from "../utils/logger";
 import { requireAuth } from "../auth";
 import { requireAnySystemRole } from "../middleware/systemRoleGuard";
-import { generalLimiter } from "../middleware/rateLimit";
+import { getScheduledJobs } from "./admin.jobs";
+import { createCuratedSecurity } from "./admin.securities";
+import { strictLimiter } from "../middleware/rateLimit";
 
 const router = Router();
 
 // SEC-RATE-004: Apply rate limiting to admin routes
-router.use(generalLimiter);
 
 // Apply authentication and system role check to all admin routes
 router.use(requireAuth);
 router.use(requireAnySystemRole());
-
-/**
- * GET /api/admin/calculation-shadow-status
- *
- * Returns status of the shadow mode testing.
- * Includes match rates and recent discrepancies.
- */
-router.get("/calculation-shadow-status", async (req, res) => {
-  try {
-    // 1. Get stats from calculation_logs
-    // We assume 'execution_mode' = 'shadow_comparison' for discrepancies
-    // or standard logs otherwise. This is a simplified view.
-
-    // Total calculations today
-    const stats = await db.execute(sql`
-        SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN error_code IS NOT NULL THEN 1 ELSE 0 END) as errors,
-            AVG(execution_time_ms) as avg_latency
-        FROM calculation_logs
-        WHERE timestamp > NOW() - INTERVAL '24 hours'
-    `);
-
-    // Mismatches (logged as errors with specific context in our current simple implementation)
-    // In a real system, we might query a separate shadow_results table.
-    // Here we look for logs with error_message like "Shadow mismatch%"
-    const mismatches = await db.execute(sql`
-        SELECT *
-        FROM calculation_logs
-        WHERE error_message LIKE 'Shadow mismatch%'
-        ORDER BY timestamp DESC
-        LIMIT 10
-    `);
-
-    res.json({
-      enabled: true, // Hardcoded for now until feature flags are properly stored
-      last24Hours: {
-        total: parseInt((stats.rows[0].total as string) || "0"),
-        errors: parseInt((stats.rows[0].errors as string) || "0"),
-        avgLatencyMs: parseFloat((stats.rows[0].avg_latency as string) || "0"),
-      },
-      recentMismatches: mismatches.rows.map((row) => ({
-        timestamp: row.timestamp,
-        function: row.function_name,
-        details: row.error_message,
-      })),
-    });
-  } catch (error) {
-    logger.error(
-      "Failed to get shadow status",
-      { requestId: req.requestId },
-      error as Error
-    );
-    res.status(500).json({ error: "Internal Server Error" });
-  }
-});
+router.get("/jobs", getScheduledJobs);
+router.post("/securities", strictLimiter, requireSuperAdmin(), createCuratedSecurity);
 
 // ============================================================================
 // SYSTEM ROLE MANAGEMENT ENDPOINTS
@@ -79,6 +25,9 @@ import { eq } from "drizzle-orm";
 import { systemRoles, userSystemRoles, users } from "../../shared/schema";
 import { requireSuperAdmin } from "../middleware/systemRoleGuard";
 import { z } from "zod";
+import type { Request, Response } from "express";
+import { businessAuditService } from "../services/BusinessAuditService";
+import { grantSystemRole, revokeSystemRole, type RoleChangeRequest } from "../services/admin/systemRoleService";
 
 /**
  * GET /api/admin/system-roles
@@ -158,141 +107,65 @@ const assignRoleSchema = z.object({
   roleId: z.string().uuid(),
 });
 
+const roleChange = (req: Request, targetUserId: string, roleId: string): RoleChangeRequest => ({
+  actorUserId: req.session.userId!, targetUserId, roleId,
+  ipAddress: businessAuditService.getIpAddress(req), userAgent: req.headers["user-agent"],
+});
+const notFound = (res: Response, message: string) =>
+  res.status(404).json({ success: false, error: { code: "NOT_FOUND", message } });
+const serverError = (res: Response, message: string) =>
+  res.status(500).json({ success: false, error: { code: "SERVER_ERROR", message } });
+
 /**
  * POST /api/admin/users/:id/roles
- * Assign a system role to a user (super_admin only)
+ * Assign a system role to a user (super_admin only). The grant and its
+ * ROLE_ASSIGNED security audit row commit together (NEW-32).
  */
 router.post("/users/:id/roles", requireSuperAdmin(), async (req, res) => {
   try {
-    const { id: userId } = req.params;
     const parseResult = assignRoleSchema.safeParse(req.body);
-
-    if (!parseResult.success) {
+    if (!parseResult.success || !z.string().uuid().safeParse(req.params.id).success) {
       return res.status(400).json({
         success: false,
         error: { code: "VALIDATION_ERROR", message: "Invalid role ID" },
       });
     }
-
-    const { roleId } = parseResult.data;
-
-    // Check if user exists
-    const user = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
-    if (user.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: { code: "NOT_FOUND", message: "User not found" },
-      });
-    }
-
-    // Check if role exists
-    const role = await db
-      .select()
-      .from(systemRoles)
-      .where(eq(systemRoles.id, roleId))
-      .limit(1);
-    if (role.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: { code: "NOT_FOUND", message: "Role not found" },
-      });
-    }
-
-    // Assign role
-    await db
-      .insert(userSystemRoles)
-      .values({
-        userId,
-        roleId,
-        grantedBy: req.session.userId,
-      })
-      .onConflictDoNothing();
-
+    const result = await grantSystemRole(roleChange(req, req.params.id, parseResult.data.roleId));
+    if (result.kind === "user_not_found") return notFound(res, "User not found");
+    if (result.kind === "role_not_found") return notFound(res, "Role not found");
     logger.info("System role assigned", {
-      requestId: req.requestId,
-      targetUserId: userId.substring(0, 8) + "...",
-      roleName: role[0].name,
-      grantedBy: req.session.userId?.substring(0, 8) + "...",
+      requestId: req.requestId, targetUserId: req.params.id.substring(0, 8) + "...",
+      roleName: result.roleName, changed: result.kind === "granted",
     });
-
-    res.json({
-      success: true,
-      message: `Role "${role[0].name}" assigned to user`,
-    });
+    res.json({ success: true, message: `Role "${result.roleName}" assigned to user` });
   } catch (error) {
-    logger.error(
-      "Failed to assign role",
-      { requestId: req.requestId },
-      error as Error
-    );
-    res.status(500).json({
-      success: false,
-      error: { code: "SERVER_ERROR", message: "Failed to assign role" },
-    });
+    logger.error("Failed to assign role", { requestId: req.requestId }, error as Error);
+    serverError(res, "Failed to assign role");
   }
 });
 
 /**
  * DELETE /api/admin/users/:id/roles/:roleId
- * Remove a system role from a user (super_admin only)
+ * Remove one system role from a user (super_admin only). Only the named role
+ * is removed, and its ROLE_REMOVED security audit row commits with it (NEW-32).
  */
-router.delete(
-  "/users/:id/roles/:roleId",
-  requireSuperAdmin(),
-  async (req, res) => {
-    try {
-      const { id: userId, roleId } = req.params;
-
-      // Get role name for logging
-      const role = await db
-        .select()
-        .from(systemRoles)
-        .where(eq(systemRoles.id, roleId))
-        .limit(1);
-
-      const result = await db
-        .delete(userSystemRoles)
-        .where(eq(userSystemRoles.userId, userId))
-        .returning();
-
-      // Filter by roleId after the fact since AND is tricky
-      const deleted = result.filter((r) => r.roleId === roleId);
-
-      if (deleted.length === 0) {
-        return res.status(404).json({
-          success: false,
-          error: { code: "NOT_FOUND", message: "Role assignment not found" },
-        });
-      }
-
-      logger.info("System role removed", {
-        requestId: req.requestId,
-        targetUserId: userId.substring(0, 8) + "...",
-        roleName: role[0]?.name || "unknown",
-        removedBy: req.session.userId?.substring(0, 8) + "...",
-      });
-
-      res.json({
-        success: true,
-        message: "Role removed from user",
-      });
-    } catch (error) {
-      logger.error(
-        "Failed to remove role",
-        { requestId: req.requestId },
-        error as Error
-      );
-      res.status(500).json({
-        success: false,
-        error: { code: "SERVER_ERROR", message: "Failed to remove role" },
-      });
+router.delete("/users/:id/roles/:roleId", requireSuperAdmin(), async (req, res) => {
+  try {
+    const { id: userId, roleId } = req.params;
+    if (!z.string().uuid().safeParse(userId).success || !z.string().uuid().safeParse(roleId).success) {
+      return notFound(res, "Role assignment not found");
     }
+    const result = await revokeSystemRole(roleChange(req, userId, roleId));
+    if (result.kind === "not_assigned") return notFound(res, "Role assignment not found");
+    logger.info("System role removed", {
+      requestId: req.requestId, targetUserId: userId.substring(0, 8) + "...", roleName: result.roleName,
+    });
+    res.json({ success: true, message: "Role removed from user" });
+  } catch (error) {
+    logger.error("Failed to remove role", { requestId: req.requestId }, error as Error);
+    serverError(res, "Failed to remove role");
   }
-);
+});
 
 // ============================================================================
 // AUDIT LOGS ENDPOINT

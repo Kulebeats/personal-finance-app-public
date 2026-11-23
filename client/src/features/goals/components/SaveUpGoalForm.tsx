@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/select";
 import type { SaveUpGoalType } from "@/hooks/useGoals";
 import { GoalImagePicker } from "./GoalImagePicker";
+import { goalFieldErrorProps, type GoalFieldErrors } from "./goalRequiredFields";
 
 export type SaveUpGoalDraft = {
   name: string;
@@ -52,9 +53,11 @@ const ICON_OPTIONS: Array<{ value: string; label: string }> = [
 export function SaveUpGoalForm({
   value,
   onChange,
+  errors = {},
 }: {
   value: SaveUpGoalDraft;
   onChange: (next: SaveUpGoalDraft) => void;
+  errors?: GoalFieldErrors;
 }) {
   const update = (patch: Partial<SaveUpGoalDraft>) => {
     onChange({ ...value, ...patch });
@@ -70,6 +73,7 @@ export function SaveUpGoalForm({
         <Label htmlFor="save-up-name">Goal name</Label>
         <Input
           id="save-up-name"
+          {...goalFieldErrorProps(errors, "save-up-name")}
           value={value.name}
           onChange={(event) => update({ name: event.target.value })}
           placeholder="e.g. Family vacation"
@@ -105,6 +109,7 @@ export function SaveUpGoalForm({
           <Label htmlFor="save-up-other-type">Please specify</Label>
           <Input
             id="save-up-other-type"
+            {...goalFieldErrorProps(errors, "save-up-other-type")}
             value={value.otherGoalType}
             onChange={(event) => update({ otherGoalType: event.target.value })}
             placeholder="e.g. Investment property"
@@ -160,6 +165,7 @@ export function SaveUpGoalForm({
         <Label htmlFor="save-up-target">Target amount</Label>
         <Input
           id="save-up-target"
+            {...goalFieldErrorProps(errors, "save-up-target")}
           type="number"
           inputMode="decimal"
           value={value.targetAmount}

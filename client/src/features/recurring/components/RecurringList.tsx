@@ -85,6 +85,7 @@ export function RecurringList({
           return (
             <div
               key={item.id}
+              data-testid="recurring-rule-row"
               className={cn(
                 "grid grid-cols-12 px-4 py-3 items-center hover:bg-muted/20 transition-colors group",
                 item.isPaused && "opacity-50",
@@ -139,6 +140,7 @@ export function RecurringList({
 
               {/* Amount */}
               <div
+                data-testid="recurring-rule-amount"
                 className={cn(
                   "col-span-3 text-right font-medium",
                   item.type === "income" ? "text-chart-income" : "",

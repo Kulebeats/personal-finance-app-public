@@ -1,19 +1,32 @@
 /**
  * MessageBubble — one transcript entry (spec UI-AI-003a, UI-AI-004c).
  *
- * Replies render as plain text with preserved line breaks — amounts arrive
- * embedded in the reply text already in household currency; there are no
- * structured amount fields in the chat payload. Never use
- * dangerouslySetInnerHTML here.
+ * Thandi's replies render their formatting (bold, lists, tables) through
+ * ThandiMarkdown, which never inserts HTML; the user's own words stay plain
+ * text with preserved line breaks. Amounts arrive embedded in the reply text
+ * already in household currency. Never use dangerouslySetInnerHTML here.
+ * Each reply can be copied.
  *
  * E1 (v1.1 Workstream E): each bubble carries a muted relative timestamp,
  * revealed on hover OR focus. The bubble itself is a real tab stop
  * (tabIndex 0) so keyboard users can reach the reveal too — a pure
  * group-hover trick would leave them with nothing (WCAG 2.1 AA).
  */
+import { useEffect, useState } from "react";
 import { formatDistanceToNow } from "date-fns";
+import { Check, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { ThandiMessage } from "../types";
+import type { AnswerMode, ThandiMessage } from "../types";
+import { ThandiMarkdown } from "./ThandiMarkdown";
+
+const COPY_CONFIRM_MS = 2000;
+
+/** R17: one Thandi chat, labelled by the processor that actually answered. */
+const ANSWER_MODE_LABELS: Partial<Record<AnswerMode, string>> = {
+  claude: "Answered using Claude",
+  gemini: "Answered using Gemini — backup provider",
+  local: "Limited local summary",
+};
 
 /** Humanized names for the 12 shipped analytics tools (ai.gemini.ts). */
 const TOOL_LABELS: Record<string, string> = {
@@ -42,6 +55,49 @@ function formatRelativeTimestamp(timestamp: string): string | null {
   return formatDistanceToNow(parsed, { addSuffix: true });
 }
 
+type CopyState = "idle" | "copied" | "failed";
+
+const COPY_LABELS: Record<CopyState, string> = {
+  idle: "Copy answer",
+  copied: "Copied",
+  failed: "Copy failed - try again",
+};
+
+function CopyAnswerButton({ content }: { content: string }) {
+  const [state, setState] = useState<CopyState>("idle");
+
+  useEffect(() => {
+    if (state !== "copied") return undefined;
+    const timer = window.setTimeout(() => setState("idle"), COPY_CONFIRM_MS);
+    return () => window.clearTimeout(timer);
+  }, [state]);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setState("copied");
+    } catch {
+      setState("failed");
+    }
+  };
+
+  const Icon = state === "copied" ? Check : Copy;
+  return (
+    <button
+      type="button"
+      onClick={() => void copy()}
+      aria-label={COPY_LABELS[state]}
+      title={COPY_LABELS[state]}
+      className={cn(
+        "inline-flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors",
+        "hover:bg-background/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+      )}
+    >
+      <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+    </button>
+  );
+}
+
 interface MessageBubbleProps {
   message: ThandiMessage;
 }
@@ -53,6 +109,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     !isUser && provenance !== undefined && provenance.tools.length > 0;
 
   const relativeTimestamp = formatRelativeTimestamp(message.timestamp);
+  const answerLabel =
+    !isUser && message.answerMode ? ANSWER_MODE_LABELS[message.answerMode] : undefined;
 
   return (
     <div className={cn("flex", isUser ? "justify-end" : "justify-start")}>
@@ -67,7 +125,19 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         )}
       >
         <span className="sr-only">{isUser ? "You:" : "Thandi:"}</span>
-        <p className="whitespace-pre-wrap break-words">{message.content}</p>
+        {isUser ? (
+          <p className="whitespace-pre-wrap break-words">{message.content}</p>
+        ) : (
+          <ThandiMarkdown content={message.content} />
+        )}
+        {!isUser && (
+          <div className="mt-1.5 flex items-center gap-2">
+            {answerLabel !== undefined && (
+              <p className="text-xs font-medium text-muted-foreground">{answerLabel}</p>
+            )}
+            <CopyAnswerButton content={message.content} />
+          </div>
+        )}
         {showProvenance && (
           <p className="mt-1.5 text-xs text-muted-foreground">
             Based on: {provenance.tools.map(humanizeTool).join(", ")} ·{" "}

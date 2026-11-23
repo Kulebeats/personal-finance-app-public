@@ -142,7 +142,6 @@ export function useMerchantsSectionState() {
       mergePreviewLogoSource: mergePreview.state.mergePreviewLogoSource,
       bulkSelection: bulkActions.state.bulkSelection,
       bulkMergeTarget: bulkActions.state.bulkMergeTarget,
-      deleteConfirmText: formDialog.state.deleteConfirmText,
       deleteAcknowledged: formDialog.state.deleteAcknowledged,
     },
     derived: {
@@ -188,7 +187,6 @@ export function useMerchantsSectionState() {
       setMergePreviewLogoSource: mergePreview.actions.setMergePreviewLogoSource,
       setBulkSelection: bulkActions.actions.setBulkSelection,
       setBulkMergeTarget: bulkActions.actions.setBulkMergeTarget,
-      setDeleteConfirmText: formDialog.actions.setDeleteConfirmText,
       setDeleteAcknowledged: formDialog.actions.setDeleteAcknowledged,
       openCreate: formDialog.actions.openCreate,
       openEdit: formDialog.actions.openEdit,

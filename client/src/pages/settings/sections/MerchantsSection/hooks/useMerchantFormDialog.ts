@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import type { Merchant } from "@/hooks/use-settings";
 import { findMerchantLogoPreset } from "@/components/merchants/logoPresets";
 
-type DeleteAction = "soft" | "hard" | "merge";
+/** The delete options the settings dialog offers (ORG-007): archive or merge. */
+export type DeleteAction = "soft" | "merge";
 
 export type MerchantFormState = {
   name: string;
@@ -30,7 +31,6 @@ export interface MerchantFormDialogState {
   logoFile: File | null;
   deleteAction: DeleteAction;
   mergeTarget: string;
-  deleteConfirmText: string;
   deleteAcknowledged: boolean;
 }
 
@@ -42,7 +42,6 @@ export interface MerchantFormDialogActions {
   setLogoFile: (file: File | null) => void;
   setDeleteAction: (action: DeleteAction) => void;
   setMergeTarget: (target: string) => void;
-  setDeleteConfirmText: (text: string) => void;
   setDeleteAcknowledged: (acknowledged: boolean) => void;
   openCreate: () => void;
   openEdit: (merchant: Merchant) => void;
@@ -69,7 +68,6 @@ export function useMerchantFormDialog(
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [deleteAction, setDeleteAction] = useState<DeleteAction>("soft");
   const [mergeTarget, setMergeTarget] = useState<string>("");
-  const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [deleteAcknowledged, setDeleteAcknowledged] = useState(false);
 
   // Merge default target effect
@@ -85,16 +83,8 @@ export function useMerchantFormDialog(
     }
   }, [deleteAction, editingMerchant, mergeTarget, merchants]);
 
-  // Reset delete confirm state when dialog closes
+  // Reset the acknowledgement when the action changes or the dialog closes
   useEffect(() => {
-    if (!isDialogOpen) {
-      setDeleteConfirmText("");
-      setDeleteAcknowledged(false);
-      return;
-    }
-    if (deleteAction !== "hard") {
-      setDeleteConfirmText("");
-    }
     setDeleteAcknowledged(false);
   }, [deleteAction, isDialogOpen]);
 
@@ -137,7 +127,6 @@ export function useMerchantFormDialog(
       logoFile,
       deleteAction,
       mergeTarget,
-      deleteConfirmText,
       deleteAcknowledged,
     },
     actions: {
@@ -148,7 +137,6 @@ export function useMerchantFormDialog(
       setLogoFile,
       setDeleteAction,
       setMergeTarget,
-      setDeleteConfirmText,
       setDeleteAcknowledged,
       openCreate,
       openEdit,

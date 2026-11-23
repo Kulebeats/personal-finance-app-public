@@ -5,7 +5,7 @@
  * CSV Format: Date, Merchant, Category, Account, Original Statement, Notes, Amount, Tags
  */
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
 import {
   Dialog,
   DialogContent,
@@ -19,24 +19,19 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Upload, FileText, AlertCircle, Loader2, X } from "lucide-react";
 import { useImportTransactions } from "@/hooks";
-import { isParsableMoneyString } from "@/lib/money";
 import { cn } from "@/lib/utils";
+import { parseTransactionCsv } from "./parseTransactionCsv";
+import { DateFormatSelect } from "../import/DateFormatSelect";
+import { ImportDatePreview } from "../import/ImportDatePreview";
+import type { ImportDateFormat } from "@shared/import-date";
+import { IMPORT_REVIEW_REQUIRED, type ApiError, type TransactionImportReviewItem } from "@/lib/api";
+import { ImportDuplicateDecisions, importDecisions } from "./ImportDuplicateDecisions";
 
 interface ImportTransactionsModalProps {
   accountId: string;
   accountName: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-}
-
-interface ParsedTransaction {
-  date: string;
-  merchant: string;
-  category?: string;
-  originalStatement?: string;
-  notes?: string;
-  amount: string;
-  tags?: string;
 }
 
 export function ImportTransactionsModal({
@@ -47,100 +42,45 @@ export function ImportTransactionsModal({
 }: ImportTransactionsModalProps) {
   const [file, setFile] = useState<File | null>(null);
   const [adjustBalance, setAdjustBalance] = useState(false);
-  const [parsedData, setParsedData] = useState<ParsedTransaction[]>([]);
+  const [sourceText, setSourceText] = useState<string | null>(null);
+  const [dateFormat, setDateFormat] = useState<ImportDateFormat>("auto");
+  const readVersion = useRef(0);
   const [parseError, setParseError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  // A-01: rows the server held back as possible duplicates, and the ones the member skips.
+  const [review, setReview] = useState<TransactionImportReviewItem[] | null>(null);
+  const [skipRows, setSkipRows] = useState<number[]>([]);
 
   const importTransactions = useImportTransactions();
-
-  const parseCSV = useCallback((text: string): ParsedTransaction[] => {
-    const lines = text.trim().split("\n");
-    if (lines.length < 2) {
-      throw new Error("CSV file must contain a header row and at least one data row");
-    }
-
-    // Skip header row
-    const dataLines = lines.slice(1);
-    const transactions: ParsedTransaction[] = [];
-
-    for (let i = 0; i < dataLines.length; i++) {
-      const line = dataLines[i].trim();
-      if (!line) continue;
-
-      // Parse CSV line (handling quoted fields)
-      const fields: string[] = [];
-      let field = "";
-      let inQuotes = false;
-
-      for (let j = 0; j < line.length; j++) {
-        const char = line[j];
-        if (char === '"') {
-          inQuotes = !inQuotes;
-        } else if (char === "," && !inQuotes) {
-          fields.push(field.trim());
-          field = "";
-        } else {
-          field += char;
-        }
-      }
-      fields.push(field.trim());
-
-      // Validate required fields
-      if (fields.length < 7) {
-        throw new Error(`Row ${i + 2}: Expected at least 7 columns, got ${fields.length}`);
-      }
-
-      const [date, merchant, category, , originalStatement, notes, amount, tags] = fields;
-
-      if (!date || !merchant || !amount) {
-        throw new Error(`Row ${i + 2}: Date, Merchant, and Amount are required`);
-      }
-
-      // Normalize thousands separators (the CSV contract uses "." as the
-      // decimal point), then strict-parse. This imports "1,234.56" correctly
-      // as 1234.56 instead of the old parseFloat("1,234.56") === 1 silent
-      // corruption, while still rejecting genuine garbage like "12abc".
-      const normalizedAmount = amount.replace(/,/g, "").trim();
-      if (!isParsableMoneyString(normalizedAmount)) {
-        throw new Error(`Row ${i + 2}: Invalid amount "${amount}"`);
-      }
-
-      transactions.push({
-        date,
-        merchant,
-        category: category || undefined,
-        originalStatement: originalStatement || undefined,
-        notes: notes || undefined,
-        amount: normalizedAmount,
-        tags: tags || undefined,
-      });
-    }
-
-    return transactions;
-  }, []);
+  const parsed = useMemo(() => {
+    if (sourceText === null) return { rows: [], error: null };
+    try { return { rows: parseTransactionCsv(sourceText, dateFormat), error: null }; }
+    catch (error) { return { rows: [], error: error instanceof Error ? error.message : "Failed to parse CSV" }; }
+  }, [sourceText, dateFormat]);
+  const parsedData = parsed.rows;
+  const clearReview = () => { setReview(null); setSkipRows([]); };
+  const displayedError = parseError ?? parsed.error;
 
   const handleFileSelect = useCallback(
     (selectedFile: File) => {
       setFile(selectedFile);
       setParseError(null);
-      setParsedData([]);
+      clearReview();
+      setSourceText(null);
+      const version = ++readVersion.current;
 
       const reader = new FileReader();
       reader.onload = (e) => {
-        try {
-          const text = e.target?.result as string;
-          const data = parseCSV(text);
-          setParsedData(data);
-        } catch (error) {
-          setParseError(error instanceof Error ? error.message : "Failed to parse CSV");
-        }
+        if (version !== readVersion.current) return;
+        setSourceText(String(e.target?.result ?? ""));
       };
       reader.onerror = () => {
+        if (version !== readVersion.current) return;
         setParseError("Failed to read file");
       };
       reader.readAsText(selectedFile);
     },
-    [parseCSV]
+    []
   );
 
   const handleDrop = useCallback(
@@ -159,24 +99,41 @@ export function ImportTransactionsModal({
   );
 
   const handleImport = async () => {
-    if (parsedData.length === 0) return;
+    if (parsedData.length === 0 || displayedError) return;
 
-    await importTransactions.mutateAsync({
-      id: accountId,
-      transactions: parsedData,
-      adjustBalance,
-    });
+    try {
+      await importTransactions.mutateAsync({
+        id: accountId,
+        transactions: parsedData,
+        adjustBalance,
+        decisions: review ? importDecisions(review, skipRows) : [],
+      });
+    } catch (error) {
+      const apiError = error as ApiError;
+      if (apiError.code !== IMPORT_REVIEW_REQUIRED) return;
+      // The fresh list replaces any earlier one; every row starts skipped (A-01).
+      const items = (apiError.details as { possibleDuplicates?: TransactionImportReviewItem[] } | undefined)?.possibleDuplicates ?? [];
+      setReview(items);
+      setSkipRows(items.map(item => item.row));
+      return;
+    }
 
     // Reset and close
     setFile(null);
-    setParsedData([]);
+    setSourceText(null);
+    setDateFormat("auto");
+    ++readVersion.current;
     setAdjustBalance(false);
+    clearReview();
     onOpenChange(false);
   };
 
   const handleClose = () => {
+    clearReview();
     setFile(null);
-    setParsedData([]);
+    setSourceText(null);
+    setDateFormat("auto");
+    ++readVersion.current;
     setParseError(null);
     setAdjustBalance(false);
     onOpenChange(false);
@@ -193,6 +150,7 @@ export function ImportTransactionsModal({
         </DialogHeader>
 
         <div className="space-y-4 py-4">
+          <DateFormatSelect value={dateFormat} onChange={format => { setDateFormat(format); clearReview(); }} />
           {/* File Upload Zone */}
           <div
             className={cn(
@@ -200,7 +158,7 @@ export function ImportTransactionsModal({
               isDragging
                 ? "border-primary bg-primary/5"
                 : "border-muted-foreground/25 hover:border-muted-foreground/50",
-              file && !parseError && "border-emerald-500 bg-emerald-50"
+              file && parsedData.length > 0 && !displayedError && "border-emerald-500 bg-emerald-50"
             )}
             onDragOver={(e) => {
               e.preventDefault();
@@ -221,7 +179,8 @@ export function ImportTransactionsModal({
                   size="sm"
                   onClick={() => {
                     setFile(null);
-                    setParsedData([]);
+                    setSourceText(null);
+                    ++readVersion.current;
                     setParseError(null);
                   }}
                 >
@@ -258,15 +217,21 @@ export function ImportTransactionsModal({
           </div>
 
           {/* Parse Error */}
-          {parseError && (
-            <div className="flex items-start gap-2 p-3 bg-rose-50 border border-rose-200 rounded-md">
+          {displayedError && (
+            <div role="alert" className="flex items-start gap-2 p-3 bg-rose-50 border border-rose-200 rounded-md">
               <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
               <div>
                 <p className="text-sm font-medium text-rose-800">Error parsing file</p>
-                <p className="text-sm text-rose-700">{parseError}</p>
+                <p className="text-sm text-rose-700">{displayedError}</p>
               </div>
             </div>
           )}
+          {review && review.length > 0 && (
+            <ImportDuplicateDecisions items={review} rows={parsedData} skipRows={skipRows} onSkipRowsChange={setSkipRows} />
+          )}
+          {parsedData.length > 0 && <ImportDatePreview dates={parsedData.map((row, index) => ({
+            rowIndex: index + 2, dateString: row.date,
+          }))} />}
 
           {/* Adjust Balance Toggle */}
           <div className="flex items-center justify-between p-4 bg-muted/50 rounded-lg">
@@ -313,6 +278,8 @@ export function ImportTransactionsModal({
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 Importing...
               </>
+            ) : review ? (
+              `Import with these choices`
             ) : (
               `Add ${parsedData.length} transactions`
             )}

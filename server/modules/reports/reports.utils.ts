@@ -10,7 +10,10 @@ import { Request, Response } from "express";
 import { z } from "zod";
 import { logger } from "../../utils/logger";
 import { householdRepository } from "../../repositories/HouseholdRepository";
+import { BudgetDenominationUnavailable } from "../../core/money/budget-denomination";
+import { ForbiddenError } from "../../core/errors";
 import type { ReportScope } from "./reports.types";
+import { MISSING_FX_RATE_STATUS, missingFxRateBody } from "../../core/errors/missingFxRate";
 
 /**
  * Resolve report scope based on user role
@@ -102,6 +105,10 @@ export function handleReportError(
   error: unknown,
   context: string
 ): Response {
+  if (error instanceof ForbiddenError) return res.status(error.statusCode).json(error.toJSON());
+  if (error instanceof BudgetDenominationUnavailable) return res.status(error.statusCode).json(error.toJSON());
+  const missingRate = missingFxRateBody(error);
+  if (missingRate) return res.status(MISSING_FX_RATE_STATUS).json(missingRate);
   if (error instanceof z.ZodError) {
     return res.status(400).json({
       success: false,

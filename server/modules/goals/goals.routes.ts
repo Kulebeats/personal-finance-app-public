@@ -11,7 +11,8 @@ import { Router } from "express";
 import multer from "multer";
 import { householdGuard } from "../../middleware/householdGuard";
 import { requireRole } from "../../middleware/validateEntity";
-import { generalLimiter, analyticsLimiter } from "../../middleware/rateLimit";
+import { requireCapability } from "../../core/authz/requireCapability";
+import { analyticsLimiter } from "../../middleware/rateLimit";
 import { asyncHandler } from "../../utils/errorHandler";
 import { goalsController } from "./goals.controller";
 
@@ -23,8 +24,6 @@ const upload = multer({
 
 router.use(householdGuard);
 
-// Apply general rate limiting to all routes
-router.use(generalLimiter);
 
 // ============================================================================
 // GLOBAL ENDPOINTS (before :id routes)
@@ -48,12 +47,12 @@ router.post(
 );
 router.post(
   "/debt-strategy",
-  requireRole("member"),
+  requireCapability("financial.read"),
   asyncHandler(goalsController.calculateDebtStrategy)
 );
 router.post(
   "/calculate-projection",
-  requireRole("member"),
+  requireCapability("financial.read"),
   asyncHandler(goalsController.calculateProjection)
 );
 
@@ -115,11 +114,9 @@ router.get("/:id/transfers", asyncHandler(goalsController.getGoalTransfers));
 router.get("/:id/transactions", asyncHandler(goalsController.getGoalTransactions));
 router.get("/:id/projection", asyncHandler(goalsController.getProjection));
 router.get("/:id/contributions", asyncHandler(goalsController.getContributions));
-router.post(
-  "/:id/contribute",
-  requireRole("member"),
-  asyncHandler(goalsController.addContribution)
-);
+router.post("/:id/contribute", requireRole("member"), asyncHandler(goalsController.addContribution));
+router.post("/:id/contributions/from-account", requireRole("member"), asyncHandler(goalsController.contributeFromAccount));
+router.post("/:id/contributions/:contributionId/reverse", requireRole("member"), asyncHandler(goalsController.reverseContribution));
 router.post(
   "/:id/transactions",
   requireRole("member"),

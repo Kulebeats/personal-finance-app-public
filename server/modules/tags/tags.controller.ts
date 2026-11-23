@@ -12,29 +12,20 @@ import { logger } from "../../utils/logger";
 import { ValidationError } from "../../core/errors";
 import { success, created, noContent } from "../../core/http/responses";
 import { businessAuditService } from "../../services/BusinessAuditService";
-import { createTagSchema, updateTagSchema } from "./tags.validation";
+import { createTagSchema, updateTagSchema, listTagsQuerySchema, tagTransactionsQuerySchema, analyticsQuerySchema, suggestQuerySchema, mergeTagsSchema } from "./tags.validation";
 import { tagService } from "./tags.service";
+import { tagReadService } from "./tags.read.service";
+import { normalizeTagName } from "./tags.name-guard";
 
 // Schema for adding tags to transaction (not in validation file since it's transaction-specific)
 import { z } from "zod";
 const addTagsSchema = z.object({
   tagIds: z.array(z.string().uuid()),
-});
+}).strict();
 
 const setTagsSchema = z.object({
   tagIds: z.array(z.string().uuid()),
-});
-
-const getTagTransactionsQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).optional().default(50),
-  offset: z.coerce.number().int().min(0).optional().default(0),
-});
-
-// P3: Backend tag search filtering
-const listTagsQuerySchema = z.object({
-  search: z.string().max(100).optional(),
-  limit: z.coerce.number().min(1).max(500).optional(),
-});
+}).strict();
 
 export const tagsController = {
   // =========================================================================
@@ -43,13 +34,10 @@ export const tagsController = {
 
   async list(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
-
-      // P3: Backend tag search filtering
       const parseResult = listTagsQuerySchema.safeParse(req.query);
-      const options = parseResult.success ? parseResult.data : {};
+      if (!parseResult.success) throw new ValidationError("Invalid query parameters", parseResult.error.errors);
 
-      const tags = await tagService.listTags(householdId, options);
+      const tags = await tagReadService.listTags(req.householdContext!, parseResult.data);
       success(res, tags);
     } catch (error) {
       next(error);
@@ -58,9 +46,8 @@ export const tagsController = {
 
   async getById(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
       const { id } = req.params;
-      const tag = await tagService.getTagById(id, householdId);
+      const tag = await tagReadService.getTagById(id, req.householdContext!);
       success(res, tag);
     } catch (error) {
       next(error);
@@ -96,7 +83,7 @@ export const tagsController = {
         ipAddress: businessAuditService.getIpAddress(req),
       });
 
-      created(res, tag);
+      created(res, await tagReadService.projectMutationTag(req.householdContext!, tag));
     } catch (error) {
       next(error);
     }
@@ -130,11 +117,13 @@ export const tagsController = {
         entityType: "tag",
         entityId: id,
         oldValue: { name: oldValue.name, color: oldValue.color },
-        newValue: parseResult.data,
+        // A rename records the name as stored: trimmed and NFC-normalised (N5)
+        newValue: parseResult.data.name === undefined ? parseResult.data
+          : { ...parseResult.data, name: normalizeTagName(parseResult.data.name) },
         ipAddress: businessAuditService.getIpAddress(req),
       });
 
-      success(res, newValue);
+      success(res, await tagReadService.projectMutationTag(req.householdContext!, newValue));
     } catch (error) {
       next(error);
     }
@@ -169,13 +158,11 @@ export const tagsController = {
 
   async getTransactionTags(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId, userId } = req.householdContext!;
       const { transactionId } = req.params;
 
-      const tags = await tagService.getTransactionTags(
+      const tags = await tagReadService.getTransactionTags(
         transactionId,
-        householdId,
-        userId
+        req.householdContext!,
       );
       success(res, tags);
     } catch (error) {
@@ -185,7 +172,6 @@ export const tagsController = {
 
   async addTransactionTags(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId, userId } = req.householdContext!;
       const { transactionId } = req.params;
       const parseResult = addTagsSchema.safeParse(req.body);
       if (!parseResult.success) {
@@ -198,25 +184,14 @@ export const tagsController = {
         );
       }
 
-      const tags = await tagService.addTransactionTags(
+      await tagService.addTransactionTags(
         transactionId,
         parseResult.data.tagIds,
-        householdId,
-        userId
+        req.householdContext!,
+        businessAuditService.getIpAddress(req)
       );
 
-      // Audit logging
-      await businessAuditService.log({
-        householdId,
-        userId,
-        action: "LINK",
-        entityType: "transaction",
-        entityId: transactionId,
-        details: { tagIds: parseResult.data.tagIds, operation: "add_tags" },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
-
-      success(res, tags);
+      success(res, await tagReadService.projectMutationTransactionTags(req.householdContext!, transactionId));
     } catch (error) {
       next(error);
     }
@@ -224,28 +199,16 @@ export const tagsController = {
 
   async removeTransactionTag(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId, userId } = req.householdContext!;
       const { transactionId, tagId } = req.params;
 
-      const tags = await tagService.removeTransactionTag(
+      await tagService.removeTransactionTag(
         transactionId,
         tagId,
-        householdId,
-        userId
+        req.householdContext!,
+        businessAuditService.getIpAddress(req)
       );
 
-      // Audit logging
-      await businessAuditService.log({
-        householdId,
-        userId,
-        action: "UNLINK",
-        entityType: "transaction",
-        entityId: transactionId,
-        details: { tagId, operation: "remove_tag" },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
-
-      success(res, tags);
+      success(res, await tagReadService.projectMutationTransactionTags(req.householdContext!, transactionId));
     } catch (error) {
       next(error);
     }
@@ -258,7 +221,6 @@ export const tagsController = {
    */
   async setTransactionTags(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId, userId } = req.householdContext!;
       const { transactionId } = req.params;
 
       const parseResult = setTagsSchema.safeParse(req.body);
@@ -272,25 +234,14 @@ export const tagsController = {
         );
       }
 
-      const updatedTags = await tagService.setTransactionTags(
+      await tagService.setTransactionTags(
         transactionId,
         parseResult.data.tagIds,
-        householdId,
-        userId
+        req.householdContext!,
+        businessAuditService.getIpAddress(req)
       );
 
-      // Audit logging
-      await businessAuditService.log({
-        householdId,
-        userId,
-        action: "UPDATE",
-        entityType: "transaction",
-        entityId: transactionId,
-        details: { tagIds: parseResult.data.tagIds, operation: "set_tags" },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
-
-      success(res, updatedTags);
+      success(res, await tagReadService.projectMutationTransactionTags(req.householdContext!, transactionId));
     } catch (error) {
       next(error);
     }
@@ -303,10 +254,9 @@ export const tagsController = {
    */
   async getTagTransactions(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId, userId } = req.householdContext!;
       const { id } = req.params;
 
-      const parseResult = getTagTransactionsQuerySchema.safeParse(req.query);
+      const parseResult = tagTransactionsQuerySchema.safeParse(req.query);
       if (!parseResult.success) {
         throw new ValidationError(
           "Invalid query parameters",
@@ -317,10 +267,9 @@ export const tagsController = {
         );
       }
 
-      const result = await tagService.getTagTransactions(
+      const result = await tagReadService.getTagTransactions(
         id,
-        householdId,
-        userId,
+        req.householdContext!,
         parseResult.data.limit,
         parseResult.data.offset
       );
@@ -339,34 +288,18 @@ export const tagsController = {
   async mergeTags(req: Request, res: Response, next: NextFunction) {
     try {
       const { householdId, userId } = req.householdContext!;
-      const { sourceTagIds, targetTagId } = req.body;
-
-      if (!sourceTagIds || !Array.isArray(sourceTagIds)) {
-        throw new ValidationError("sourceTagIds must be an array");
+      const parsed = mergeTagsSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new ValidationError(parsed.error.errors[0]?.message ?? "Invalid merge request", parsed.error.errors);
       }
-      if (!targetTagId) {
-        throw new ValidationError("targetTagId is required");
-      }
+      const { sourceTagIds, targetTagId } = parsed.data;
 
+      // The audit row is written inside the merge transaction (Rule 9, NEW-19).
       const result = await tagService.mergeTags({
         sourceTagIds,
         targetTagId,
         householdId,
-      });
-
-      // Audit logging
-      await businessAuditService.log({
-        householdId,
-        userId,
-        action: "UPDATE",
-        entityType: "tag",
-        entityId: targetTagId,
-        details: {
-          operation: "merge_tags",
-          sourceTagIds,
-          mergedTagNames: result.mergedTagNames,
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
+        audit: { userId, ipAddress: businessAuditService.getIpAddress(req) },
       });
 
       logger.info("Merged tags", {
@@ -375,7 +308,7 @@ export const tagsController = {
         targetTagId,
       });
 
-      success(res, result);
+      success(res, { ...result, targetTag: await tagReadService.projectMutationTag(req.householdContext!, result.targetTag) });
     } catch (error) {
       next(error);
     }
@@ -408,7 +341,7 @@ export const tagsController = {
         });
       }
 
-      success(res, { message: "Tag archived successfully", tag: result });
+      success(res, { message: "Tag archived successfully", tag: await tagReadService.projectMutationTag(req.householdContext!, result) });
     } catch (error) {
       next(error);
     }
@@ -421,10 +354,9 @@ export const tagsController = {
    */
   async getAnalytics(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
-      const limit = req.query.limit ? parseInt(req.query.limit as string) : 20;
-
-      const analytics = await tagService.getTagAnalytics(householdId, limit);
+      const parsed = analyticsQuerySchema.safeParse(req.query);
+      if (!parsed.success) throw new ValidationError("Invalid query parameters", parsed.error.errors);
+      const analytics = await tagReadService.getTagAnalytics(req.householdContext!, parsed.data.limit);
       success(res, analytics);
     } catch (error) {
       next(error);
@@ -438,14 +370,9 @@ export const tagsController = {
    */
   async suggestTags(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
-      const { transactionName, merchantName, limit } = req.query;
-
-      const suggestions = await tagService.suggestTags(householdId, {
-        transactionName: transactionName as string | undefined,
-        merchantName: merchantName as string | undefined,
-        limit: limit ? parseInt(limit as string) : 5,
-      });
+      const parsed = suggestQuerySchema.safeParse(req.query);
+      if (!parsed.success) throw new ValidationError("Invalid query parameters", parsed.error.errors);
+      const suggestions = await tagReadService.suggestTags(req.householdContext!, parsed.data);
 
       success(res, suggestions);
     } catch (error) {
@@ -488,7 +415,7 @@ export const tagsController = {
         skipped: result.skipped,
       });
 
-      success(res, result);
+      success(res, { ...result, tags: await tagReadService.projectMutationTags(req.householdContext!, result.tags) });
     } catch (error) {
       next(error);
     }

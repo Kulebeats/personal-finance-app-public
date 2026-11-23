@@ -1,7 +1,11 @@
-import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { db } from "../db";
 import { tags, transactionTags, transactions, type Tag } from "@shared/schema";
 import { withTransaction, type TransactionType } from "../utils/withTransaction";
+import { couponCashDescriptionFields } from "../services/grz/couponCashDescription";
+import { normalizeTagName } from "../modules/tags/tags.name-guard";
+
+type TagExecutor = typeof db | TransactionType;
 
 type CreateTagInput = {
   householdId: string;
@@ -86,31 +90,43 @@ export class TagRepository {
       .where(and(inArray(tags.id, ids), eq(tags.householdId, householdId)));
   }
 
+  /**
+   * The household's tag whose name equals `name` in any case (NEW-36), ignoring
+   * `excludeTagId`. Pass the write transaction so the check runs under its lock.
+   */
   async findByName(
     householdId: string,
-    name: string
+    name: string,
+    options: { excludeTagId?: string; executor?: TagExecutor } = {}
   ): Promise<Tag | undefined> {
-    const result = await db
+    const { excludeTagId, executor = db } = options;
+    const result = await executor
       .select()
       .from(tags)
-      .where(and(eq(tags.householdId, householdId), eq(tags.name, name)))
+      .where(and(
+        eq(tags.householdId, householdId),
+        sql`LOWER(${tags.name}) = LOWER(${name})`,
+        excludeTagId ? ne(tags.id, excludeTagId) : undefined,
+      ))
       .limit(1);
     return result[0];
   }
 
-  async create(data: CreateTagInput): Promise<Tag> {
-    const result = await db.insert(tags).values(data).returning();
+  async create(data: CreateTagInput, executor: TagExecutor = db): Promise<Tag> {
+    const result = await executor.insert(tags).values({ ...data, name: normalizeTagName(data.name) }).returning();
     return result[0];
   }
 
   async update(
     id: string,
     householdId: string,
-    data: UpdateTagInput
+    data: UpdateTagInput,
+    executor: TagExecutor = db
   ): Promise<Tag | undefined> {
-    const result = await db
+    const named = data.name === undefined ? data : { ...data, name: normalizeTagName(data.name) };
+    const result = await executor
       .update(tags)
-      .set({ ...data, updatedAt: new Date() })
+      .set({ ...named, updatedAt: new Date() })
       .where(and(eq(tags.id, id), eq(tags.householdId, householdId)))
       .returning();
     return result[0];
@@ -254,7 +270,7 @@ export class TagRepository {
       .select({
         id: transactions.id,
         date: transactions.date,
-        name: transactions.name,
+        name: couponCashDescriptionFields().name,
         amount: transactions.amount,
         type: transactions.type,
       })

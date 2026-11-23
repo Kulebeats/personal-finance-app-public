@@ -12,6 +12,8 @@ import {
   PasswordStrengthMeter,
   usePasswordValidation,
 } from "@/components/auth";
+import { PASSWORD_MAX_LENGTH } from "@shared/password-policy";
+import { fieldErrorProps, type FieldMessages } from "../authFieldErrors";
 
 interface RegisterFormProps {
   fullName: string;
@@ -25,6 +27,7 @@ interface RegisterFormProps {
   showPassword: boolean;
   capsLockOn: boolean;
   isLoading: boolean;
+  fieldErrors?: FieldMessages;
   onSubmit: (e: React.FormEvent) => void;
   onTogglePassword: () => void;
   onKeyEvent: (e: React.KeyboardEvent) => void;
@@ -43,6 +46,7 @@ export function RegisterForm({
   showPassword,
   capsLockOn,
   isLoading,
+  fieldErrors = {},
   onSubmit,
   onTogglePassword,
   onKeyEvent,
@@ -62,15 +66,17 @@ export function RegisterForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
-      <FormField label="Full Name" htmlFor="fullName" required>
+      <FormField label="Full Name" htmlFor="fullName" required error={fieldErrors.fullName}>
         <Input
           id="fullName"
+          disabled={isLoading}
           type="text"
           placeholder="John Doe"
           value={fullName}
           onChange={(e) => setFullName(e.target.value)}
           autoComplete="name"
           required
+          {...fieldErrorProps("fullName", fieldErrors.fullName)}
         />
       </FormField>
 
@@ -78,10 +84,12 @@ export function RegisterForm({
         label="Username"
         htmlFor="username"
         required
+        error={fieldErrors.username}
         tooltip="Choose a unique username (min 3 characters)"
       >
         <Input
           id="username"
+          disabled={isLoading}
           type="text"
           placeholder="johndoe"
           value={username}
@@ -89,25 +97,29 @@ export function RegisterForm({
           autoComplete="username"
           required
           minLength={3}
+          {...fieldErrorProps("username", fieldErrors.username)}
         />
       </FormField>
 
-      <FormField label="Email" htmlFor="registerEmail" required>
+      <FormField label="Email" htmlFor="registerEmail" required error={fieldErrors.email}>
         <Input
           id="registerEmail"
+          disabled={isLoading}
           type="email"
           placeholder="you@example.com"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           autoComplete="email"
           required
+          {...fieldErrorProps("registerEmail", fieldErrors.email)}
         />
       </FormField>
 
-      <FormField label="Password" htmlFor="registerPassword" required>
+      <FormField label="Password" htmlFor="registerPassword" required error={fieldErrors.password}>
         <div className="relative">
           <Input
             id="registerPassword"
+            disabled={isLoading}
             type={showPassword ? "text" : "password"}
             placeholder="Create a strong password"
             value={password}
@@ -116,9 +128,10 @@ export function RegisterForm({
             onKeyUp={onKeyEvent}
             autoComplete="new-password"
             className="pr-10"
-            aria-describedby="password-requirements"
             required
             minLength={8}
+            maxLength={PASSWORD_MAX_LENGTH}
+            {...fieldErrorProps("registerPassword", fieldErrors.password, "password-requirements")}
           />
           <Button
             type="button"

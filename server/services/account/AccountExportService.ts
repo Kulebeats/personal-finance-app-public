@@ -10,10 +10,14 @@
 import { Money } from "../../core/money";
 import { sanitizeCsvRow } from "../../core/csv";
 import { accountRepository } from "../../repositories/AccountRepository";
+import { lockAccountHousehold } from "../../repositories/AccountCreationGrant";
+import { accountSnapshotRepository } from "../../repositories/AccountSnapshotRepository";
+import { withTransaction } from "../../utils/withTransaction";
 import { NotFoundError, ValidationError } from "../../utils/errorHandler";
 import { logger } from "../../utils/logger";
 import { businessAuditService } from "../BusinessAuditService";
 import type { AccountReportingService } from "./AccountReportingService";
+import { readAccountBalanceHistory } from "../../repositories/AccountBalanceHistoryRead";
 
 /**
  * Export accounts summary as CSV
@@ -24,8 +28,7 @@ export async function exportSummary(
   householdId: string,
   userId: string,
 ): Promise<string> {
-  const accounts = await accountService.getAccounts(householdId, userId);
-  const summary = await accountService.getNetWorthSummary(householdId, userId);
+  const { accounts, summary } = await accountService.getSummaryExportData(householdId, userId);
 
   const lines: string[] = [];
   lines.push("Account Name,Type,Institution,Balance,Currency,Is Asset");
@@ -57,6 +60,11 @@ export async function exportSummary(
     ]),
   );
   lines.push(sanitizeCsvRow(["Net Worth", "", "", "", summary.netWorth]));
+  lines.push(sanitizeCsvRow(["Scope", "Visible account-linked wealth"]));
+  lines.push(sanitizeCsvRow(["Base Currency", summary.currency]));
+  lines.push(sanitizeCsvRow(["Valuation Date", summary.valuationDate]));
+  lines.push(sanitizeCsvRow(["FX Coverage", "Trusted same-day observations only; older balance-rate policy unresolved"]));
+  lines.push(sanitizeCsvRow(["Coverage", "Legacy instruments without proven account access are not included"]));
 
   return lines.join("\n");
 }
@@ -71,12 +79,8 @@ export async function exportBalanceHistory(
   householdId: string,
   userId: string,
 ): Promise<string> {
-  const history = await accountService.getBalanceHistory(
-    accountId,
-    householdId,
-    userId,
-    "all",
-  );
+  const history = await readAccountBalanceHistory(accountId, householdId, userId,
+    getStartDateFromRange("all").toISOString().slice(0, 10), new Date().toISOString().slice(0, 10), "financial.export", true);
 
   const lines: string[] = [];
   lines.push("Date,Amount");
@@ -96,6 +100,7 @@ export async function importBalanceHistory(
   data: { date: string; amount: string }[],
   householdId: string,
   userId: string,
+  ipAddress?: string,
 ): Promise<{ imported: number }> {
   // Verify access
   const account = await accountRepository.findByIdWithVisibility(
@@ -126,36 +131,39 @@ export async function importBalanceHistory(
     ]);
   }
 
-  // Import snapshots
-  const imported = await accountRepository.importBalanceSnapshots(
-    accountId,
-    data.map((d) => ({
-      date: d.date,
-      balance: d.amount,
-    })),
-  );
+  // NEW-32: the snapshots and their one audit row commit together; a failed
+  // audit insert leaves no snapshot behind.
+  const imported = await withTransaction(async (tx) => {
+    await lockAccountHousehold(tx, householdId);
+    const count = await accountSnapshotRepository.importBalanceSnapshots(
+      accountId,
+      data.map((d) => ({ date: d.date, balance: d.amount })),
+      tx,
+    );
+    await businessAuditService.logCreate({
+      tx,
+      householdId: account.isPrivate ? null : householdId,
+      userId,
+      entityType: "balance_history_import",
+      entityId: accountId,
+      newValue: {
+        accountId,
+        accountName: account.name,
+        imported: count,
+        dateRange: {
+          start: data.length > 0 ? data[0].date : null,
+          end: data.length > 0 ? data[data.length - 1].date : null,
+        },
+      },
+      ipAddress,
+    });
+    return count;
+  });
 
   logger.info("Imported balance history", {
     accountId,
     householdId,
     count: imported,
-  });
-
-  // Audit log the balance history import operation
-  await businessAuditService.logCreate({
-    householdId,
-    userId,
-    entityType: "balance_history_import",
-    entityId: accountId,
-    newValue: {
-      accountId,
-      accountName: account.name,
-      imported,
-      dateRange: {
-        start: data.length > 0 ? data[0].date : null,
-        end: data.length > 0 ? data[data.length - 1].date : null,
-      },
-    },
   });
 
   return { imported };

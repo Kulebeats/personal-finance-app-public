@@ -28,6 +28,7 @@ import {
   users,
   households,
   householdMembers,
+  accounts,
   goals,
   goalContributions,
   auditLogs,
@@ -222,6 +223,25 @@ describe("Goals REAL-DB HTTP Integration (SCP-316)", () => {
       expect(persisted).toBeDefined();
       expect(persisted.householdId).toBe(householdId);
       expect(persisted.targetAmount).toBe("5000.00");
+    });
+
+    it("validates each payment denomination when editing an existing pay-down goal", async () => {
+      const [account] = await db.insert(accounts).values({ householdId, ownerUserId: userId,
+        name: "USD credit", type: "credit", currency: "USD", balance: "600", isAsset: false }).returning();
+      const [goal] = await db.insert(goals).values({ householdId, createdBy: userId, type: "pay_down",
+        goalType: "credit_card", name: "Existing credit payoff", debtAccountId: account.id, currency: "USD",
+        targetAmount: "600", currentAmount: "600", originalBalance: "600", minimumPayment: "10", monthlyPayment: "50",
+      }).returning();
+      const change = (body: Record<string, unknown>) => request(app).put(`/api/goals/${goal.id}`).set("Cookie", authCookie).send(body);
+      const stored = () => db.select().from(goals).where(eq(goals.id, goal.id));
+      for (const field of ["minimumPayment", "monthlyPayment", "oneTimePayment"]) {
+        await change({ [field]: { amount: "25.00", currency: "ZMW" } }).expect(400);
+        expect(await stored()).toEqual([goal]);
+      }
+      await change({ minimumPayment: { amount: "20.00", currency: "USD" }, monthlyPayment: { amount: "60.00", currency: "ZMW" } }).expect(400);
+      expect(await stored()).toEqual([goal]);
+      await change({ monthlyPayment: { amount: "60.00", currency: "USD" } }).expect(200);
+      expect((await stored())[0]).toMatchObject({ currency: "USD", minimumPayment: "10.00", monthlyPayment: "60.00" });
     });
 
     it("writes a CREATE audit row for the goal (Rule 9)", async () => {

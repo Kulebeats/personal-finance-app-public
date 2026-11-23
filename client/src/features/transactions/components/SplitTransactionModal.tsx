@@ -5,7 +5,7 @@
  * Allows allocating portions of the total amount to different categories.
  */
 
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo } from "react";
 import {
   Dialog,
   DialogContent,
@@ -29,21 +29,21 @@ import {
 import { Plus, Trash2, AlertCircle } from "lucide-react";
 import {
   formatCurrency,
-  formatAmount,
   toMoneyDto,
   parseMoneyString,
   sumMoneyValues,
-  multiplyMoneyDto,
 } from "@/lib/money";
 import { useCategories } from "@/hooks/useCategories";
 import type { TransactionWithDetails } from "../types";
-import type { MoneyDto } from "@shared/money";
+import type { UpdateTransactionInput } from "@/lib/api";
 
 interface SplitItem {
   id: string;
   amount: string;
   categoryId: string;
   notes: string;
+  merchantId?: string | null;
+  displayOrder?: number;
 }
 
 interface SplitTransactionModalProps {
@@ -51,7 +51,7 @@ interface SplitTransactionModalProps {
   onOpenChange: (open: boolean) => void;
   transaction: TransactionWithDetails | null;
   onSubmit: (
-    splits: Array<{ amount: MoneyDto; categoryId: string; notes?: string }>,
+    splits: NonNullable<UpdateTransactionInput["splits"]>, expectedUpdatedAt: string,
   ) => void;
   isLoading?: boolean;
 }
@@ -60,13 +60,16 @@ function generateId(): string {
   return Math.random().toString(36).substring(2, 9);
 }
 
-export function SplitTransactionModal({
-  open,
-  onOpenChange,
-  transaction,
-  onSubmit,
-  isLoading = false,
-}: Readonly<SplitTransactionModalProps>) {
+export function SplitTransactionModal(props: Readonly<SplitTransactionModalProps>) {
+  if (!props.open || !props.transaction) return null;
+  return <SplitEditor key={props.transaction.id} {...props} transaction={props.transaction} />;
+}
+
+function SplitEditor({ transaction: current, onOpenChange, onSubmit, isLoading }: Readonly<
+  SplitTransactionModalProps & { transaction: TransactionWithDetails }
+>) {
+  // Keep the opening version with the user's draft until this editor closes.
+  const [transaction] = useState(current);
   const { data: categoriesData } = useCategories();
   const categories = categoriesData?.categories ?? [];
 
@@ -81,48 +84,31 @@ export function SplitTransactionModal({
     return groups;
   }, [categories]);
 
-  // Initialize with two empty splits
-  const [splits, setSplits] = useState<SplitItem[]>([
-    { id: generateId(), amount: "", categoryId: "", notes: "" },
-    { id: generateId(), amount: "", categoryId: "", notes: "" },
-  ]);
-
-  // Reset when modal opens
-  const handleOpenChange = useCallback(
-    (isOpen: boolean) => {
-      if (isOpen && transaction) {
-        const halfAmount = multiplyMoneyDto(transaction.amount, 0.5).amount;
-        setSplits([
-          {
-            id: generateId(),
-            amount: halfAmount,
-            categoryId: transaction.categoryId ?? "",
-            notes: "",
-          },
-          {
-            id: generateId(),
-            amount: halfAmount,
-            categoryId: "",
-            notes: "",
-          },
-        ]);
-      }
-      onOpenChange(isOpen);
-    },
-    [onOpenChange, transaction],
-  );
-
-  // Calculate totals with Decimal precision (avoid float drift on split sums).
-  const totalAmount = transaction
-    ? parseMoneyString(transaction.amount.amount).abs()
-    : parseMoneyString(0);
+  const totalAmount = parseMoneyString(transaction.amount.amount);
+  const currency = transaction.currency === undefined ? transaction.amount.currency : transaction.currency;
+  const knownCurrency = !!currency && transaction.amount.currency === currency &&
+    (transaction.splits ?? []).every(split => split.amount.currency === currency);
+  const [splits, setSplits] = useState<SplitItem[]>(() => {
+    if (transaction.splits?.length) return transaction.splits.map(split => ({
+      id: split.id, amount: split.amount.amount, categoryId: split.categoryId ?? "",
+      merchantId: split.merchantId, notes: split.notes ?? "", displayOrder: split.displayOrder,
+    }));
+    const half = totalAmount.dividedBy(2).toFixed(2);
+    return [
+      { id: generateId(), amount: half, categoryId: transaction.categoryId ?? "", notes: "" },
+      { id: generateId(), amount: totalAmount.minus(half).toFixed(2), categoryId: "", notes: "" },
+    ];
+  });
   const allocatedAmount = useMemo(
     () => sumMoneyValues(splits.map((split) => split.amount)),
     [splits],
   );
 
   const remainingAmount = totalAmount.minus(allocatedAmount);
-  const isBalanced = remainingAmount.abs().lessThan(0.01);
+  const isBalanced = remainingAmount.isZero() && splits.every(split =>
+    /^\d+(?:\.\d{1,2})?$/.test(split.amount) && parseMoneyString(split.amount).gt(0));
+  const canSave = isBalanced && knownCurrency && Number.isFinite(Date.parse(transaction.updatedAt)) &&
+    (transaction.type === "expense" || transaction.type === "income") && splits.length <= 50;
 
   // Split handlers
   const addSplit = () => {
@@ -138,39 +124,34 @@ export function SplitTransactionModal({
     }
   };
 
-  const updateSplit = (id: string, field: keyof SplitItem, value: string) => {
+  const updateSplit = (id: string, field: "amount" | "categoryId" | "notes", value: string) => {
     setSplits(splits.map((s) => (s.id === id ? { ...s, [field]: value } : s)));
   };
 
   const handleSubmit = () => {
-    if (!transaction || !isBalanced) return;
-
-    const currency = transaction.amount.currency;
-    const splitData = splits
-      .filter((s) => parseMoneyString(s.amount).greaterThan(0) && s.categoryId)
-      .map((s) => ({
-        amount: toMoneyDto(s.amount, currency),
-        categoryId: s.categoryId,
-        notes: s.notes || undefined,
-      }));
-
-    onSubmit(splitData);
+    if (!canSave || !currency) return;
+    const retainOrder = splits.every((s, index) => s.displayOrder !== undefined &&
+      (index === 0 || s.displayOrder > (splits[index - 1].displayOrder ?? -1)));
+    onSubmit(splits.map((s, index) => ({
+      amount: toMoneyDto(s.amount, currency), categoryId: s.categoryId || null, notes: s.notes || undefined,
+      ...(s.merchantId ? { merchantId: s.merchantId } : {}),
+      displayOrder: retainOrder ? s.displayOrder : index,
+    })), transaction.updatedAt);
   };
-
-  if (!transaction) return null;
 
   const displayName =
     transaction.merchantName || transaction.name || "Transaction";
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
+    <Dialog open onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Split Transaction</DialogTitle>
           <DialogDescription>
             Divide{" "}
             <span className="font-medium text-foreground">{displayName}</span> (
-            {formatCurrency(transaction.amount)}) across multiple categories.
+            {knownCurrency ? formatCurrency(transaction.amount) : `${transaction.amount.amount}, currency unknown`}) across multiple categories.
+            {!knownCurrency && " Reconcile the transaction currency before saving allocations."}
           </DialogDescription>
         </DialogHeader>
 
@@ -259,6 +240,7 @@ export function SplitTransactionModal({
             variant="outline"
             size="sm"
             onClick={addSplit}
+            disabled={splits.length >= 50}
             className="w-full"
           >
             <Plus className="h-4 w-4 mr-1" />
@@ -285,7 +267,7 @@ export function SplitTransactionModal({
           >
             {isBalanced
               ? "✓"
-              : `$${formatAmount(remainingAmount.abs().toNumber())}`}
+              : remainingAmount.abs().toFixed(2)}
           </span>
         </div>
 
@@ -297,7 +279,7 @@ export function SplitTransactionModal({
           >
             Cancel
           </Button>
-          <Button onClick={handleSubmit} disabled={isLoading || !isBalanced}>
+          <Button onClick={handleSubmit} disabled={isLoading || !canSave}>
             {isLoading ? "Saving..." : "Save Splits"}
           </Button>
         </DialogFooter>

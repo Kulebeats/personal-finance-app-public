@@ -27,6 +27,19 @@ const {
   },
 }));
 
+vi.mock("../GoalViewerProgress", () => ({
+  readGoalSourceVisibility: vi.fn(async (_actor: unknown, ids: string[]) =>
+    new Map(ids.map((id) => [id, { progressVisible: true, linkedAccountVisible: true, debtAccountVisible: true }]))),
+}));
+
+const ACTOR = { householdId: "house-123", userId: "user-123", role: "owner" as const };
+
+/** Payoff readers return null when progress is hidden; these cases expect a result. */
+function present<T>(value: T | null): T {
+  if (value === null) throw new Error("Expected a payoff result for a visible goal");
+  return value;
+}
+
 vi.mock("../../DebtPayoffCalculator", () => ({
   debtPayoffCalculator: mockDebtPayoffCalculator,
 }));
@@ -37,6 +50,7 @@ vi.mock("./GoalContributionService", () => ({
 }));
 
 import { GoalDebtService } from "../GoalDebtService";
+import { readGoalSourceVisibility } from "../GoalViewerProgress";
 import { Money } from "../../../core/money";
 
 describe("GoalDebtService", () => {
@@ -76,10 +90,10 @@ describe("GoalDebtService", () => {
         schedule: [],
       });
 
-      const result = await service.calculatePayoff("goal-debt", "house-123", {
+      const result = present(await service.calculatePayoff("goal-debt", ACTOR, {
         monthlyPayment: 400,
         oneTimePayment: 500,
-      });
+      }));
 
       expect(result.monthlyPayment).toBe(400);
       expect(result.payoffDate).toBe("2027-06-15");
@@ -100,7 +114,7 @@ describe("GoalDebtService", () => {
       mockGoalContributionService.getGoalById.mockResolvedValue(saveUpGoal);
 
       await expect(
-        service.calculatePayoff("goal-debt", "house-123", {
+        service.calculatePayoff("goal-debt", ACTOR, {
           monthlyPayment: 400,
         })
       ).rejects.toThrow("Payoff calculations only apply to pay down goals");
@@ -122,9 +136,9 @@ describe("GoalDebtService", () => {
         schedule: [],
       });
 
-      const result = await service.calculatePayoff("goal-debt", "house-123", {
+      const result = present(await service.calculatePayoff("goal-debt", ACTOR, {
         monthlyPayment: 300,
-      });
+      }));
 
       expect(result.totalInterest).toBe(0);
       expect(mockDebtPayoffCalculator.calculatePayoff).toHaveBeenCalledWith(
@@ -151,7 +165,7 @@ describe("GoalDebtService", () => {
         schedule: [],
       });
 
-      await service.calculatePayoff("goal-debt", "house-123", {
+      await service.calculatePayoff("goal-debt", ACTOR, {
         monthlyPayment: 300,
       });
 
@@ -175,7 +189,7 @@ describe("GoalDebtService", () => {
         schedule: [],
       });
 
-      await service.calculatePayoff("goal-debt", "house-123", {
+      await service.calculatePayoff("goal-debt", ACTOR, {
         monthlyPayment: 400,
       });
 
@@ -186,6 +200,22 @@ describe("GoalDebtService", () => {
         400,
         0
       );
+    });
+  });
+
+  describe("hidden progress sources", () => {
+    it("returns null without calculating when the viewer cannot see every source", async () => {
+      mockGoalContributionService.getGoalById.mockResolvedValue({
+        id: "goal-debt", householdId: "house-123", type: "pay_down", currentAmount: "-5000.00",
+        interestRate: "18.99", minimumPayment: "150.00", monthlyPayment: "400.00",
+      });
+      const hidden = new Map([["goal-debt", { progressVisible: false, linkedAccountVisible: true, debtAccountVisible: false }]]);
+      vi.mocked(readGoalSourceVisibility).mockResolvedValueOnce(hidden).mockResolvedValueOnce(hidden);
+
+      expect(await service.calculatePayoff("goal-debt", ACTOR, { monthlyPayment: 400 })).toBeNull();
+      expect(await service.getPayoffScenarios("goal-debt", ACTOR)).toBeNull();
+      expect(mockDebtPayoffCalculator.calculatePayoff).not.toHaveBeenCalled();
+      expect(mockDebtPayoffCalculator.calculateScenarios).not.toHaveBeenCalled();
     });
   });
 
@@ -234,7 +264,7 @@ describe("GoalDebtService", () => {
         },
       });
 
-      const result = await service.getPayoffScenarios("goal-debt", "house-123");
+      const result = present(await service.getPayoffScenarios("goal-debt", ACTOR));
 
       expect(result.minimum).toBeDefined();
       expect(result.current).toBeDefined();
@@ -250,7 +280,7 @@ describe("GoalDebtService", () => {
       mockGoalContributionService.getGoalById.mockResolvedValue(investmentGoal);
 
       await expect(
-        service.getPayoffScenarios("goal-debt", "house-123")
+        service.getPayoffScenarios("goal-debt", ACTOR)
       ).rejects.toThrow("Payoff calculations only apply to pay down goals");
     });
 
@@ -263,7 +293,7 @@ describe("GoalDebtService", () => {
         aggressive: { monthsToPayoff: 24 },
       });
 
-      await service.getPayoffScenarios("goal-debt", "house-123");
+      await service.getPayoffScenarios("goal-debt", ACTOR);
 
       // Verify that scenarios were calculated with correct parameters
       expect(mockDebtPayoffCalculator.calculateScenarios).toHaveBeenCalledWith({
@@ -288,7 +318,7 @@ describe("GoalDebtService", () => {
         aggressive: { monthsToPayoff: 18 },
       });
 
-      await service.getPayoffScenarios("goal-debt", "house-123");
+      await service.getPayoffScenarios("goal-debt", ACTOR);
 
       expect(mockDebtPayoffCalculator.calculateScenarios).toHaveBeenCalledWith({
         balance: 5000,
@@ -421,7 +451,7 @@ describe("GoalDebtService", () => {
         aggressive: { monthsToPayoff: 8 },
       });
 
-      await service.getPayoffScenarios("goal-debt", "house-123");
+      await service.getPayoffScenarios("goal-debt", ACTOR);
 
       expect(mockDebtPayoffCalculator.calculateScenarios).toHaveBeenCalledWith({
         balance: 1000,
@@ -451,7 +481,7 @@ describe("GoalDebtService", () => {
         aggressive: { monthsToPayoff: 12 },
       });
 
-      await service.getPayoffScenarios("goal-debt", "house-123");
+      await service.getPayoffScenarios("goal-debt", ACTOR);
 
       expect(mockDebtPayoffCalculator.calculateScenarios).toHaveBeenCalledWith({
         balance: 1000,
@@ -483,7 +513,7 @@ describe("GoalDebtService", () => {
         schedule: [],
       });
 
-      const result = await service.calculatePayoff("goal-debt", "house-123", {
+      const result = await service.calculatePayoff("goal-debt", ACTOR, {
         monthlyPayment: 200,
       });
 

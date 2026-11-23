@@ -13,20 +13,21 @@
  * @module ai/ai.tracking
  */
 
+import { PostHog } from 'posthog-node';
 import { logger } from '../../utils/logger';
+import { posthogAnalyticsFetch } from './ai.tracking-transport';
 
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
 
-// Posthog client (lazy loaded when configured)
-let posthogClient: PostHogClient | null = null;
-
-interface PostHogClient {
-  capture: (event: string, properties?: Record<string, unknown>) => void;
-  identify: (distinctId: string, properties?: Record<string, unknown>) => void;
-  shutdown: () => Promise<void>;
-}
+// Configuration is optional; the declared ESM dependency is always resolvable.
+let posthogClient: Pick<PostHog, 'capture' | 'shutdown'> | null = null;
+const externalEventNames = new Set([
+  'ai_query_sent', 'ai_query_success', 'ai_query_failed', 'ai_consent_granted',
+  'ai_consent_revoked', 'ai_rate_limit_hit', 'ai_cache_hit', 'ai_cache_miss',
+  'ai_prompt_injection_blocked',
+]);
 
 // ============================================================================
 // EVENT TYPES
@@ -94,7 +95,7 @@ class AITrackingService {
 
   constructor() {
     this.enabled = process.env.AI_TRACKING_ENABLED !== 'false';
-    this.initializePosthog();
+    if (this.enabled) this.initializePosthog();
   }
 
   /**
@@ -109,14 +110,17 @@ class AITrackingService {
       return;
     }
 
+    // SDK v1 consumes response JSON; this capture-only adapter supports v0.
+    if (process.env.POSTHOG_CAPTURE_MODE === 'v1') {
+      logger.warn('Posthog capture mode v1 is unsupported - AI tracking will use logger only');
+      return;
+    }
+
     try {
-      // Dynamic import to avoid requiring posthog if not used
-      // In production, install: npm install posthog-node
-      const PostHog = require('posthog-node').PostHog;
-      posthogClient = new PostHog(apiKey, { host });
+      posthogClient = new PostHog(apiKey, { host, fetch: posthogAnalyticsFetch });
       logger.info('Posthog initialized for AI tracking');
-    } catch (error) {
-      logger.warn('Posthog package not installed - AI tracking will use logger only');
+    } catch {
+      logger.warn('Posthog initialization failed - AI tracking will use logger only');
     }
   }
 
@@ -250,6 +254,7 @@ class AITrackingService {
    * Core tracking method - sends to Posthog or logs.
    */
   private track(eventName: string, properties: Record<string, unknown>): void {
+    if (!externalEventNames.has(eventName)) return;
     // Add common properties
     const enrichedProperties = {
       ...properties,
@@ -260,9 +265,28 @@ class AITrackingService {
     // Send to Posthog if available
     if (posthogClient) {
       try {
-        posthogClient.capture(eventName, enrichedProperties);
-      } catch (error) {
-        logger.error('Failed to send event to Posthog', { eventName, error });
+        // External analytics is aggregate-only. Never spread raw event context:
+        // identifiers, error text, query hashes and tool names remain local.
+        const externalProperties: Record<string, unknown> = {
+          timestamp: enrichedProperties.timestamp,
+          environment: ['development', 'test', 'production'].includes(enrichedProperties.environment)
+            ? enrichedProperties.environment : 'unknown',
+          $process_person_profile: false,
+        };
+        for (const key of ['message_length', 'tool_count', 'token_count', 'remaining_queries']) {
+          const value = properties[key];
+          if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) externalProperties[key] = value;
+        }
+        const latency = properties.latency_ms;
+        if (typeof latency === 'number' && Number.isFinite(latency) && latency >= 0 && latency <= Number.MAX_SAFE_INTEGER) {
+          externalProperties.latency_ms = latency;
+        }
+        for (const key of ['has_session_context', 'cache_hit', 'used_gemini']) {
+          if (typeof properties[key] === 'boolean') externalProperties[key] = properties[key];
+        }
+        posthogClient.capture({ distinctId: 'capital-ai-tracking', event: eventName, properties: externalProperties });
+      } catch {
+        logger.error('Failed to send event to Posthog', { action: eventName });
       }
     }
 
@@ -281,8 +305,8 @@ class AITrackingService {
       try {
         await posthogClient.shutdown();
         logger.info('Posthog client shutdown complete');
-      } catch (error) {
-        logger.error('Error shutting down Posthog client', { error });
+      } catch {
+        logger.error('Error shutting down Posthog client');
       }
     }
   }

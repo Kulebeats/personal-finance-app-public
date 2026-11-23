@@ -89,6 +89,16 @@ describe("ConsentGate", () => {
     ).toBeInTheDocument();
   });
 
+  it("names both processors and does not promise every identifier is removed (R17)", () => {
+    stubRole("admin");
+    renderGate();
+
+    expect(screen.getByText(/Anthropic Claude/)).toBeInTheDocument();
+    expect(screen.getByText(/Google Gemini may process the request instead/i)).toBeInTheDocument();
+    expect(screen.getByText(/questions you type can contain personal information/i)).toBeInTheDocument();
+    expect(screen.queryByText(/personal identifiers are removed/i)).not.toBeInTheDocument();
+  });
+
   it("lets an admin enable Thandi via POST /api/ai/consent", async () => {
     stubRole("admin");
     const router = renderGate();
@@ -104,7 +114,8 @@ describe("ConsentGate", () => {
     await userEvent.click(enable);
 
     await waitFor(() => expect(consentRoute.calls).toHaveLength(1));
-    expect(bodyOf(consentRoute.calls[0])).toEqual({ consentGiven: true });
+    // Astra #255 r3: the grant names the disclosure version this gate shows.
+    expect(bodyOf(consentRoute.calls[0])).toEqual({ consentGiven: true, consentVersion: "v2.0" });
   });
 
   it("shows the enable action for an owner too", () => {
@@ -116,17 +127,22 @@ describe("ConsentGate", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows a non-actionable notice to non-admin members instead of a button", () => {
-    stubRole("member");
-    renderGate();
+  it.each(["member", "view_only", "professional"])(
+    "shows a non-actionable notice to a %s instead of a button",
+    (role) => {
+      stubRole(role);
+      renderGate();
 
-    expect(
-      screen.queryByRole("button", { name: /enable thandi/i }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByText(/ask a household admin to enable thandi/i),
-    ).toBeInTheDocument();
-  });
+      expect(
+        screen.queryByRole("button", { name: /enable thandi/i }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByText(
+          /ask a household owner or administrator to enable or disable ai processing/i,
+        ),
+      ).toBeInTheDocument();
+    },
+  );
 
   it("shows the re-consent variant when the disclosure version changed", () => {
     stubRole("admin");

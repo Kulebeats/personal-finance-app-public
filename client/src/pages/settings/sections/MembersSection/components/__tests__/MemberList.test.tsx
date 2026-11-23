@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemberList } from "../MemberList";
 import type { HouseholdMember } from "@/hooks/use-settings";
@@ -19,64 +19,27 @@ const createMockMutation = () => ({
   reset: vi.fn(),
 });
 
+const { mockTransfer } = vi.hoisted(() => ({
+  mockTransfer: { mutate: vi.fn(), isPending: false },
+}));
 vi.mock("@/hooks/use-settings", () => ({
   useUpdateMemberRole: vi.fn(() => createMockMutation()),
   useRemoveMember: vi.fn(() => createMockMutation()),
+}));
+
+vi.mock("@/hooks/use-household-membership", () => ({
+  useTransferOwnership: vi.fn(() => mockTransfer),
 }));
 
 vi.mock("@/hooks/use-toast", () => ({
   useToast: () => ({ toast: vi.fn() }),
 }));
 
+// The flat GET /api/household/members DTO (shared/household-members.ts).
 const mockMembers: HouseholdMember[] = [
-  {
-    id: "member-1",
-    userId: "user-1",
-    householdId: "household-1",
-    role: "owner",
-    joinedAt: new Date("2024-01-01").toISOString(),
-    lastActiveAt: new Date("2024-01-29").toISOString(),
-    user: {
-      id: "user-1",
-      email: "owner@example.com",
-      fullName: "John Owner",
-      username: "jowner",
-      profilePictureUrl: null,
-      lastLoginAt: null,
-    },
-  },
-  {
-    id: "member-2",
-    userId: "user-2",
-    householdId: "household-1",
-    role: "admin",
-    joinedAt: new Date("2024-01-15").toISOString(),
-    lastActiveAt: new Date("2024-01-28").toISOString(),
-    user: {
-      id: "user-2",
-      email: "admin@example.com",
-      fullName: "Jane Admin",
-      username: "jadmin",
-      profilePictureUrl: null,
-      lastLoginAt: null,
-    },
-  },
-  {
-    id: "member-3",
-    userId: "user-3",
-    householdId: "household-1",
-    role: "member",
-    joinedAt: new Date("2024-02-01").toISOString(),
-    lastActiveAt: new Date("2024-01-27").toISOString(),
-    user: {
-      id: "user-3",
-      email: "member@example.com",
-      fullName: "Bob Member",
-      username: "bmember",
-      profilePictureUrl: null,
-      lastLoginAt: null,
-    },
-  },
+  { userId: "user-1", name: "John Owner", email: "owner@example.com", role: "owner", joinedAt: new Date("2024-01-01").toISOString() },
+  { userId: "user-2", name: "Jane Admin", email: "admin@example.com", role: "admin", joinedAt: new Date("2024-01-15").toISOString() },
+  { userId: "user-3", name: "Bob Member", email: "member@example.com", role: "member", joinedAt: new Date("2024-02-01").toISOString() },
 ];
 
 describe("MemberList", () => {
@@ -190,6 +153,52 @@ describe("MemberList", () => {
       // Regular member should see "No permission" for others
       const noPermissions = screen.getAllByText("No permission");
       expect(noPermissions.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("Server contract (AH-05)", () => {
+    it("shows the name the server sends, never \"Unknown User\"", () => {
+      const named = [{ ...mockMembers[2], name: "bmember-username" }];
+      render(<MemberList members={named} currentUserId="user-1" />);
+
+      expect(screen.getByText("bmember-username")).toBeInTheDocument();
+      expect(screen.queryByText("Unknown User")).not.toBeInTheDocument();
+    });
+
+    it("does not offer an admin to grant admin (spec §A3)", async () => {
+      const user = userEvent.setup();
+      render(<MemberList members={mockMembers} currentUserId="user-2" />);
+
+      await user.click(screen.getByLabelText(/Change role for Bob Member/));
+      const listbox = within(screen.getByRole("listbox"));
+      expect(listbox.queryByText("Admin")).not.toBeInTheDocument();
+      expect(listbox.getByText("Professional (read-only)")).toBeInTheDocument();
+    });
+
+    it("does not let an admin change another admin's role", () => {
+      const twoAdmins = [...mockMembers, { ...mockMembers[1], userId: "user-4", name: "Second Admin" }];
+      render(<MemberList members={twoAdmins} currentUserId="user-2" />);
+
+      expect(screen.queryByLabelText(/Change role for Second Admin/)).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(/Remove Second Admin from household/)).not.toBeInTheDocument();
+    });
+  });
+
+  describe("Ownership transfer", () => {
+    it("lets the owner hand ownership to another member after confirming", async () => {
+      const user = userEvent.setup();
+      render(<MemberList members={mockMembers} currentUserId="user-1" />);
+
+      await user.click(screen.getByLabelText("Make Bob Member the owner"));
+      await user.click(await screen.findByRole("button", { name: "Transfer ownership" }));
+
+      expect(mockTransfer.mutate).toHaveBeenCalledWith("user-3", expect.anything());
+    });
+
+    it("offers no transfer to anyone but the owner", () => {
+      render(<MemberList members={mockMembers} currentUserId="user-2" />);
+
+      expect(screen.queryByLabelText(/the owner$/)).not.toBeInTheDocument();
     });
   });
 

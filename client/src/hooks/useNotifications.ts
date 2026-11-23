@@ -1,8 +1,10 @@
+import { protectedFetch } from "@/lib/protected-fetch";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Notification as SchemaNotification } from "@shared/schema";
 // apiCall attaches the x-csrf-token header (raw fetch 403s under CSRF
 // enforcement) and self-heals on a stale token.
 import { apiCall } from "@/lib/api";
+import { throwIfResNotOk } from "@/lib/queryClient";
 
 /**
  * Client notification type - extends schema with string dates
@@ -25,13 +27,11 @@ async function fetchNotifications(options?: {
   if (options?.offset) params.set("offset", String(options.offset));
   if (options?.unreadOnly) params.set("unreadOnly", "true");
 
-  const res = await fetch(`/api/notifications?${params.toString()}`, {
+  const res = await protectedFetch(`/api/notifications?${params.toString()}`, {
     credentials: "include",
   });
 
-  if (!res.ok) {
-    throw new Error("Failed to fetch notifications");
-  }
+  await throwIfResNotOk(res);
 
   const json = await res.json();
   return json.data;
@@ -41,13 +41,11 @@ async function fetchNotifications(options?: {
  * Fetch unread count
  */
 async function fetchUnreadCount(): Promise<number> {
-  const res = await fetch("/api/notifications/unread-count", {
+  const res = await protectedFetch("/api/notifications/unread-count", {
     credentials: "include",
   });
 
-  if (!res.ok) {
-    throw new Error("Failed to fetch unread count");
-  }
+  await throwIfResNotOk(res);
 
   const json = await res.json();
   return json.data.count;

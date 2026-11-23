@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import {
   useNotificationPreferences,
   useUpdateNotificationPreferences,
@@ -9,72 +9,77 @@ import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
 import { NOTIFICATION_CATEGORIES_LEGACY as NOTIFICATION_CATEGORIES } from "@/features/settings/constants/notificationTypes";
 import { NotificationToggle } from "./NotificationToggle";
+import { captureOperationLifetime } from "@/lib/operation-lifetime";
 
-/**
- * Local state type for notification preferences
- * Uses partial fields since user may not have set all preferences yet
- */
-interface LocalNotificationPreference {
-  notificationType: string;
-  inAppEnabled?: boolean;
-  emailEnabled?: boolean;
-  pushEnabled?: boolean;
-  thresholdAmount?: string | null;
-}
+type Draft = Partial<Pick<NotificationPreference, "inAppEnabled" | "emailEnabled" | "pushEnabled" | "thresholdAmount">>;
+type Drafts = Record<string, Draft>;
 
-type PreferencesMap = Record<string, NotificationPreference | LocalNotificationPreference>;
+const defaultPreference: Required<Draft> = {
+  inAppEnabled: true,
+  emailEnabled: false,
+  pushEnabled: false,
+  thresholdAmount: null,
+};
 
 export function NotificationsForm() {
   const { data: preferences, isLoading, isError, error, refetch } = useNotificationPreferences();
   const updatePreferences = useUpdateNotificationPreferences();
-  const [localPreferences, setLocalPreferences] = useState<PreferencesMap>({});
-
-  useEffect(() => {
-    if (preferences) {
-      const prefsMap: PreferencesMap = {};
-      preferences.forEach((pref) => {
-        prefsMap[pref.notificationType] = pref;
-      });
-      setLocalPreferences(prefsMap);
-    }
-  }, [preferences]);
+  const [drafts, setDrafts] = useState<Drafts>({});
+  const byType = new Map(preferences?.map(pref => [pref.notificationType, pref]));
 
   const handleToggle = (
     notificationType: string,
     channel: "inAppEnabled" | "emailEnabled" | "pushEnabled",
     value: boolean
   ) => {
-    setLocalPreferences((prev) => ({
+    setDrafts(prev => ({
       ...prev,
-      [notificationType]: {
-        ...prev[notificationType],
-        notificationType,
-        [channel]: value,
-      },
+      [notificationType]: { ...prev[notificationType], [channel]: value },
     }));
   };
 
   const handleThresholdChange = (notificationType: string, value: string) => {
-    setLocalPreferences((prev) => ({
+    setDrafts(prev => ({
       ...prev,
-      [notificationType]: {
-        ...prev[notificationType],
-        notificationType,
-        thresholdAmount: value,
-      },
+      [notificationType]: { ...prev[notificationType], thresholdAmount: value === "" ? null : value },
     }));
   };
 
-  const handleSave = () => {
-    const prefsArray = Object.values(localPreferences).map((pref) => ({
-      notificationType: pref.notificationType,
-      inAppEnabled: pref.inAppEnabled ?? true,
-      emailEnabled: pref.emailEnabled ?? false,
-      pushEnabled: pref.pushEnabled ?? false,
-      thresholdAmount: pref.thresholdAmount || null,
-    }));
+  const handleSave = async () => {
+    if (updatePreferences.isPending) return;
+    const changed = Object.entries(drafts).flatMap(([notificationType, draft]) => {
+      const baseline = byType.get(notificationType) ?? defaultPreference;
+      const fields = Object.fromEntries(
+        (Object.keys(draft) as Array<keyof Draft>)
+          .filter(field => draft[field] !== baseline[field])
+          .map(field => [field, draft[field]]),
+      ) as Draft;
+      return Object.keys(fields).length ? [{ notificationType, ...fields }] : [];
+    });
+    if (!changed.length) return;
 
-    updatePreferences.mutate({ preferences: prefsArray });
+    const operation = captureOperationLifetime();
+    try {
+      await updatePreferences.mutateAsync({ preferences: changed });
+      if (captureOperationLifetime() !== operation) return;
+      setDrafts(current => {
+        const remaining: Drafts = {};
+        for (const [notificationType, draft] of Object.entries(current)) {
+          const saved = changed.find(pref => pref.notificationType === notificationType);
+          const fields = { ...draft };
+          if (saved) {
+            for (const field of Object.keys(saved) as Array<keyof Draft | "notificationType">) {
+              if (field === "notificationType") continue;
+              if (fields[field] === saved[field]) delete fields[field];
+            }
+          }
+          if (Object.keys(fields).length) remaining[notificationType] = fields;
+        }
+        return remaining;
+      });
+    } catch {
+      // The query client reports the failure. Keep the draft for retry.
+    }
   };
 
   if (isLoading) {
@@ -115,7 +120,7 @@ export function NotificationsForm() {
                 <NotificationToggle
                   key={notification.type}
                   notification={notification}
-                  preference={localPreferences[notification.type]}
+                  preference={{ ...byType.get(notification.type), ...drafts[notification.type], notificationType: notification.type }}
                   onToggle={handleToggle}
                   onThresholdChange={handleThresholdChange}
                 />

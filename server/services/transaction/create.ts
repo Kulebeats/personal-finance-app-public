@@ -11,25 +11,38 @@ import { accountRepository } from "../../repositories/AccountRepository";
 import { categoryRepository } from "../../repositories/CategoryRepository";
 import { merchantRepository } from "../../repositories/MerchantRepository";
 import { type Transaction, type InsertTransaction } from "@shared/schema";
-import { NotFoundError, ValidationError } from "../../utils/errorHandler";
+import { ConflictError, NotFoundError, ValidationError } from "../../utils/errorHandler";
 import { logger } from "../../utils/logger";
-import { invalidateOnChange } from "../CacheInvalidation";
+import { invalidateOnChangeAfterCommit } from "../CacheInvalidation";
 import { ruleService } from "../RuleService";
 import { recurringService } from "../RecurringService";
-import {
-  ensureMerchantAlias,
-  resolveMerchantMatch,
-} from "../merchantRecognition";
+import { resolveMerchantMatch } from "../merchantRecognition";
 import { notificationService } from "../NotificationService";
-import { outboxEventService, EventTypes } from "../../core/events";
 import { Money } from "../../core/money";
-import { isPostgresError } from "../../utils/postgresError";
+import { getPostgresError } from "../../utils/postgresError";
+import { readVisibleIdempotentReplay, type HouseholdPostingProducer } from "./idempotentReplay";
+import { ordinaryCreateDigest } from "./ordinaryCreateDigest";
+import { assertTransactionPrivacyFlag } from "../../core/authz/ordinary-transaction-privacy";
+
+import type { PostingMode } from "../../repositories/TransactionPostingEffect";
+import type { TransactionRunner } from "../../utils/withTransaction";
+
+export interface TransactionPostingOptions {
+  producer?: "account_import";
+  couponPaymentId?: string;
+  initialImportTagNames?: string[];
+  postingMode?: PostingMode;
+  /** Account imports post on their admitted database session. */
+  accountImportTransaction?: TransactionRunner;
+  /** Trusted synchronous observer of a newly committed row, before postcommit work. Never called for replay. */
+  onCommitted?: (transaction: Transaction) => void;
+}
 
 /**
  * Create a transaction with idempotency support
  */
 export async function createTransaction(
-  data: Omit<InsertTransaction, "householdId" | "ownerUserId"> & {
+  input: Omit<InsertTransaction, "householdId"> & {
     splits?: {
       amount: string;
       categoryId?: string | null;
@@ -41,7 +54,29 @@ export async function createTransaction(
   userId: string,
   idempotencyKey?: string,
   auditContext?: { ipAddress?: string },
+  options?: TransactionPostingOptions,
 ): Promise<{ transaction: Transaction; isDuplicate: boolean }> {
+  // Keep the posting and its digest on one request snapshot across every await.
+  const data = structuredClone(input);
+  assertTransactionPrivacyFlag(data.isPrivate);
+  const ipAddress = auditContext?.ipAddress;
+  const postingOptions = options && { ...options, initialImportTagNames: options.initialImportTagNames?.slice() };
+  const requestedMode = postingOptions?.postingMode ?? "posted";
+  const operation: HouseholdPostingProducer | undefined = postingOptions?.couponPaymentId ? "grz_coupon" : postingOptions?.producer;
+  if ((postingOptions?.initialImportTagNames !== undefined || requestedMode === "history_only") && operation !== "account_import") {
+    throw new ValidationError("Statement tags and history-only mode require the account import operation");
+  }
+  if (postingOptions?.accountImportTransaction && (operation !== "account_import" || data.recurringTransactionId)) {
+    throw new ValidationError("The import transaction runner is only for ordinary account import rows");
+  }
+  const producer = operation && { operation, accountId: data.accountId };
+  const requestDigest = idempotencyKey && !producer ? ordinaryCreateDigest(data) : undefined;
+  const assertReplayMode = (transaction: Transaction) => {
+    if ((transaction.postingMode != null && transaction.postingMode !== requestedMode) ||
+      (postingOptions?.postingMode !== undefined && transaction.postingMode !== requestedMode)) {
+      throw new ConflictError("Idempotency key was already used with a different or unproven posting mode");
+    }
+  };
   // Check idempotency key if provided
   if (idempotencyKey) {
     const existing = await transactionRepository.findByIdempotencyKey(
@@ -49,8 +84,10 @@ export async function createTransaction(
       householdId,
     );
     if (existing) {
+      const transaction = await readVisibleIdempotentReplay(existing, householdId, userId, data.ownerUserId, producer, requestDigest, data.isPrivate);
+      assertReplayMode(transaction);
       logger.info("Duplicate transaction detected", { householdId });
-      return { transaction: existing, isDuplicate: true };
+      return { transaction, isDuplicate: true };
     }
   }
 
@@ -151,12 +188,9 @@ export async function createTransaction(
       ? data.name
       : merchantMatch.cleanedName || data.name;
 
-  if (merchantMatch.merchant && merchantMatch.aliasCandidate) {
-    await ensureMerchantAlias(
-      merchantMatch.merchant.id,
-      merchantMatch.aliasCandidate,
-    );
-  }
+  const merchantAlias = merchantMatch.merchant && merchantMatch.aliasCandidate
+    ? { merchantId: merchantMatch.merchant.id, aliasName: merchantMatch.aliasCandidate }
+    : undefined;
 
   // Create transaction (currency enforced to match account)
   // FIX INT-RULES-001: Pass splits to repository for persistence
@@ -180,15 +214,28 @@ export async function createTransaction(
     ({ transaction } = await transactionRepository.create(
       {
         ...data,
+        ...(data.recurringTransactionId && { isRecurring: true }),
         name: resolvedName,
         merchantId: resolvedMerchantId,
         householdId,
-        ownerUserId: userId,
+        ownerUserId: data.ownerUserId === undefined ? userId : data.ownerUserId,
         idempotencyKey,
-        currency: account.currency, // Always use account currency for income/expense
+        currency: data.currency ?? account.currency, // Reject a denomination change between the visible read and the posting lock.
         splits: data.splits, // Persist splits to transaction_splits table
       },
       {
+        ...(data.recurringTransactionId
+          ? { recurringActor: { householdId, userId } }
+          : { createActor: { householdId, userId } }),
+        validateReferences: true,
+        couponPaymentId: postingOptions?.couponPaymentId,
+        ...(idempotencyKey && { originalOwnerIntent: { actorUserId: userId, selectedOwnerId: data.ownerUserId, operation: producer?.operation, requestDigest } }),
+        postingMode: requestedMode,
+        publishCreatedEvent: true,
+        initialImportTagNames: postingOptions?.initialImportTagNames,
+        ...(postingOptions?.accountImportTransaction && { accountImportTransaction: postingOptions.accountImportTransaction }),
+        requestedMerchantId: data.merchantId,
+        merchantAlias,
         // Rule 9: audit lives at the repository layer (atomic with the
         // insert) so every caller of this service function is audited, not
         // just the ones that happen to go through the transactions
@@ -196,12 +243,17 @@ export async function createTransaction(
         audit: {
           userId,
           householdId,
-          ipAddress: auditContext?.ipAddress,
+          ipAddress,
         },
       },
     ));
   } catch (error) {
-    if (!idempotencyKey || !isPostgresError(error, "23505")) {
+    const pgError = getPostgresError(error);
+    // With a caller-supplied ID the 0022 guard can see the committed row
+    // before the INSERT reaches a unique index. Only that guard qualifies.
+    const existingSuppliedId = data.id && pgError?.code === "23514" && pgError instanceof Error
+      && pgError.message === "Existing transactions cannot acquire original owner evidence";
+    if (!idempotencyKey || (pgError?.code !== "23505" && !existingSuppliedId)) {
       throw error;
     }
 
@@ -209,18 +261,23 @@ export async function createTransaction(
       idempotencyKey,
       householdId,
     );
-    // Only an idempotency-key collision may be swallowed. If the row is not
-    // there, the 23505 came from some OTHER unique constraint and must not be
-    // silently reported as a duplicate — rethrow it.
-    if (!winner) {
+    // Preserve unrelated constraint violations. A supplied-ID guard must
+    // identify the same row as the key, in addition to normal replay checks.
+    if (!winner || (existingSuppliedId && winner.id !== data.id?.toLowerCase())) {
       throw error;
     }
 
-    logger.info("Duplicate transaction detected via unique index", {
+    const transaction = await readVisibleIdempotentReplay(winner, householdId, userId, data.ownerUserId, producer, requestDigest, data.isPrivate);
+    assertReplayMode(transaction);
+    logger.info("Duplicate transaction detected during insert", {
       householdId,
     });
-    return { transaction: winner, isDuplicate: true };
+    return { transaction, isDuplicate: true };
   }
+
+  // Repository.create has completed its owned commit; later work may still fail.
+  // Keep this outside the unique-collision catch: observer failures are not replays.
+  postingOptions?.onCommitted?.(transaction);
 
   // Apply rules. SCP-334: rule application is now atomic (all-or-nothing). A
   // mid-apply DB failure rolls back the rule's writes and throws — but the
@@ -245,12 +302,13 @@ export async function createTransaction(
   logger.info("Transaction created", { householdId });
 
   // Invalidate analytics cache
-  await invalidateOnChange("transaction", householdId);
+  await invalidateOnChangeAfterCommit("transaction", householdId);
 
   try {
     await recurringService.autoLinkNewTransaction(
       processedTransaction,
       householdId,
+      userId,
     );
   } catch (error) {
     logger.warn("Auto-linking recurring rule failed", {
@@ -279,24 +337,6 @@ export async function createTransaction(
         }),
       );
   }
-
-  // Emit transaction created event (fire and forget)
-  outboxEventService
-    .publish({
-      eventType: EventTypes.TRANSACTION_CREATED,
-      aggregateType: "transaction",
-      aggregateId: processedTransaction.id,
-      householdId,
-      payload: {
-        id: processedTransaction.id,
-        type: processedTransaction.type,
-        amount: String(processedTransaction.amount),
-        accountId: processedTransaction.accountId,
-      },
-    })
-    .catch((err) =>
-      logger.error("Failed to publish transaction event", { err }),
-    );
 
   return { transaction: processedTransaction, isDuplicate: false };
 }

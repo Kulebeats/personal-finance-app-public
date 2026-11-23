@@ -1,3 +1,6 @@
+import { userErrorMessage } from "@/lib/errorCopy";
+import { throwIfResNotOk } from "@/lib/queryClient";
+import { protectedFetch } from "@/lib/protected-fetch";
 /**
  * Attachment Hooks
  *
@@ -35,13 +38,14 @@ export function useAttachments(transactionId: string) {
   return useQuery({
     queryKey: attachmentKeys.list(transactionId),
     queryFn: async () => {
-      const response = await fetch(
+      const response = await protectedFetch(
         `/api/transactions/${transactionId}/attachments`,
         {
           credentials: "include",
         }
       );
-      if (!response.ok) throw new Error("Failed to fetch attachments");
+      await throwIfResNotOk(response);
+
       const data = await response.json();
       return data.data as Attachment[];
     },
@@ -113,7 +117,7 @@ export function useUploadAttachment(
       if (!options.silent) {
         toast({
           title: "Upload failed",
-          description: error.message,
+          description: userErrorMessage(error, "Please try again."),
           variant: "destructive",
         });
       }
@@ -144,7 +148,7 @@ export function useDeleteAttachment(transactionId: string) {
     onError: (error: Error) => {
       toast({
         title: "Delete failed",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },

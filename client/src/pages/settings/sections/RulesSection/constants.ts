@@ -1,4 +1,5 @@
 import { RuleAction, RuleCondition } from "./types";
+import { REMOVED_ACTION_LABELS } from "@shared/ruleConditions";
 import {
   CONDITION_TYPE_CONFIGS,
   MERCHANT_CATEGORIES,
@@ -27,9 +28,17 @@ export const ACTION_TYPES = [
     label: "Use Merchant Category",
     icon: "📦",
   },
-  { value: "assign_member", label: "Assign member", icon: "👤" },
   { value: "set_review_status", label: "Set review status", icon: "✅" },
 ] as const;
+
+/**
+ * "<label> (removed)" for an action type that was removed (A-44), which a rule
+ * saved before the removal can still hold; undefined for a current type.
+ */
+export const removedActionLabel = (type: string): string | undefined => {
+  const label = REMOVED_ACTION_LABELS[type];
+  return label ? `${label} (removed)` : undefined;
+};
 
 export const getDefaultCondition = (type: string): RuleCondition => ({
   type: type as RuleCondition["type"],
@@ -39,9 +48,17 @@ export const getDefaultCondition = (type: string): RuleCondition => ({
   enabled: true,
 });
 
+// The server accepts add_tags as one tag id or a list (validateRuleTagReferenceSets);
+// the picker always works on a list.
+export const toTagIds = (value: string | string[] | undefined): string[] => {
+  if (Array.isArray(value)) return value;
+  return value ? [value] : [];
+};
+
 export const getDefaultAction = (type: string): RuleAction => ({
   type: type as RuleAction["type"],
-  value: "",
+  // add_tags holds a list of existing tag ids; every other action one string.
+  value: type === "add_tags" ? [] : "",
   enabled: true,
   splitConfig:
     type === "split_transaction"

@@ -12,6 +12,7 @@ import { format, parseISO } from "date-fns";
 import { CheckCircle2, AlertCircle, Tag } from "lucide-react";
 import type { TransactionWithDetails } from "../types";
 import { SplitDetails } from "./SplitDetails";
+import { useTransferLegLabel } from "../transferLeg";
 
 interface TransactionRowProps {
   transaction: TransactionWithDetails;
@@ -31,13 +32,14 @@ export const TransactionRow = memo(function TransactionRow({
   // Use type field to determine income/expense, not sign inference (T-02 fix)
   const isIncome = transaction.type === "income";
   const displayName = transaction.merchantName || transaction.name || "Unknown";
-  const displayCategory = transaction.categoryName || "Uncategorized";
+  const transferLabel = useTransferLegLabel(transaction);
+  const displayCategory = transferLabel ?? (transaction.categoryName || "Uncategorized");
 
   return (
     <div
       role="button"
       tabIndex={0}
-      aria-label={`View ${displayName}, ${formatCurrency(transaction.amount)}`}
+      aria-label={`View ${displayName}, ${transferLabel ? `${transferLabel}, ` : ""}${formatCurrency(transaction.amount)}`}
       className={cn(
         "flex items-center gap-3 px-4 py-3 hover:bg-muted/50 cursor-pointer border-b border-border/30 transition-colors",
         isSelected && "bg-primary/5",
@@ -105,6 +107,7 @@ export const TransactionRow = memo(function TransactionRow({
 
       {/* Amount - formatCurrency handles MoneyDto directly */}
       <div
+        data-testid="transaction-amount"
         className={cn(
           "text-sm font-semibold tabular-nums w-24 text-right",
           isIncome ? "text-green-600 dark:text-green-400" : "text-foreground",

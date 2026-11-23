@@ -1,3 +1,5 @@
+import { throwIfResNotOk } from "@/lib/queryClient";
+import { protectedFetch } from "@/lib/protected-fetch";
 /**
  * React Query hooks for Analytics & Reporting API
  *
@@ -19,7 +21,8 @@ import {
   QueryClient,
 } from "@tanstack/react-query";
 import { apiCall } from "@/lib/api";
-import { formatDateParam } from "@/lib/dates";
+import { calendarMonthRange, calendarToday, getCalendarTimeZone, useCalendarTimeZone, useCalendarYearMonth } from "@/lib/calendarZone";
+import { householdMonthRange } from "@shared/household-calendar";
 import { useSettings } from "@/contexts/SettingsContext";
 import type {
   ReportsAnnualResponse,
@@ -109,7 +112,8 @@ type ApiFailure = {
  * Fetch JSON from API with proper error handling
  */
 async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, { credentials: "include" });
+  const res = await protectedFetch(url, { credentials: "include" });
+  await throwIfResNotOk(res);
   const json = (await res.json()) as ApiSuccess<T> | ApiFailure;
 
   if (!json.success) {
@@ -124,7 +128,7 @@ async function fetchJson<T>(url: string): Promise<T> {
     throw error;
   }
 
-  if (!res.ok) throw new Error("Request failed");
+
 
   return json.data;
 }
@@ -938,7 +942,7 @@ export function useReportsNetWorthChanges(
         "@/lib/mockReportsData"
       );
       if (USE_MOCK_DATA) {
-        return getMockNetWorthChangesData() as ReportsNetWorthChangesResponse;
+        return getMockNetWorthChangesData(queryParams);
       }
       return fetchJson<ReportsNetWorthChangesResponse>(
         `/api/reports/net-worth/changes${toQueryString(queryParams)}`
@@ -1087,14 +1091,16 @@ export function useReportsCustom(
       if (params.secondaryMetric)
         queryParams.set("secondaryMetric", params.secondaryMetric);
       if (params.groupBy) queryParams.set("groupBy", params.groupBy);
+      if (params.period) queryParams.set("period", params.period);
       if (params.aggregation)
         queryParams.set("aggregation", params.aggregation);
       if (params.from) queryParams.set("from", params.from);
       if (params.to) queryParams.set("to", params.to);
       if (params.limit) queryParams.set("limit", String(params.limit));
 
-      const res = await fetch(`/api/reports/custom?${queryParams.toString()}`);
-      if (!res.ok) throw new Error("Failed to fetch custom chart data");
+      const res = await protectedFetch(`/api/reports/custom?${queryParams.toString()}`);
+      await throwIfResNotOk(res);
+
       const json = (await res.json()) as ApiResponse<ReportsCustomResponse>;
       if (!json.success)
         throw new Error(json.error?.message || "Unknown error");
@@ -1117,14 +1123,9 @@ export function useReportsCustom(
  * const { data } = useReportsCashflow({ from, to, interval: "day" });
  */
 export function useCurrentMonthRange(): { from: string; to: string } {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth();
-
-  const from = formatDateParam(new Date(year, month, 1));
-  const to = formatDateParam(new Date(year, month + 1, 0));
-
-  return { from, to };
+  useCalendarYearMonth();
+  // NEW-15: the calendar zone's month, not the browser's or UTC's.
+  return calendarMonthRange();
 }
 
 /**
@@ -1148,10 +1149,13 @@ export function useCurrentYearRange(): {
   to: string;
   year: number;
 } {
+  const { year: householdYear } = useCalendarYearMonth();
   const search = useSearch();
   const params = new URLSearchParams(search);
   const yearParam = params.get("year");
-  const year = yearParam ? parseInt(yearParam, 10) : new Date().getFullYear();
+  const year = yearParam
+    ? parseInt(yearParam, 10)
+    : householdYear;
 
   return {
     from: `${year}-01-01`,
@@ -1171,11 +1175,10 @@ export function useLastNMonthsRange(months: number): {
   from: string;
   to: string;
 } {
+  useCalendarTimeZone(); // NEW-15: re-derive when the household zone arrives.
   const now = new Date();
-  const to = formatDateParam(now);
-
-  const fromDate = new Date(now.getFullYear(), now.getMonth() - months + 1, 1);
-  const from = formatDateParam(fromDate);
+  const to = calendarToday(now);
+  const { from } = calendarMonthRange(1 - months, now);
 
   return { from, to };
 }
@@ -1198,10 +1201,10 @@ export function usePreviousPeriodRange(
   );
 
   const prevTo = new Date(fromDate);
-  prevTo.setDate(prevTo.getDate() - 1);
+  prevTo.setUTCDate(prevTo.getUTCDate() - 1); // "YYYY-MM-DD" parses as UTC midnight
 
   const prevFrom = new Date(prevTo);
-  prevFrom.setDate(prevFrom.getDate() - daysDiff);
+  prevFrom.setUTCDate(prevFrom.getUTCDate() - daysDiff);
 
   return {
     from: prevFrom.toISOString().split("T")[0],
@@ -1228,13 +1231,8 @@ export async function prefetchDashboardReports(
   timezone?: string
 ): Promise<void> {
   const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth();
-
-  const monthRange = {
-    from: formatDateParam(new Date(year, month, 1)),
-    to: formatDateParam(new Date(year, month + 1, 0)),
-  };
+  const monthRange = householdMonthRange(now, timezone ?? getCalendarTimeZone());
+  const year = parseInt(monthRange.from.slice(0, 4), 10);
 
   const yearRange = {
     from: `${year}-01-01`,
@@ -1319,9 +1317,10 @@ export function invalidateReportsForChange(
   queryClient: QueryClient,
   changeType: "transaction" | "account" | "category" | "budget"
 ): void {
+  const balanceReports = [["reports", "netWorth"], ["reports", "cashflow"]];
   const invalidationMap = {
     transaction: [
-      ["reports", "cashflow"],
+      ...balanceReports,
       ["reports", "spending"],
       ["reports", "annual"],
       ["reports", "sankey"],
@@ -1329,10 +1328,7 @@ export function invalidateReportsForChange(
       ["reports", "savingsRate"],
       ["reports", "transactions"],
     ],
-    account: [
-      ["reports", "netWorth"],
-      ["reports", "cashflow"],
-    ],
+    account: balanceReports,
     category: [
       ["reports", "spending"],
       ["reports", "annual"],

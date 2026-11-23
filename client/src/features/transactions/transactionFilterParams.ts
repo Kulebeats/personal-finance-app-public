@@ -108,7 +108,7 @@ function parseDateParam(value: string | null): Date | null {
 }
 
 /** Format a Date into the "YYYY-MM-DD" URL param format using local date parts (no TZ shift). */
-function formatDateParam(date: Date | null): string | undefined {
+export function formatDateParam(date: Date | null | undefined): string | undefined {
   if (!date) return undefined;
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");

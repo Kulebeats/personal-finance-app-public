@@ -1,244 +1,145 @@
 import type { Budget } from "@shared/schema";
+import { isCurrencyCode } from "@shared/denomination";
 import Decimal from "decimal.js";
 import { Money } from "../core/money";
-import { budgetRepository } from "./BudgetRepository";
-import { loadBudgetContext } from "./budgetQueryUtils";
+import { BudgetDenominationUnavailable, readBudgetMoney } from "../core/money/budget-denomination";
+import { ConflictError } from "../core/errors";
+import { logger } from "../utils/logger";
+import type { BudgetReadContext } from "./BudgetReadContext";
+import { readBudgetProgressInputs, type BudgetProgressInputs } from "./BudgetProgressReadRepository";
+import { assembleBudgetSpentBatch, type BudgetSpentBatch } from "./BudgetSpendBatchQueries";
+import { unbudgetedSpend, type UnbudgetedSpend } from "./BudgetUnbudgetedSpend";
 
-/**
- * BudgetQueryRepository
- *
- * Read-optimized queries and budget progress calculations.
- */
-export class BudgetQueryRepository {
-  /**
-   * Get all budgets with their calculated spent amounts for a month
-   */
-  async getBudgetsWithProgress(
-    householdId: string,
-    year: number,
-    month: number,
-    options?: {
-      autoRolloverBudget?: boolean;
-      rolloverPercentage?: number;
-      currency?: string;
-    },
-  ): Promise<
-    Array<
-      Budget & {
-        spent: Money;
-        remaining: Money;
-        percentUsed: number;
-        rolloverIn: Money;
-      }
-    >
-  > {
-    const currency = options?.currency ?? "ZMW";
-    const allowAutoRollover = options?.autoRolloverBudget ?? true;
-    const rolloverPercentageValue = new Decimal(
-      Math.min(Math.max(options?.rolloverPercentage ?? 100, 0), 100),
-    );
-    const budgetList = await budgetRepository.findByHousehold(householdId);
-    const context =
-      budgetList.length > 0
-        ? await loadBudgetContext(householdId, budgetList)
-        : null;
+export type BudgetProgressRow = Budget & { amount: string; spent: Money; remaining: Money; percentUsed: number; rolloverIn: Money };
+type Options = { context: BudgetReadContext; currency?: string; autoRolloverBudget?: boolean; rolloverPercentage?: number; rolloverOnly?: boolean };
+export const BUDGET_CURRENCY_MISMATCH = "BUDGET_CURRENCY_MISMATCH";
+/** A budget whose limit cannot be reported in the household currency. It is
+ * listed with its reason instead of failing every other budget's progress. */
+export type UnavailableBudget = { id: string; name: string; categoryId: string | null; categoryGroupId: string | null;
+  currency: string; reason: { code: typeof BUDGET_CURRENCY_MISMATCH; message: string } };
+export type BudgetProgressProjection = { progress: BudgetProgressRow[]; unavailable: UnavailableBudget[]; preferences: BudgetProgressInputs["preferences"];
+  /** This month's spending in categories no budget covers (N3). */
+  unbudgeted: UnbudgetedSpend };
 
-    // Calculate date range for the month
-    const startDate = `${year}-${String(month).padStart(2, "0")}-01`;
-    const lastDay = new Date(year, month, 0).getDate();
-    const endDate = `${year}-${String(month).padStart(2, "0")}-${lastDay}`;
-    const budgetIds = budgetList.map((budget) => budget.id);
-    const currentPeriods = await budgetRepository.getBudgetPeriodsForRange(
-      budgetIds,
-      startDate,
-      endDate,
-    );
-    const currentPeriodByBudgetId = new Map(
-      currentPeriods.map((period) => [period.budgetId, period]),
-    );
-
-    const prevDate = new Date(year, month - 2, 1);
-    const prevYear = prevDate.getFullYear();
-    const prevMonth = prevDate.getMonth() + 1;
-    const prevStartDate = `${prevYear}-${String(prevMonth).padStart(2, "0")}-01`;
-    const prevLastDay = new Date(prevYear, prevMonth, 0).getDate();
-    const prevEndDate = `${prevYear}-${String(prevMonth).padStart(2, "0")}-${prevLastDay}`;
-    const prevPeriods = await budgetRepository.getBudgetPeriodsForRange(
-      budgetIds,
-      prevStartDate,
-      prevEndDate,
-    );
-    const prevPeriodByBudgetId = new Map(
-      prevPeriods.map((period) => [period.budgetId, period]),
-    );
-
-    // ISSUE-011: Batch calculate spent amounts to fix N+1 query
-    // Collect all category IDs and category group IDs
-    const categoryIds = budgetList
-      .map((b) => b.categoryId)
-      .filter((id): id is string => Boolean(id));
-    const categoryGroupIds = budgetList
-      .map((b) => b.categoryGroupId)
-      .filter((id): id is string => Boolean(id));
-
-    // Build type maps for determining income vs expense
-    const categoryTypeMap = new Map<string, "income" | "expense">();
-    const groupTypeMap = new Map<string, "income" | "expense">();
-
-    if (context) {
-      for (const budget of budgetList) {
-        if (budget.categoryId) {
-          const category = context.categoryMap.get(budget.categoryId);
-          const group = category?.groupId
-            ? context.groupMap.get(category.groupId)
-            : null;
-          const txType = group?.type === "income" ? "income" : "expense";
-          categoryTypeMap.set(budget.categoryId, txType);
-        }
-        if (budget.categoryGroupId) {
-          const group = context.groupMap.get(budget.categoryGroupId);
-          const txType = group?.type === "income" ? "income" : "expense";
-          groupTypeMap.set(budget.categoryGroupId, txType);
-        }
+function bounds(year: number, month: number) {
+  return { from: new Date(Date.UTC(year, month - 1, 1)).toISOString().slice(0, 10), to: new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10) };
+}
+function periodFor(input: BudgetProgressInputs, budgetId: string, range: ReturnType<typeof bounds>) {
+  const matching = input.periods.filter(row => row.budgetId === budgetId && row.from <= range.to && row.to >= range.from);
+  if (matching.length > 1 || matching.some(row => row.from !== range.from || row.to !== range.to)) throw new BudgetDenominationUnavailable();
+  return matching[0];
+}
+type DenominationEvidence = { budget: BudgetProgressInputs["budgets"][number]; current?: { currency: string | null }; enabled: unknown };
+/** The first valid currency this budget's limit is held in that is not the
+ * household's: its default, this month's limit, or (with rollover) any month
+ * it carries from. A limit is never converted with an assumed rate. */
+function foreignDenomination(input: BudgetProgressInputs, row: DenominationEvidence, currency: string): string | undefined {
+  const carried = row.enabled ? input.periods.filter(period => period.budgetId === row.budget.id).map(period => period.currency) : [];
+  return [row.budget.currency, row.current?.currency, ...carried].find(value => isCurrencyCode(value) && value !== currency) ?? undefined;
+}
+function unavailableBudget(budget: DenominationEvidence["budget"], foreign: string, currency: string): UnavailableBudget {
+  return { id: budget.id, name: budget.name, categoryId: budget.categoryId ?? null, categoryGroupId: budget.categoryGroupId ?? null,
+    currency: foreign, reason: { code: BUDGET_CURRENCY_MISMATCH,
+      message: `This budget's limit is in ${foreign} but the household reports in ${currency}. No verified conversion is applied, so its progress is not shown.` } };
+}
+export function assembleBudgetProgress(input: BudgetProgressInputs, year: number, month: number, options: Options): BudgetProgressProjection {
+  if (options.rolloverOnly && !input.preferences.autoRolloverBudget) {
+    return { progress: [], unavailable: [], preferences: input.preferences, unbudgeted: { expense: null, income: null } };
+  }
+  const currency = input.currency;
+  if (!isCurrencyCode(currency) || (options.currency !== undefined && options.currency !== currency)) throw new BudgetDenominationUnavailable();
+  const currentRange = bounds(year, month);
+  const categorySettings = new Map(input.categorySettings.map(row => [row.id, row]));
+  const groupSettings = new Map(input.groupSettings.map(row => [row.id, row]));
+  const autoRollover = options.autoRolloverBudget ?? input.preferences.autoRolloverBudget;
+  const percentage = new Decimal(Math.min(Math.max(options.rolloverPercentage ?? input.preferences.rolloverPercentage, 0), 100)).dividedBy(100);
+  const candidates = input.budgets.map(budget => {
+    const category = budget.categoryId ? categorySettings.get(budget.categoryId) : undefined;
+    const group = budget.categoryGroupId ? groupSettings.get(budget.categoryGroupId) : undefined;
+    const current = periodFor(input, budget.id, currentRange);
+    const enabled = autoRollover && (budget.rolloverEnabled || category?.rolloverEnabled || group?.rolloverEnabled);
+    const seed = !budget.rolloverEnabled && category?.rolloverEnabled ? category.rolloverStartBalance ?? "0" : budget.rolloverAmount ?? "0";
+    const born = new Date(budget.createdAt).toISOString().slice(0, 7);
+    const earliest = input.periods.filter(row => row.budgetId === budget.id).map(row => row.from.slice(0, 7)).sort()[0];
+    // R5-03: rollover starts at the first month with a limit. A budget with no
+    // recurring default (month-only) has none before its earliest period.
+    const firstLimit = budget.amount === null ? earliest : [born, earliest ?? born].sort()[0];
+    const anchor = [firstLimit ?? currentRange.from.slice(0, 7), currentRange.from.slice(0, 7)].sort()[0];
+    return { budget, current, enabled, seed, anchor };
+  }).filter(row => (row.current?.amount ?? row.budget.amount) !== null)
+    .map(row => ({ ...row, foreign: foreignDenomination(input, row, currency) }));
+  // A foreign-denominated budget is set aside on its own. It does not change
+  // any other budget's spend (flex spend never depends on the budget list).
+  const configured = candidates.filter(row => !row.foreign);
+  const unavailable = candidates.flatMap(row => row.foreign ? [unavailableBudget(row.budget, row.foreign, currency)] : []);
+  const categoryTypes = new Map<string, "income" | "expense">(), groupTypes = new Map<string, "income" | "expense">();
+  for (const { budget } of configured) {
+    if (budget.categoryId) {
+      const groupId = categorySettings.get(budget.categoryId)?.groupId;
+      categoryTypes.set(budget.categoryId, groupId && groupSettings.get(groupId)?.type === "income" ? "income" : "expense");
+    }
+    if (budget.categoryGroupId) groupTypes.set(budget.categoryGroupId, groupSettings.get(budget.categoryGroupId)?.type === "income" ? "income" : "expense");
+  }
+  const spentFor = (range: ReturnType<typeof bounds>, rows: typeof configured) => assembleBudgetSpentBatch(
+    { ...input, flows: input.flows.filter(row => row.date >= range.from && row.date <= range.to) },
+    rows.map(row => row.budget.categoryId).filter((id): id is string => Boolean(id)),
+    rows.map(row => row.budget.categoryGroupId).filter((id): id is string => Boolean(id)), currency,
+    categoryTypes, groupTypes, rows.some(row => row.budget.isFlexBucket));
+  const currentSpent = spentFor(currentRange, configured);
+  const pastSpend = new Map<string, BudgetSpentBatch>();
+  const amountSpent = (budget: Pick<Budget, "isFlexBucket" | "categoryId" | "categoryGroupId">, spent: BudgetSpentBatch) => budget.isFlexBucket ? spent.flexTotal
+    : budget.categoryId ? spent.byCategoryId.get(budget.categoryId) ?? Money.zero(currency)
+      : budget.categoryGroupId ? spent.byCategoryGroupId.get(budget.categoryGroupId) ?? Money.zero(currency) : Money.zero(currency);
+  const progress = configured.map(({ budget, current, enabled, seed, anchor }): BudgetProgressRow => {
+    const currentLimit = readBudgetMoney((current?.amount ?? budget.amount)!, current ? current.currency : budget.currency, currency);
+    const spent = amountSpent(budget, currentSpent);
+    let rolloverIn = Money.zero(currency);
+    if (enabled) {
+      rolloverIn = new Money(seed, currency).isZero() ? Money.zero(currency) : readBudgetMoney(seed, budget.currency, currency);
+      const cursor = new Date(`${anchor}-01T00:00:00Z`);
+      while (cursor.toISOString().slice(0, 7) < currentRange.from.slice(0, 7)) {
+        const range = bounds(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1), key = range.from.slice(0, 7);
+        const override = periodFor(input, budget.id, range);
+        // A later recurring-default edit is not evidence of an earlier limit.
+        // Missing monthly evidence is explicitly unavailable, never a guess.
+        if (!override && (budget.amount === null || new Date(budget.updatedAt).toISOString().slice(0, 7) > key)) throw new BudgetDenominationUnavailable();
+        const limit = readBudgetMoney((override?.amount ?? budget.amount)!, override ? override.currency : budget.currency, currency);
+        if (!pastSpend.has(key)) pastSpend.set(key, spentFor(range, configured.filter(row => row.enabled && row.anchor <= key)));
+        rolloverIn = rolloverIn.add(limit).subtract(amountSpent(budget, pastSpend.get(key)!));
+        if (rolloverIn.amount.greaterThan(0)) rolloverIn = rolloverIn.multiply(percentage);
+        cursor.setUTCMonth(cursor.getUTCMonth() + 1);
       }
     }
-
-    // Batch fetch spent amounts for current period
-    const currentSpent = await budgetRepository.batchCalculateSpent(
-      householdId,
-      categoryIds,
-      categoryGroupIds,
-      startDate,
-      endDate,
-      currency,
-      categoryTypeMap,
-      groupTypeMap,
-    );
-
-    // Batch fetch spent amounts for previous period (for rollover)
-    const prevSpent = await budgetRepository.batchCalculateSpent(
-      householdId,
-      categoryIds,
-      categoryGroupIds,
-      prevStartDate,
-      prevEndDate,
-      currency,
-      categoryTypeMap,
-      groupTypeMap,
-    );
-
-    // Helper to look up spent from batch results
-    const getSpentFromBatch = (
-      budget: Budget,
-      spentData: typeof currentSpent,
-    ): Money => {
-      if (budget.isFlexBucket) {
-        return spentData.flexTotal;
-      }
-      if (budget.categoryId) {
-        return (
-          spentData.byCategoryId.get(budget.categoryId) || Money.zero(currency)
-        );
-      }
-      if (budget.categoryGroupId) {
-        return (
-          spentData.byCategoryGroupId.get(budget.categoryGroupId) ||
-          Money.zero(currency)
-        );
-      }
-      return Money.zero(currency);
-    };
-
-    // ISSUE-011: Use batch results instead of N+1 queries
-    const results = budgetList.map((budget) => {
-      const currentPeriod = currentPeriodByBudgetId.get(budget.id);
-      const currentBudgetAmount = Money.from(
-        currentPeriod?.budgetAmount ?? budget.amount,
-        currency,
-      );
-      let rolloverEnabled = budget.rolloverEnabled;
-      let rolloverStartBalance = budget.rolloverAmount;
-
-      if (budget.categoryId) {
-        const category = context?.categoryMap.get(budget.categoryId) || null;
-        if (!rolloverEnabled && category?.rolloverEnabled) {
-          rolloverEnabled = true;
-          rolloverStartBalance = category.rolloverStartBalance || "0";
-        }
-      } else if (budget.categoryGroupId) {
-        const group = context?.groupMap.get(budget.categoryGroupId) || null;
-        if (!rolloverEnabled && group?.rolloverEnabled) {
-          rolloverEnabled = true;
-        }
-      }
-
-      if (!allowAutoRollover) {
-        rolloverEnabled = false;
-      }
-
-      // Use batch results instead of individual query
-      const spent = getSpentFromBatch(budget, currentSpent);
-
-      let rollover = Money.zero(currency);
-      if (rolloverEnabled) {
-        const prevPeriod = prevPeriodByBudgetId.get(budget.id);
-        const prevBudgetAmount = Money.from(
-          prevPeriod?.budgetAmount ?? budget.amount,
-          currency,
-        );
-        const prevRolloverIn = Money.from(
-          prevPeriod?.rolloverIn ??
-            (rolloverStartBalance ? rolloverStartBalance : "0"),
-          currency,
-        );
-        // Use batch results instead of individual query
-        const prevSpentAmount = getSpentFromBatch(budget, prevSpent);
-
-        // rollover = prevRolloverIn + prevBudgetAmount - prevSpent
-        let rolloverCalc = prevRolloverIn
-          .add(prevBudgetAmount)
-          .subtract(prevSpentAmount);
-        if (rolloverCalc.isPositive()) {
-          // Apply rollover percentage using Decimal
-          rolloverCalc = rolloverCalc.multiply(
-            rolloverPercentageValue.dividedBy(100),
-          );
-        }
-        // Check for valid number (replaces !Number.isFinite check)
-        if (!rolloverCalc.amount.isFinite()) {
-          rolloverCalc = Money.zero(currency);
-        }
-        rollover = rolloverCalc;
-        // Note: Period persistence is handled by BudgetCoreService.processBudgetRollover()
-        // This method is now a pure read operation
-      }
-
-      const totalBudget = currentBudgetAmount.add(rollover);
-      const remaining = totalBudget.subtract(spent);
-
-      // Calculate percentUsed using Decimal for precision
-      const spentDecimal = spent.amount;
-      const totalBudgetDecimal = totalBudget.amount;
-      const percentUsed = totalBudgetDecimal.isPositive()
-        ? spentDecimal
-            .dividedBy(totalBudgetDecimal)
-            .times(100)
-            .toDecimalPlaces(2)
-            .toNumber()
-        : 0;
-
-      return {
-        ...budget,
-        amount: currentBudgetAmount.toString(),
-        spent,
-        remaining,
-        percentUsed,
-        rolloverIn: rollover,
-      };
-    });
-
-    return results;
-  }
+    const total = currentLimit.add(rolloverIn);
+    return { ...budget, createdAt: new Date(budget.createdAt), updatedAt: new Date(budget.updatedAt), currency,
+      amount: currentLimit.toString(), spent, remaining: total.subtract(spent), rolloverIn,
+      percentUsed: total.amount.greaterThan(0) ? spent.amount.dividedBy(total.amount).times(100).toDecimalPlaces(2).toNumber() : 0 };
+  });
+  const unbudgeted = unbudgetedSpend(input, currentRange, candidates.map(row => row.budget), currency);
+  return { progress, unavailable, preferences: input.preferences, unbudgeted };
 }
 
+export class BudgetQueryRepository {
+  async getProgressProjection(householdId: string, year: number, month: number, options: Options): Promise<BudgetProgressProjection> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const input = await readBudgetProgressInputs(householdId, year, month, options?.context);
+      let result: BudgetProgressProjection | undefined, failure: BudgetDenominationUnavailable | undefined;
+      try { result = assembleBudgetProgress(input, year, month, options); }
+      catch (error) { if (error instanceof BudgetDenominationUnavailable) failure = error; else throw error; }
+      const current = await readBudgetProgressInputs(householdId, year, month, options.context);
+      if (JSON.stringify(input) !== JSON.stringify(current)) continue;
+      if (failure) throw failure;
+      // Set-aside budgets are surfaced to HTTP callers in meta; system readers
+      // (rollover, cron alerts) skip them, so record that here (C3-10).
+      if (result!.unavailable.length) logger.warn("Budget progress set aside budgets not in the household currency", {
+        householdId, year, month, budgets: result!.unavailable.map(row => ({ id: row.id, currency: row.currency })) });
+      return result!;
+    }
+    throw new ConflictError("Budget progress inputs changed. Please try again.");
+  }
+
+  async getBudgetsWithProgress(householdId: string, year: number, month: number, options: Options): Promise<BudgetProgressRow[]> {
+    return (await this.getProgressProjection(householdId, year, month, options)).progress;
+  }
+}
 export const budgetQueryRepository = new BudgetQueryRepository();

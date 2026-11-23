@@ -7,7 +7,16 @@
  */
 
 import { z } from "zod";
+import {
+  CUSTOM_CHART_AGGREGATIONS,
+  CUSTOM_CHART_GROUPS,
+  CUSTOM_CHART_PERIODS,
+  CUSTOM_CHART_PRIMARY_METRICS,
+  CUSTOM_CHART_SECONDARY_METRICS,
+  canGroupCustomChartMetric,
+} from "@shared/reports";
 import { ValidationError } from "../../core/errors";
+import { strictBooleanSchema } from "../../core/validation/query-boolean";
 
 // ============================================================================
 // Base Helpers
@@ -29,12 +38,8 @@ const dateStringSchema = z
     );
   }, { message: "Invalid date - the date does not exist" });
 
-// z.coerce.boolean() uses JS Boolean(), so the string "false" coerces to TRUE.
-// Parse query-string booleans explicitly so "false" means false.
-const booleanStringSchema = z.preprocess(
-  (v) => (v === "true" ? true : v === "false" ? false : v),
-  z.boolean(),
-);
+// Query-string booleans: "false" means false (see core/validation/query-boolean).
+const booleanStringSchema = strictBooleanSchema;
 const scopeSchema = z.enum(["household", "mine"]);
 const txnTypeSchema = z.enum(["income", "expense", "transfer"]);
 const sortSchema = z.enum(["date_desc", "date_asc", "amount_desc", "amount_asc"]);
@@ -305,52 +310,39 @@ export const reportsForecastQuerySchema = baseReportQuerySchema.extend({
 });
 
 // FIX REPORTS-CUSTOM-VAL-001: Enum validation for custom chart parameters
-const primaryMetricEnum = z.enum([
-  "income",
-  "expenses",
-  "netSavings",
-  "savings",
-  "savingsContributions",
-  "netWorth",
-  "savingsRate",
-]);
+const customChartPeriodSchema = z.enum(CUSTOM_CHART_PERIODS);
+const customChartAggregationSchema = z.enum(CUSTOM_CHART_AGGREGATIONS);
 
-const secondaryMetricEnum = z.enum(["income", "expenses", "savings"]);
-
-const groupByEnum = z.enum([
-  "categoryGroup",
-  "category",
-  "merchant",
-  "merchantCategory",
-  "tag",
-  "none",
-]);
-
-const aggregationEnum = z.enum(["sum", "avg", "count", "min", "max"]);
-
-export const reportsCustomBodySchema = z.object({
+const customChartInput = z.object({
   name: z.string().max(100).optional(),
   chartType: z.enum(["bar", "line", "pie", "area", "horizontal_bar"]),
-  primaryMetric: primaryMetricEnum,
-  secondaryMetric: secondaryMetricEnum.optional(),
-  groupBy: groupByEnum.optional(),
-  aggregation: aggregationEnum.optional(),
+  primaryMetric: z.enum(CUSTOM_CHART_PRIMARY_METRICS),
+  secondaryMetric: z.enum(CUSTOM_CHART_SECONDARY_METRICS).optional(),
+  groupBy: z.enum([...CUSTOM_CHART_GROUPS, "none"]).optional(),
+  period: customChartPeriodSchema.optional(),
+  aggregation: customChartAggregationSchema.or(customChartPeriodSchema).optional(),
   from: dateStringSchema,
   to: dateStringSchema,
   scope: scopeSchema.optional(),
 });
 
+// Older previews sent the period in aggregation. Keep it separate downstream.
+const normalizeCustomChartInput = <T extends z.infer<typeof customChartInput>>({ period, aggregation, ...input }: T) => ({
+  ...input,
+  period: period ?? CUSTOM_CHART_PERIODS.find(value => value === aggregation),
+  aggregation: CUSTOM_CHART_AGGREGATIONS.find(value => value === aggregation),
+});
+
+const checkCustomChartGrouping = ({ groupBy, primaryMetric }: z.infer<typeof customChartInput>) =>
+  !groupBy || groupBy === "none" || canGroupCustomChartMetric(primaryMetric);
+const customChartGroupingIssue = { path: ["groupBy"], message: "Only income and expenses can be grouped" };
+
+export const reportsCustomBodySchema = customChartInput
+  .refine(checkCustomChartGrouping, customChartGroupingIssue).transform(normalizeCustomChartInput);
+
 export const reportsCustomQuerySchema = applyDateRange(
-  baseReportQuerySchema.extend({
-    name: z.string().max(100).optional(),
-    chartType: z.enum(["bar", "line", "pie", "area", "horizontal_bar"]),
-    primaryMetric: primaryMetricEnum,
-    secondaryMetric: secondaryMetricEnum.optional(),
-    groupBy: groupByEnum.optional(),
-    aggregation: aggregationEnum.optional(),
-    from: dateStringSchema,
-    to: dateStringSchema,
-  })
+  baseReportQuerySchema.merge(customChartInput)
+    .refine(checkCustomChartGrouping, customChartGroupingIssue).transform(normalizeCustomChartInput)
 );
 
 // ============================================================================

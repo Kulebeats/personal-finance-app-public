@@ -12,10 +12,10 @@ import {
   Check,
   ArrowRight,
   Tag,
-  ChevronRight,
   Copy,
   Scissors,
   Repeat,
+  Pencil,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -31,7 +31,6 @@ import {
   SelectLabel,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { formatCurrency } from "@/lib/money";
 import { format, parseISO } from "date-fns";
 import { useCategories, type Category } from "@/hooks/useCategories";
 import {
@@ -49,6 +48,8 @@ import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { duplicateTransaction } from "../utils/export";
 import { toast } from "sonner";
 import type { TransactionWithDetails } from "../types";
+import { TransactionAmountHeader } from "./TransactionAmountHeader";
+
 // Import directly from the sibling module (not the feature barrel) to avoid
 // a circular import back into this file via features/transactions/index.ts.
 import { buildTransactionsUrl } from "../transactionFilterParams";
@@ -66,9 +67,10 @@ interface TransactionDetailModalProps {
   transaction: TransactionWithDetails | null;
   onClose: () => void;
   onUpdate: (id: string, updates: Record<string, unknown>) => void;
-  onOpenRule: (merchant: string, category: string) => void;
+  onOpenRule: (merchant: string, categoryId: string | null, categoryName: string) => void;
   onOpenRecurring: (transaction: TransactionWithDetails) => void;
   onOpenSplit?: (transaction: TransactionWithDetails) => void;
+  onEdit?: (transaction: TransactionWithDetails) => void;
   /** @deprecated Use tag hooks internally instead */
   availableTags?: string[];
 }
@@ -80,6 +82,7 @@ export function TransactionDetailModal({
   onOpenRule,
   onOpenRecurring,
   onOpenSplit,
+  onEdit,
 }: TransactionDetailModalProps) {
   const [, setLocation] = useLocation();
   const { data: categoriesData } = useCategories();
@@ -120,8 +123,7 @@ export function TransactionDetailModal({
   if (!transaction) return null;
 
   const displayName = transaction.merchantName || transaction.name || "Unknown";
-  // Use type field to determine income/expense, not sign inference (T-02 fix)
-  const isIncome = transaction.type === "income";
+  const selectedRuleCategory = categories.find((category) => category.id === categoryId);
 
   // Group categories
   const groupedCategories = categories.reduce(
@@ -221,11 +223,21 @@ export function TransactionDetailModal({
       role="dialog"
       aria-modal="true"
       aria-label="Transaction details"
+      aria-describedby="transaction-detail-description"
     >
       <Card className="w-full max-w-lg bg-card shadow-2xl overflow-hidden flex flex-col h-full animate-in slide-in-from-right-10 duration-300 rounded-l-xl">
+        <p id="transaction-detail-description" className="sr-only">
+          Review and update this transaction, or create a rule using its merchant and category.
+        </p>
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b bg-muted/10">
           <div className="flex items-center gap-1">
+            {onEdit && (transaction.type === "income" || transaction.type === "expense") && (
+              <button aria-label="Edit transaction" onClick={() => onEdit(transaction)}
+                className="p-2 hover:bg-muted rounded-md text-muted-foreground hover:text-foreground">
+                <Pencil className="w-4 h-4" />
+              </button>
+            )}
             <button
               aria-label={
                 transaction.reviewedAt
@@ -286,41 +298,11 @@ export function TransactionDetailModal({
         {/* Content */}
         <div className="p-6 overflow-y-auto flex-1">
           {/* Amount Header */}
-          <div className="flex items-start justify-between mb-8">
-            <div className="flex items-start gap-4">
-              <div className="w-14 h-14 rounded-full bg-muted/20 flex items-center justify-center text-2xl font-medium border">
-                {displayName[0]?.toUpperCase()}
-              </div>
-              <div>
-                <h2 className="text-2xl font-bold mb-1">{displayName}</h2>
-                <button
-                  onClick={handleViewTransactions}
-                  className="text-sm text-primary hover:underline flex items-center gap-1"
-                >
-                  View transactions <ChevronRight className="w-3 h-3" />
-                </button>
-              </div>
-            </div>
-            <div className="text-right">
-              <div
-                className={cn(
-                  "text-2xl font-bold mb-1",
-                  isIncome ? "text-green-600" : "text-foreground",
-                )}
-              >
-                {isIncome ? "+" : ""}
-                {formatCurrency(transaction.amount)}
-              </div>
-              {/* Audit v2 P2: the account badge was static text with no way
-                  to reach the account it names. */}
-              <Link
-                href={`/accounts/${transaction.accountId}`}
-                className="text-xs text-muted-foreground bg-muted/50 px-2 py-1 rounded-full hover:bg-muted hover:text-foreground transition-colors inline-block"
-              >
-                {transaction.accountName || "Account"}
-              </Link>
-            </div>
-          </div>
+          <TransactionAmountHeader
+            transaction={transaction}
+            displayName={displayName}
+            onViewTransactions={handleViewTransactions}
+          />
 
           {/* Details */}
           <div className="space-y-6">
@@ -449,7 +431,8 @@ export function TransactionDetailModal({
             onClick={() =>
               onOpenRule(
                 displayName,
-                categories.find((c) => c.id === categoryId)?.name || "",
+                selectedRuleCategory?.id || null,
+                selectedRuleCategory?.name || "",
               )
             }
           >

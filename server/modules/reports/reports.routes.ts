@@ -9,6 +9,7 @@
 
 import { Router } from "express";
 import { householdGuard } from "../../middleware/householdGuard";
+import { requireCapability } from "../../core/authz/requireCapability";
 import {
   analyticsLimiter,
   expensiveAnalyticsLimiter,
@@ -88,17 +89,11 @@ router.get(
   "/spending/subcategory",
   reportsSpendingController.getSubcategoryBreakdown,
 );
-// FIX PERF-REPORTS-001: Apply expensive limiter to custom chart endpoints
-router.get(
-  "/custom",
-  expensiveAnalyticsLimiter,
-  reportsCustomController.getCustomChart,
-);
-router.post(
-  "/custom",
-  expensiveAnalyticsLimiter,
-  reportsCustomController.executeCustomChart,
-);
+// AH-09 / R04.3: both verbs run the same custom chart, so both need
+// financial.export; PERF-REPORTS-001 keeps the expensive limiter on them.
+const canRunCustomChart = requireCapability("financial.export");
+router.get("/custom", canRunCustomChart, expensiveAnalyticsLimiter, reportsCustomController.getCustomChart);
+router.post("/custom", canRunCustomChart, expensiveAnalyticsLimiter, reportsCustomController.executeCustomChart);
 
 // =========================================================================
 // Exports

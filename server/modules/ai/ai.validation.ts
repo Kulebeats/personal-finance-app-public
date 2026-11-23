@@ -25,7 +25,12 @@ export const chatRequestSchema = z.object({
     .min(1, "Message cannot be empty")
     .max(1000, "Message exceeds maximum length of 1000 characters")
     .trim(),
-  conversationId: z.string().uuid().optional()
+  conversationId: z.string().uuid().optional(),
+  // R17: the client's idempotency key for ONE logical request; resend it on a
+  // retry so a request that already completed replays instead of re-running.
+  clientRequestKey: z.string()
+    .regex(/^[A-Za-z0-9_-]{16,128}$/, "clientRequestKey must be 16-128 URL-safe characters")
+    .optional()
 });
 
 export const conversationListQuerySchema = z.object({
@@ -44,8 +49,15 @@ export const conversationIdSchema = z.object({
   id: z.string().uuid()
 });
 
+// R17 (Astra #255 r3): a grant names the disclosure version the actor was
+// shown, so a page rendered before the disclosure changed cannot grant the new
+// one. A revoke needs no version.
 export const consentRequestSchema = z.object({
-  consentGiven: z.boolean()
+  consentGiven: z.boolean(),
+  consentVersion: z.string().min(1).max(32).optional()
+}).refine((body) => !body.consentGiven || body.consentVersion !== undefined, {
+  message: 'consentVersion is required to grant consent',
+  path: ['consentVersion']
 });
 
 // ============================================================================

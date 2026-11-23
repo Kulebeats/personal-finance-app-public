@@ -96,7 +96,7 @@ vi.mock("@/hooks/use-settings", () => ({
   })),
   useHouseholdMembers: vi.fn(() => ({
     data: [
-      { userId: "u1", user: { fullName: "John Doe", email: "john@example.com" } },
+      { userId: "u1", name: "John Doe", email: "john@example.com", role: "owner", joinedAt: null },
     ],
     isLoading: false,
   })),
@@ -407,6 +407,42 @@ describe("RulesSection", () => {
       const [arg] = mockCreateRule.mock.calls[0];
       expect(arg).not.toHaveProperty("data");
       expect(arg).not.toHaveProperty("id");
+    });
+  });
+
+  describe("reordering while a search is active", () => {
+    const ruleNamed = (id: string, name: string, priority: number) => ({
+      ...mockRules[0],
+      id,
+      name,
+      priority,
+      conditions: [{ type: "merchant_contains", value: "Shoprite", value2: null }],
+      actions: [{ type: "categorize", value: "cat-utilities" }],
+    });
+
+    it("moves the rule that was clicked and its visible neighbour, not the rules at the same index in the full list", async () => {
+      mockedUseRules.mockReturnValue({
+        data: [
+          ruleNamed("rule-a", "Alpha Rent", 0),
+          ruleNamed("rule-b", "Beta Subscriptions", 1),
+          ruleNamed("rule-c", "Gamma Subscriptions", 2),
+        ],
+        isLoading: false,
+        error: null,
+      } as unknown as ReturnType<typeof useRules>);
+      const user = userEvent.setup();
+      render(<RulesSection />, { wrapper: createWrapper() });
+
+      await user.type(screen.getByPlaceholderText(/search rules/i), "Subscriptions");
+      await waitFor(() => {
+        expect(screen.queryByText("Alpha Rent")).not.toBeInTheDocument();
+      });
+
+      // Visible list is [Beta, Gamma]: Beta is first, so its "move down" swaps it with Gamma.
+      await user.click(screen.getAllByRole("button", { name: /move rule down/i })[0]);
+
+      expect(mockReorderRules).toHaveBeenCalledTimes(1);
+      expect(mockReorderRules).toHaveBeenCalledWith(["rule-a", "rule-c", "rule-b"]);
     });
   });
 });

@@ -149,14 +149,14 @@ describe("acceptInvite only for the invited email — real DB", () => {
     await db.delete(users).where(inArray(users.id, userIds));
   });
 
-  it("rejects a different account with 403, adds no member and leaves the invite unused", async () => {
+  it("rejects a different account with 409, adds no member and leaves the invite unused", async () => {
     currentUserId.value = strangerId;
 
     const res = await request(app)
       .post("/api/household/invite/accept")
       .send({ inviteCode: exactCode });
 
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(409);
     expect(res.body.error.message).toMatch(/different email address/i);
     expect(JSON.stringify(res.body)).not.toContain(exactEmail);
     expect(await findMembership(strangerId)).toBeUndefined();

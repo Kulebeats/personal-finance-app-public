@@ -12,7 +12,12 @@
  * process's zone, so on a UTC CI host the old code passed this test too.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { renderHook } from "@testing-library/react";
 import { useCurrentMonthRange, useLastNMonthsRange } from "../use-reports";
+
+// They subscribe to the calendar zone, so they run as hooks (NEW-15).
+const currentMonth = () => renderHook(() => useCurrentMonthRange()).result.current;
+const lastMonths = (months: number) => renderHook(() => useLastNMonthsRange(months)).result.current;
 
 const LUSAKA_OFFSET_MINUTES = -120;
 
@@ -32,14 +37,14 @@ describe("report month ranges in a UTC+2 browser", () => {
   });
 
   it("useCurrentMonthRange returns the local first and last day", () => {
-    expect(useCurrentMonthRange()).toEqual({
+    expect(currentMonth()).toEqual({
       from: "2026-11-01",
       to: "2026-11-30",
     });
   });
 
   it("useLastNMonthsRange starts on a local 1st and ends today", () => {
-    expect(useLastNMonthsRange(3)).toEqual({
+    expect(lastMonths(3)).toEqual({
       from: "2026-09-01",
       to: "2026-11-15",
     });

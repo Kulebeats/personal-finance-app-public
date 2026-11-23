@@ -8,6 +8,7 @@
  */
 
 export const EventTypes = {
+  SECURITY_NOTICE_REQUESTED: "security.notice.requested",
   // Transaction events
   TRANSACTION_CREATED: "transaction.created",
   TRANSACTION_UPDATED: "transaction.updated",

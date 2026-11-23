@@ -1,3 +1,5 @@
+import { throwIfResNotOk, type HttpError } from "@/lib/queryClient";
+import { protectedFetch } from "@/lib/protected-fetch";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "@/hooks/use-toast";
 // apiCall attaches the x-csrf-token header (raw fetch 403s under CSRF
@@ -13,13 +15,12 @@ import type {
 export type { WeeklyRecapData, WeeklyRecapResponse };
 
 async function fetchWeeklyRecap(): Promise<WeeklyRecapData> {
-  const response = await fetch("/api/weekly-recap", {
+  const response = await protectedFetch("/api/weekly-recap", {
     credentials: "include",
   });
+  await throwIfResNotOk(response);
 
-  if (!response.ok) {
-    throw new Error("Failed to fetch weekly recap");
-  }
+
 
   const json = await response.json();
   return json.data;
@@ -37,12 +38,22 @@ async function submitFeedback(data: WeeklyRecapFeedback) {
 }
 
 export function useWeeklyRecapData() {
-  return useQuery({
+  const query = useQuery({
     queryKey: ["weekly-recap"],
     queryFn: fetchWeeklyRecap,
-    staleTime: 1000 * 60 * 60, // 1 hour (data doesn't change much for a past week)
-    retry: 1,
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
+    refetchInterval: 60_000,
+    retry: (count, error) => {
+      const failure = error as HttpError;
+      return count < 1 && failure.status !== 401 && !["EMAIL_VERIFICATION_REQUIRED", "HOUSEHOLD_NOT_FOUND", "SESSION_CONTEXT_CHANGED"].includes(failure.code || "");
+    },
   });
+  // The surrounding session boundary owns this QueryClient. Withdraw cached
+  // private values during revalidation instead of showing the previous audience.
+  const isChecking = query.fetchStatus !== "idle";
+  return { ...query, isChecking, data: isChecking || query.isError ? undefined : query.data };
 }
 
 export function useWeeklyRecapFeedback() {

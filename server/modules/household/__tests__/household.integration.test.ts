@@ -1,8 +1,11 @@
 /**
  * Household Module - Integration Tests
  *
- * Tests household CRUD, role authorization (SEC-CRITICAL-002),
- * member management, and audit logging using mocked service layer.
+ * Tests household CRUD, invitations and audit logging using mocked service layer.
+ *
+ * Role changes, member removal, ownership transfer and leave run under row locks
+ * in ownership.service (NEW-12) and are tested against real Postgres in
+ * completion-r03.single-owner.realdb.integration.test.ts, not here.
  */
 
 import request from "supertest";
@@ -10,7 +13,7 @@ import express from "express";
 import session from "express-session";
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { randomUUID } from "crypto";
-import { ConflictError } from "../../../core/errors";
+import { ConflictError, ForbiddenError } from "../../../core/errors";
 
 // Mock repositories
 const mockHouseholdRepository = vi.hoisted(() => ({
@@ -22,21 +25,13 @@ const mockHouseholdRepository = vi.hoisted(() => ({
   addMember: vi.fn(),
   findMembers: vi.fn(),
   findMember: vi.fn(),
-  updateMemberRole: vi.fn(),
-  removeMember: vi.fn(),
-  // SCP-333: atomic, race-safe role change + last-member-guarded removal
-  updateMemberRoleAtomic: vi.fn(),
-  removeMemberWithLastMemberGuard: vi.fn(),
-  // SCP-318: atomic ownership transfer + invite acceptance
-  transferOwnership: vi.fn(),
-  acceptInvite: vi.fn(),
+  // SCP-318: atomic invite acceptance
   // Invitation methods (matching controller usage)
   findPendingInvitationsByHousehold: vi.fn(),
   findPendingInvitationByEmail: vi.fn(),
   findInvitationById: vi.fn(),
   findInvitationByCode: vi.fn(),
   createInvitation: vi.fn(),
-  updateInvitationExpiry: vi.fn(),
   deleteInvitation: vi.fn(),
   markInvitationAccepted: vi.fn(),
 }));
@@ -66,6 +61,13 @@ const mockAuditService = vi.hoisted(() => ({
   getIpAddress: vi.fn().mockReturnValue("127.0.0.1"),
 }));
 
+const mockRotateInvitationForResend = vi.hoisted(() => vi.fn());
+
+vi.mock("../invitations.resend", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../invitations.resend")>()),
+  rotateInvitationForResend: mockRotateInvitationForResend,
+}));
+
 vi.mock("../../../repositories/HouseholdRepository", () => ({
   householdRepository: mockHouseholdRepository,
 }));
@@ -88,6 +90,13 @@ vi.mock("../../../middleware/rateLimit", () => ({
 
 vi.mock("../../../seed", () => ({
   seedDefaultTags: mockSeedDefaultTags,
+}));
+
+// SET-05: the general-settings write runs under row locks in its own service,
+// tested against real Postgres in completion-r05.settings-guards.realdb.
+const mockUpdateHouseholdGeneral = vi.hoisted(() => vi.fn());
+vi.mock("../household.general.service", () => ({
+  updateHouseholdGeneral: mockUpdateHouseholdGeneral,
 }));
 
 // Import controller after mocks
@@ -350,270 +359,6 @@ describe("Household Integration Tests", () => {
   });
 
   // ==========================================================================
-  // PUT /api/household/members/:userId/role - Update Member Role
-  // ==========================================================================
-
-  describe("PUT /api/household/members/:userId/role - Role Authorization (SEC-CRITICAL-002)", () => {
-    const targetUserId = randomUUID();
-    const targetMember = {
-      userId: targetUserId,
-      householdId: testHouseholdId,
-      role: "member",
-      joinedAt: new Date(),
-    };
-
-    it("should allow owner to change member role to admin", async () => {
-      mockHouseholdRepository.findMember
-        .mockResolvedValueOnce(testOwnerMember) // Current user is owner
-        .mockResolvedValueOnce(targetMember); // Target is member
-      mockHouseholdRepository.updateMemberRoleAtomic.mockResolvedValue({
-        ...targetMember,
-        role: "admin",
-      });
-
-      const res = await request(app)
-        .put(`/api/household/members/${targetUserId}/role`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testOwnerId)
-        .send({ role: "admin" });
-
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.member.role).toBe("admin");
-      expect(mockAuditService.logUpdate).toHaveBeenCalled();
-    });
-
-    it("should allow admin to change member role", async () => {
-      mockHouseholdRepository.findMember
-        .mockResolvedValueOnce(testAdminMember) // Current user is admin
-        .mockResolvedValueOnce(targetMember); // Target is member
-      mockHouseholdRepository.updateMemberRoleAtomic.mockResolvedValue({
-        ...targetMember,
-        role: "view_only",
-      });
-
-      const res = await request(app)
-        .put(`/api/household/members/${targetUserId}/role`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testAdminId)
-        .send({ role: "view_only" });
-
-      expect(res.status).toBe(200);
-      expect(res.body.data.member.role).toBe("view_only");
-    });
-
-    it("should NOT allow member to change roles", async () => {
-      mockHouseholdRepository.findMember.mockResolvedValue(testMember); // Current user is member
-
-      const res = await request(app)
-        .put(`/api/household/members/${targetUserId}/role`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testMemberId)
-        .send({ role: "admin" });
-
-      expect(res.status).toBe(403);
-    });
-
-    it("should NOT allow view_only to change roles", async () => {
-      mockHouseholdRepository.findMember.mockResolvedValue(testViewOnlyMember);
-
-      const res = await request(app)
-        .put(`/api/household/members/${targetUserId}/role`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testViewOnlyId)
-        .send({ role: "admin" });
-
-      expect(res.status).toBe(403);
-    });
-
-    it("should NOT allow self-modification of role", async () => {
-      mockHouseholdRepository.findMember.mockResolvedValue(testOwnerMember);
-
-      const res = await request(app)
-        .put(`/api/household/members/${testOwnerId}/role`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testOwnerId)
-        .send({ role: "member" });
-
-      expect(res.status).toBe(400);
-    });
-
-    it("should NOT allow admin to promote to owner", async () => {
-      mockHouseholdRepository.findMember
-        .mockResolvedValueOnce(testAdminMember) // Current user is admin
-        .mockResolvedValueOnce(targetMember); // Target is member
-
-      const res = await request(app)
-        .put(`/api/household/members/${targetUserId}/role`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testAdminId)
-        .send({ role: "owner" });
-
-      expect(res.status).toBe(403);
-    });
-
-    it("should NOT allow admin to modify owner role", async () => {
-      mockHouseholdRepository.findMember
-        .mockResolvedValueOnce(testAdminMember) // Current user is admin
-        .mockResolvedValueOnce(testOwnerMember); // Target is owner
-
-      const res = await request(app)
-        .put(`/api/household/members/${testOwnerId}/role`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testAdminId)
-        .send({ role: "member" });
-
-      expect(res.status).toBe(403);
-    });
-
-    it("should allow owner to promote to owner", async () => {
-      mockHouseholdRepository.findMember
-        .mockResolvedValueOnce(testOwnerMember) // Current user is owner
-        .mockResolvedValueOnce(targetMember); // Target is member
-      mockHouseholdRepository.updateMemberRoleAtomic.mockResolvedValue({
-        ...targetMember,
-        role: "owner",
-      });
-
-      const res = await request(app)
-        .put(`/api/household/members/${targetUserId}/role`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testOwnerId)
-        .send({ role: "owner" });
-
-      expect(res.status).toBe(200);
-      expect(res.body.data.member.role).toBe("owner");
-    });
-
-    it("should return 404 for non-existent member", async () => {
-      mockHouseholdRepository.findMember
-        .mockResolvedValueOnce(testOwnerMember) // Current user is owner
-        .mockResolvedValueOnce(undefined); // Target not found
-
-      const res = await request(app)
-        .put(`/api/household/members/${randomUUID()}/role`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testOwnerId)
-        .send({ role: "admin" });
-
-      expect(res.status).toBe(404);
-    });
-
-    it("should validate role enum", async () => {
-      mockHouseholdRepository.findMember.mockResolvedValue(testOwnerMember);
-
-      const res = await request(app)
-        .put(`/api/household/members/${targetUserId}/role`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testOwnerId)
-        .send({ role: "superuser" }); // Invalid role
-
-      expect(res.status).toBe(400);
-    });
-  });
-
-  // ==========================================================================
-  // DELETE /api/household/members/:userId - Remove Member
-  // ==========================================================================
-
-  describe("DELETE /api/household/members/:userId - Member Removal", () => {
-    const removeUserId = randomUUID();
-    const removeTargetMember = {
-      userId: removeUserId,
-      householdId: testHouseholdId,
-      role: "member",
-      joinedAt: new Date(),
-    };
-
-    it("should allow owner to remove member", async () => {
-      mockHouseholdRepository.findByUserId.mockResolvedValue(testHousehold);
-      mockHouseholdRepository.findMember
-        .mockResolvedValueOnce(testOwnerMember) // Current user is owner
-        .mockResolvedValueOnce(removeTargetMember); // Target is member
-      mockHouseholdRepository.findMembers.mockResolvedValue([
-        testOwnerMember,
-        removeTargetMember,
-      ]); // More than 1 member
-      mockHouseholdRepository.removeMember.mockResolvedValue(undefined);
-
-      const res = await request(app)
-        .delete(`/api/household/members/${removeUserId}`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testOwnerId);
-
-      expect(res.status).toBe(200);
-      expect(mockAuditService.logDelete).toHaveBeenCalled();
-    });
-
-    it("should allow admin to remove member", async () => {
-      mockHouseholdRepository.findByUserId.mockResolvedValue(testHousehold);
-      mockHouseholdRepository.findMember
-        .mockResolvedValueOnce(testAdminMember) // Current user is admin
-        .mockResolvedValueOnce(removeTargetMember); // Target is member
-      mockHouseholdRepository.findMembers.mockResolvedValue([
-        testAdminMember,
-        removeTargetMember,
-      ]); // More than 1 member
-      mockHouseholdRepository.removeMember.mockResolvedValue(undefined);
-
-      const res = await request(app)
-        .delete(`/api/household/members/${removeUserId}`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testAdminId);
-
-      expect(res.status).toBe(200);
-    });
-
-    it("should NOT allow member to remove others", async () => {
-      mockHouseholdRepository.findMember.mockResolvedValue(testMember);
-
-      const res = await request(app)
-        .delete(`/api/household/members/${removeUserId}`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testMemberId);
-
-      expect(res.status).toBe(403);
-    });
-
-    it("should NOT allow self-removal", async () => {
-      mockHouseholdRepository.findMember.mockResolvedValue(testOwnerMember);
-
-      const res = await request(app)
-        .delete(`/api/household/members/${testOwnerId}`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testOwnerId);
-
-      expect(res.status).toBe(400);
-    });
-
-    it("should NOT allow admin to remove owner", async () => {
-      mockHouseholdRepository.findMember
-        .mockResolvedValueOnce(testAdminMember) // Current user is admin
-        .mockResolvedValueOnce(testOwnerMember); // Target is owner
-
-      const res = await request(app)
-        .delete(`/api/household/members/${testOwnerId}`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testAdminId);
-
-      expect(res.status).toBe(403);
-    });
-
-    it("should return 404 for non-existent member", async () => {
-      mockHouseholdRepository.findMember
-        .mockResolvedValueOnce(testOwnerMember) // Current user is owner
-        .mockResolvedValueOnce(undefined); // Target not found
-
-      const res = await request(app)
-        .delete(`/api/household/members/${randomUUID()}`)
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testOwnerId);
-
-      expect(res.status).toBe(404);
-    });
-  });
-
-  // ==========================================================================
   // POST /api/household/invite - Invite Member
   // ==========================================================================
 
@@ -753,7 +498,7 @@ describe("Household Integration Tests", () => {
         ...testHousehold,
         name: "Updated Household Name",
       };
-      mockHouseholdRepository.update.mockResolvedValue(updatedHousehold);
+      mockUpdateHouseholdGeneral.mockResolvedValue(updatedHousehold);
 
       const res = await request(app)
         .put("/api/household/general")
@@ -765,11 +510,17 @@ describe("Household Integration Tests", () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.data.household.name).toBe("Updated Household Name");
+      expect(mockUpdateHouseholdGeneral).toHaveBeenCalledWith(
+        testHouseholdId,
+        expect.any(String),
+        { name: "Updated Household Name" },
+        "127.0.0.1",
+      );
     });
 
     it("should update fiscal year start month", async () => {
       const updatedHousehold = { ...testHousehold, fiscalYearStartMonth: 4 };
-      mockHouseholdRepository.update.mockResolvedValue(updatedHousehold);
+      mockUpdateHouseholdGeneral.mockResolvedValue(updatedHousehold);
 
       const res = await request(app)
         .put("/api/household/general")
@@ -791,6 +542,7 @@ describe("Household Integration Tests", () => {
         });
 
       expect(res.status).toBe(400);
+      expect(mockUpdateHouseholdGeneral).not.toHaveBeenCalled();
     });
 
     it("should return 404 when user has no household", async () => {
@@ -877,114 +629,6 @@ describe("Household Integration Tests", () => {
   });
 
   // ==========================================================================
-  // POST /api/household/transfer-ownership - Transfer Ownership (EDGE-001, SEC-001)
-  // ==========================================================================
-
-  describe("POST /api/household/transfer-ownership - Ownership Transfer (EDGE-001, SEC-001)", () => {
-    it("should allow owner to transfer ownership to another member", async () => {
-      mockHouseholdRepository.findMember
-        .mockResolvedValueOnce(testOwnerMember) // Current user is owner
-        .mockResolvedValueOnce(testAdminMember); // Target is admin
-      mockHouseholdRepository.updateMemberRole
-        .mockResolvedValueOnce({ ...testAdminMember, role: "owner" })
-        .mockResolvedValueOnce({ ...testOwnerMember, role: "admin" });
-
-      const res = await request(app)
-        .post("/api/household/transfer-ownership")
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testOwnerId)
-        .send({ newOwnerId: testAdminId });
-
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(mockAuditService.log).toHaveBeenCalled();
-    });
-
-    it("should NOT allow non-owner to transfer ownership", async () => {
-      mockHouseholdRepository.findMember.mockResolvedValue(testAdminMember);
-
-      const res = await request(app)
-        .post("/api/household/transfer-ownership")
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testAdminId)
-        .send({ newOwnerId: testMemberId });
-
-      expect(res.status).toBe(403);
-    });
-
-    it("should validate target UUID format", async () => {
-      mockHouseholdRepository.findMember.mockResolvedValue(testOwnerMember);
-
-      const res = await request(app)
-        .post("/api/household/transfer-ownership")
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testOwnerId)
-        .send({ newOwnerId: "invalid-uuid" });
-
-      expect(res.status).toBe(400);
-    });
-
-    it("should return 404 for non-existent target member", async () => {
-      mockHouseholdRepository.findMember
-        .mockResolvedValueOnce(testOwnerMember) // Current user is owner
-        .mockResolvedValueOnce(undefined); // Target not found
-
-      const res = await request(app)
-        .post("/api/household/transfer-ownership")
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testOwnerId)
-        .send({ newOwnerId: randomUUID() });
-
-      expect(res.status).toBe(404);
-    });
-  });
-
-  // ==========================================================================
-  // POST /api/household/leave - Leave Household (EDGE-002, EDGE-003)
-  // ==========================================================================
-
-  describe("POST /api/household/leave - Leave Household (EDGE-002)", () => {
-    it("should allow member to leave household", async () => {
-      mockHouseholdRepository.findMember.mockResolvedValue(testMember);
-      mockHouseholdRepository.removeMember.mockResolvedValue(undefined);
-
-      const res = await request(app)
-        .post("/api/household/leave")
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testMemberId);
-
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(mockAuditService.log).toHaveBeenCalled();
-    });
-
-    it("should NOT allow owner to leave without transferring ownership", async () => {
-      mockHouseholdRepository.findMember.mockResolvedValue(testOwnerMember);
-
-      const res = await request(app)
-        .post("/api/household/leave")
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testOwnerId);
-
-      expect(res.status).toBe(403);
-      expect(res.body.error.message).toMatch(/transfer ownership/i);
-    });
-
-    it("should allow admin to leave household", async () => {
-      mockHouseholdRepository.findMember.mockResolvedValue(testAdminMember);
-      mockHouseholdRepository.removeMember.mockResolvedValue(undefined);
-
-      const res = await request(app)
-        .post("/api/household/leave")
-        .set("X-Test-Auth", "authenticated")
-        .set("X-Test-User-Id", testAdminId);
-
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-    });
-  });
-
-  // ==========================================================================
   // Invitation Management Tests (SEC-002)
   // ==========================================================================
 
@@ -1047,10 +691,9 @@ describe("Household Integration Tests", () => {
         };
 
         mockHouseholdRepository.findMember.mockResolvedValue(testOwnerMember);
-        mockHouseholdRepository.findInvitationById.mockResolvedValue(invitation);
-        mockHouseholdRepository.updateInvitationExpiry.mockResolvedValue({
-          ...invitation,
-          expiresAt: new Date(Date.now() + 7 * 86400000),
+        mockRotateInvitationForResend.mockResolvedValue({
+          invitation: { ...invitation, expiresAt: new Date(Date.now() + 7 * 86400000) },
+          inviteCode: "rotated-code-456",
         });
 
         const res = await request(app)
@@ -1061,11 +704,16 @@ describe("Household Integration Tests", () => {
         expect(res.status).toBe(200);
         expect(res.body.success).toBe(true);
         expect(mockSendEmail).toHaveBeenCalledTimes(1);
-        expect(mockAuditService.logUpdate).toHaveBeenCalled();
+        // The rotation, its lock and its audit row are covered against real
+        // Postgres in completion-r03.membership.realdb.integration.test.ts.
+        expect(mockRotateInvitationForResend).toHaveBeenCalledWith(
+          expect.objectContaining({ userId: testOwnerId, householdId: testHouseholdId }),
+          testInvitationId
+        );
       });
 
-      it("should reject resend for member role", async () => {
-        mockHouseholdRepository.findMember.mockResolvedValue(testMember);
+      it("returns a forbidden resend outcome without sending mail", async () => {
+        mockRotateInvitationForResend.mockRejectedValueOnce(new ForbiddenError("Only owners and admins can resend invitations"));
 
         const res = await request(app)
           .post(`/api/household/invitations/${testInvitationId}/resend`)
@@ -1073,6 +721,7 @@ describe("Household Integration Tests", () => {
           .set("X-Test-User-Id", testMemberId);
 
         expect(res.status).toBe(403);
+        expect(mockSendEmail).not.toHaveBeenCalled();
       });
     });
 
@@ -1129,70 +778,7 @@ describe("Household Integration Tests", () => {
       });
     });
 
-    describe("POST /api/household/invite/accept - Accept Invitation", () => {
-      const testNewUserId = randomUUID();
-
-      it("should accept valid invitation with invite code", async () => {
-        mockHouseholdRepository.findInvitationByCode.mockResolvedValue(
-          testInvitation,
-        );
-        // Signed in as the invited address (accept now requires it).
-        mockUserRepository.findById.mockResolvedValue({
-          id: testNewUserId,
-          email: testInvitation.email,
-        });
-        mockHouseholdRepository.findMember.mockResolvedValue(undefined); // User not already a member
-        mockHouseholdRepository.findByUserId.mockResolvedValue(undefined); // User has no household
-        mockHouseholdRepository.addMember.mockResolvedValue(testMember);
-        mockHouseholdRepository.markInvitationAccepted = vi
-          .fn()
-          .mockResolvedValue(undefined);
-        mockHouseholdRepository.findById.mockResolvedValue(testHousehold);
-
-        const res = await request(app)
-          .post("/api/household/invite/accept")
-          .set("X-Test-Auth", "authenticated")
-          .set("X-Test-User-Id", testNewUserId)
-          .send({ inviteCode: testToken });
-
-        expect(res.status).toBe(200);
-        expect(res.body.success).toBe(true);
-        expect(res.body.data.accepted).toBe(true);
-      });
-
-      it("should reject expired invitation", async () => {
-        const expiredInvitation = {
-          ...testInvitation,
-          expiresAt: new Date(Date.now() - 86400000), // Expired yesterday
-        };
-        mockHouseholdRepository.findInvitationByCode.mockResolvedValue(
-          expiredInvitation,
-        );
-
-        const res = await request(app)
-          .post("/api/household/invite/accept")
-          .set("X-Test-Auth", "authenticated")
-          .set("X-Test-User-Id", testNewUserId)
-          .send({ inviteCode: testToken });
-
-        expect(res.status).toBe(409); // ConflictError for expired
-        expect(res.body.error.message).toMatch(/expired/i);
-      });
-
-      it("should return 404 for invalid invite code", async () => {
-        mockHouseholdRepository.findInvitationByCode.mockResolvedValue(
-          undefined,
-        );
-
-        const res = await request(app)
-          .post("/api/household/invite/accept")
-          .set("X-Test-Auth", "authenticated")
-          .set("X-Test-User-Id", testNewUserId)
-          .send({ inviteCode: "invalid-code" });
-
-        expect(res.status).toBe(404);
-      });
-    });
+    // Accept runs as one locked transaction (invitations.accept.ts); its cases are real-DB tests in completion-r03.membership / invitations.accept-email.
   });
 
   // ==========================================================================
@@ -1200,83 +786,7 @@ describe("Household Integration Tests", () => {
   // ==========================================================================
 
   describe("Edge Case Tests", () => {
-    describe("EDGE-004: Duplicate Member Addition", () => {
-      it("should prevent adding same user twice to household", async () => {
-        const inviteCode = "test-invite-code";
-        const invitation = {
-          id: randomUUID(),
-          householdId: testHouseholdId,
-          email: "new@example.com",
-          role: "member",
-          inviteCode,
-          invitedBy: testOwnerId,
-          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-          acceptedAt: null,
-          acceptedBy: null,
-          createdAt: new Date(),
-        };
 
-        mockHouseholdRepository.findInvitationByCode.mockResolvedValue(
-          invitation
-        );
-        mockUserRepository.findById.mockResolvedValue({
-          id: testMemberId,
-          email: invitation.email,
-        });
-        // User is already a member
-        mockHouseholdRepository.findMember.mockResolvedValue(testMember);
-
-        const res = await request(app)
-          .post("/api/household/invite/accept")
-          .set("X-Test-Auth", "authenticated")
-          .set("X-Test-User-Id", testMemberId)
-          .send({ inviteCode });
-
-        expect(res.status).toBe(409);
-        expect(res.body.error?.message).toContain("already a member");
-      });
-    });
-
-    describe("EDGE-005: Concurrent Role Changes", () => {
-      it("should handle concurrent role update attempts gracefully", async () => {
-        // This would require actual database testing with transactions
-        // For now, verify that the controller properly checks member existence
-        mockHouseholdRepository.findMember
-          .mockResolvedValueOnce(testOwnerMember) // Current user
-          .mockResolvedValueOnce(testMember); // Target member
-
-        mockHouseholdRepository.updateMemberRoleAtomic.mockResolvedValue({
-          ...testMember,
-          role: "admin",
-        });
-
-        const res = await request(app)
-          .put(`/api/household/members/${testMemberId}/role`)
-          .set("X-Test-Auth", "authenticated")
-          .set("X-Test-User-Id", testOwnerId)
-          .send({ role: "admin" });
-
-        expect(res.status).toBe(200);
-        expect(mockHouseholdRepository.findMember).toHaveBeenCalledTimes(2);
-      });
-    });
-
-    describe("EDGE-006: Remove Non-Existent Member", () => {
-      it("should return 404 when removing non-existent member", async () => {
-        const nonExistentUserId = randomUUID();
-        mockHouseholdRepository.findMember
-          .mockResolvedValueOnce(testOwnerMember) // Current user
-          .mockResolvedValueOnce(undefined); // Target not found
-
-        const res = await request(app)
-          .delete(`/api/household/members/${nonExistentUserId}`)
-          .set("X-Test-Auth", "authenticated")
-          .set("X-Test-User-Id", testOwnerId);
-
-        expect(res.status).toBe(404);
-        expect(res.body.error?.message).toContain("Member not found");
-      });
-    });
 
     describe("EDGE-007: Very Long Household Name", () => {
       it("should accept household name up to 255 characters", async () => {
@@ -1362,10 +872,7 @@ describe("Household Integration Tests", () => {
 
     describe("VAL-002: Invalid Role Assignment", () => {
       it("should reject completely invalid role", async () => {
-        mockHouseholdRepository.findMember
-          .mockResolvedValueOnce(testOwnerMember)
-          .mockResolvedValueOnce(testMember);
-
+        // Rejected by Zod before any household or membership read.
         const res = await request(app)
           .put(`/api/household/members/${testMemberId}/role`)
           .set("X-Test-Auth", "authenticated")
@@ -1376,10 +883,7 @@ describe("Household Integration Tests", () => {
       });
 
       it("should reject old 'viewer' role value", async () => {
-        mockHouseholdRepository.findMember
-          .mockResolvedValueOnce(testOwnerMember)
-          .mockResolvedValueOnce(testMember);
-
+        // Rejected by Zod before any household or membership read.
         const res = await request(app)
           .put(`/api/household/members/${testMemberId}/role`)
           .set("X-Test-Auth", "authenticated")
@@ -1399,124 +903,8 @@ describe("Household Integration Tests", () => {
       });
     });
 
-    describe("SEC-004: Owner Transfer Authorization Tests", () => {
-      it("should prevent admin from transferring ownership", async () => {
-        // The VAL-002 tests above queue mockResolvedValueOnce(testOwnerMember)
-        // values on findMember that they never consume (they short-circuit at
-        // Zod validation). vi.clearAllMocks() does NOT drain that one-shot
-        // queue, so reset findMember here before setting the caller's role;
-        // otherwise the controller's first findMember call would return a
-        // leaked "owner" and skip the owner-only check.
-        mockHouseholdRepository.findMember.mockReset();
-        mockHouseholdRepository.findMember.mockResolvedValue(testAdminMember);
-
-        const res = await request(app)
-          .post("/api/household/transfer-ownership")
-          .set("X-Test-Auth", "authenticated")
-          .set("X-Test-User-Id", testAdminId)
-          .send({ newOwnerId: testMemberId });
-
-        expect(res.status).toBe(403);
-        expect(res.body.error?.message).toContain("owner can transfer");
-      });
-
-      it("should prevent member from transferring ownership", async () => {
-        // Reset to drain any leaked one-shot findMember resolutions (see note
-        // on the admin case above) so the controller sees the caller as a
-        // plain member, not a phantom owner.
-        mockHouseholdRepository.findMember.mockReset();
-        mockHouseholdRepository.findMember.mockResolvedValue(testMember);
-
-        const res = await request(app)
-          .post("/api/household/transfer-ownership")
-          .set("X-Test-Auth", "authenticated")
-          .set("X-Test-User-Id", testMemberId)
-          .send({ newOwnerId: testAdminId });
-
-        expect(res.status).toBe(403);
-        expect(res.body.error?.message).toContain("owner can transfer");
-      });
-
-      it("should audit log successful ownership transfer", async () => {
-        mockHouseholdRepository.findMember
-          .mockResolvedValueOnce(testOwnerMember)
-          .mockResolvedValueOnce(testAdminMember);
-        mockHouseholdRepository.updateMemberRole
-          .mockResolvedValueOnce({ ...testAdminMember, role: "owner" })
-          .mockResolvedValueOnce({ ...testOwnerMember, role: "admin" });
-
-        await request(app)
-          .post("/api/household/transfer-ownership")
-          .set("X-Test-Auth", "authenticated")
-          .set("X-Test-User-Id", testOwnerId)
-          .send({ newOwnerId: testAdminId });
-
-        expect(mockAuditService.log).toHaveBeenCalledWith(
-          expect.objectContaining({
-            action: "TRANSFER",
-            entityType: "user",
-            entityId: testAdminId,
-          })
-        );
-      });
-    });
-
     describe("SEC-005: Invitation Token Security Tests", () => {
-      it("should reject expired invitation", async () => {
-        const expiredInvitation = {
-          id: randomUUID(),
-          householdId: testHouseholdId,
-          email: "test@example.com",
-          role: "member",
-          inviteCode: "expired-code",
-          invitedBy: testOwnerId,
-          expiresAt: new Date(Date.now() - 24 * 60 * 60 * 1000), // Expired yesterday
-          acceptedAt: null,
-          acceptedBy: null,
-          createdAt: new Date(),
-        };
 
-        mockHouseholdRepository.findInvitationByCode.mockResolvedValue(
-          expiredInvitation
-        );
-
-        const res = await request(app)
-          .post("/api/household/invite/accept")
-          .set("X-Test-Auth", "authenticated")
-          .set("X-Test-User-Id", testMemberId)
-          .send({ inviteCode: "expired-code" });
-
-        expect(res.status).toBe(409);
-        expect(res.body.error?.message).toContain("expired");
-      });
-
-      it("should reject already used invitation", async () => {
-        const usedInvitation = {
-          id: randomUUID(),
-          householdId: testHouseholdId,
-          email: "test@example.com",
-          role: "member",
-          inviteCode: "used-code",
-          invitedBy: testOwnerId,
-          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-          acceptedAt: new Date(), // Already accepted
-          acceptedBy: testMemberId,
-          createdAt: new Date(),
-        };
-
-        mockHouseholdRepository.findInvitationByCode.mockResolvedValue(
-          usedInvitation
-        );
-
-        const res = await request(app)
-          .post("/api/household/invite/accept")
-          .set("X-Test-Auth", "authenticated")
-          .set("X-Test-User-Id", testAdminId)
-          .send({ inviteCode: "used-code" });
-
-        expect(res.status).toBe(409);
-        expect(res.body.error?.message).toContain("already been used");
-      });
 
       it("should generate cryptographically secure invite codes", async () => {
         mockHouseholdRepository.findMember.mockResolvedValue(testOwnerMember);

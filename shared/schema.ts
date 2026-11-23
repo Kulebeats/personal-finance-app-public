@@ -1,4 +1,5 @@
 import { sql, relations } from "drizzle-orm";
+export { durableJobItems, durableJobAttempts } from "./durable-jobs-schema";
 import {
   pgTable,
   text,
@@ -7,6 +8,7 @@ import {
   timestamp,
   boolean,
   integer,
+  smallint,
   decimal,
   date,
   time,
@@ -17,9 +19,15 @@ import {
   index,
   check,
   foreignKey,
+  primaryKey,
+  unique,
+  type PgTableExtraConfigValue,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema, createSelectSchema } from "drizzle-zod";
 import { z } from "zod";
+import { createSipAuthorizationSchema } from "./sip-authorization-schema";
+import { createSipOccurrenceSchema } from "./sip-occurrence-schema";
+import type { CustomChartPeriod } from "./reports";
 
 // ============================================================================
 // ENUMS
@@ -53,6 +61,7 @@ export const transactionTypeEnum = pgEnum("transaction_type", [
   "expense",
   "transfer",
   "balance_adjustment",
+  "asset_settlement",
 ]);
 
 export const transactionSourceEnum = pgEnum("transaction_source", [
@@ -157,6 +166,8 @@ export const grzBondPaymentStatusEnum = pgEnum("grz_bond_payment_status", [
   "scheduled",
   "paid",
   "missed",
+  // A disposal before the due date ends the entitlement (migration 0033).
+  "cancelled",
 ]);
 
 export const grzSecurityStatusEnum = pgEnum("grz_security_status", [
@@ -164,6 +175,9 @@ export const grzSecurityStatusEnum = pgEnum("grz_security_status", [
   "matured",
   "sold",
   "rolled_over",
+  // A-36: a T-bill past its maturity date whose bank credit the member has not
+  // yet confirmed. It stays in net worth at face less withholding.
+  "awaiting_receipt",
 ]);
 
 export const investmentNotificationTypeEnum = pgEnum(
@@ -256,6 +270,8 @@ export const users = pgTable("users", {
   username: varchar("username", { length: 255 }).notNull().unique(),
   email: varchar("email", { length: 255 }).notNull().unique(),
   passwordHash: text("password_hash").notNull(),
+  securityGeneration: integer("security_generation").notNull().default(0),
+  erasedAt: timestamp("erased_at"),
 
   // Email verification
   emailVerified: boolean("email_verified").default(false),
@@ -299,7 +315,6 @@ export const users = pgTable("users", {
   employmentStatus: varchar("employment_status", { length: 50 }), // employed, self-employed, retired
   investmentGoal: varchar("investment_goal", { length: 50 }), // conservative, moderate, aggressive
   riskTolerance: varchar("risk_tolerance", { length: 50 }), // low, medium, high
-  salaryRangeEncrypted: text("salary_range_encrypted"), // Encrypted salary range
 
   // Profile metadata
   profileCompleteness: integer("profile_completeness").default(0),
@@ -321,6 +336,8 @@ export const users = pgTable("users", {
   mfaCodeExpiry: timestamp("mfa_code_expiry"),
   mfaBackupCodes: jsonb("mfa_backup_codes").$type<string[]>(),
   mfaBackupCodesGeneratedAt: timestamp("mfa_backup_codes_generated_at"), // SEC-06: For 90-day expiry
+  // AH-11: MFA is mandatory after this deadline (14 days after the row, or after migration 0059).
+  mfaGraceEndsAt: timestamp("mfa_grace_ends_at", { withTimezone: true }).notNull().default(sql`now() + interval '14 days'`),
 },
 (table) => ({
   lockedUntilIdx: index("idx_users_locked_until")
@@ -423,6 +440,35 @@ export const userNotificationPreferences = pgTable(
   },
 );
 
+export const RECAP_FEEDBACK_STEPS = ["net-worth", "spending", "recurring", "goals", "wrap-up", "overall"] as const;
+export const RECAP_FEEDBACK_CHOICES = ["positive", "negative"] as const;
+export const RECAP_FEEDBACK_COMMENT_LIMIT = 500;
+
+/**
+ * NEW-31 (R16.3): one structured answer per user, household, recap week and
+ * step. A replay or a changed answer updates that row; it never adds another.
+ */
+export const weeklyRecapFeedback = pgTable("weekly_recap_feedback", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  householdId: uuid("household_id").notNull().references(() => households.id, { onDelete: "cascade" }),
+  weekStart: date("week_start").notNull(),
+  weekEnd: date("week_end").notNull(),
+  step: varchar("step", { length: 20 }).notNull(),
+  choice: varchar("choice", { length: 10 }).notNull(),
+  comment: text("comment"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ({
+  identity: uniqueIndex("uq_weekly_recap_feedback_identity")
+    .on(table.userId, table.householdId, table.weekStart, table.step),
+  householdWeek: index("idx_weekly_recap_feedback_household_week").on(table.householdId, table.weekStart),
+  sevenDates: check("chk_weekly_recap_feedback_week", sql`${table.weekEnd} = ${table.weekStart} + 6`),
+  knownStep: check("chk_weekly_recap_feedback_step", sql`${table.step} IN ('net-worth', 'spending', 'recurring', 'goals', 'wrap-up', 'overall')`),
+  knownChoice: check("chk_weekly_recap_feedback_choice", sql`${table.choice} IN ('positive', 'negative')`),
+  boundedComment: check("chk_weekly_recap_feedback_comment", sql`${table.comment} IS NULL OR char_length(${table.comment}) <= 500`),
+}));
+
 export const userPushSubscriptions = pgTable("user_push_subscriptions", {
   id: uuid("id").primaryKey().defaultRandom(),
   userId: uuid("user_id")
@@ -430,11 +476,16 @@ export const userPushSubscriptions = pgTable("user_push_subscriptions", {
     .references(() => users.id, { onDelete: "cascade" }),
   endpoint: text("endpoint").notNull().unique(),
   keys: jsonb("keys").notNull(), // { p256dh: string, auth: string }
+  // sessionIdentityHash(sid) of the session that registered this browser:
+  // signing out or revoking that session removes the row. NULL only on rows
+  // saved before 0057, until the browser registers again.
+  sessionIdHash: varchar("session_id_hash", { length: 64 }),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 },
 (table) => ({
   userIdx: index("idx_user_push_subscriptions_user_id").on(table.userId),
+  userSessionIdx: index("idx_user_push_subscriptions_user_session").on(table.userId, table.sessionIdHash),
   endpointIdx: index("idx_user_push_subscriptions_endpoint").on(
     table.endpoint,
   ),
@@ -447,9 +498,36 @@ export const userQuietHours = pgTable("user_quiet_hours", {
   enabled: boolean("enabled").default(false),
   startTime: time("start_time").notNull(),
   endTime: time("end_time").notNull(),
+  // IANA zone the window is read in. Rows written before 0037 are read as UTC.
+  timezone: varchar("timezone", { length: 64 }).notNull().default("UTC"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
+
+/**
+ * One row per (recipient, event, channel): what actually happened to that delivery.
+ * `pending` is claimed before the transport is called; a row left `pending` (crash) or
+ * `unknown` is never resent, only `failed` is retried.
+ */
+export const notificationDeliveries = pgTable("notification_deliveries", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  eventKey: varchar("event_key", { length: 200 }).notNull(),
+  channel: varchar("channel", { length: 10 }).notNull(),
+  status: varchar("status", { length: 12 }).notNull(),
+  attempts: integer("attempts").notNull().default(1),
+  reason: varchar("reason", { length: 50 }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+},
+(table) => ({
+  eventChannel: uniqueIndex("uq_notif_delivery_event_channel").on(table.userId, table.eventKey, table.channel),
+  validChannel: check("notif_delivery_channel_valid", sql`${table.channel} IN ('email', 'push')`),
+  validStatus: check("notif_delivery_status_valid",
+    sql`${table.status} IN ('pending', 'sent', 'failed', 'unknown', 'suppressed')`),
+}));
 
 export const userPreferences = pgTable("user_preferences", {
   userId: uuid("user_id")
@@ -476,10 +554,18 @@ export const userPreferences = pgTable("user_preferences", {
   autoCreateFromReceipt: boolean("auto_create_from_receipt").default(false),
   requireOcrReview: boolean("require_ocr_review").default(true),
   ocrConfidenceThreshold: integer("ocr_confidence_threshold").default(70),
+  defaultAccountFilter: varchar("default_account_filter", { length: 10 })
+    .notNull()
+    .default("all"),
 
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
-});
+}, () => ({
+  defaultAccountFilterCheck: check(
+    "chk_user_preferences_default_account_filter",
+    sql`default_account_filter IN ('all', 'mine', 'shared')`,
+  ),
+}));
 
 export const userAIPreferences = pgTable("user_ai_preferences", {
   userId: uuid("user_id")
@@ -506,6 +592,13 @@ export const userTwoFactorAuth = pgTable("user_two_factor_auth", {
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
+
+// Hashes retain a durable selected-device denial without storing its cookie.
+export const sessionRevocations = pgTable("session_revocations", {
+  sessionIdHash: varchar("session_id_hash", { length: 64 }).primaryKey(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  revokedAt: timestamp("revoked_at").notNull().defaultNow(),
+}, (table) => ({ userIdx: index("idx_session_revocations_user").on(table.userId) }));
 
 export const userSessions = pgTable("user_sessions", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -586,6 +679,8 @@ export const households = pgTable("households", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: varchar("name", { length: 255 }).notNull(),
   currency: varchar("currency", { length: 3 }).default("ZMW"),
+  // Explicit owner choice; legacy households remain unset, with no default/backfill.
+  timeZone: varchar("time_zone", { length: 100 }),
   fiscalYearStartMonth: integer("fiscal_year_start_month").default(1),
   notificationRetentionDays: integer("notification_retention_days")
     .notNull()
@@ -626,6 +721,11 @@ export const householdMembers = pgTable("household_members", {
     table.householdId,
     table.userId,
   ),
+  // NEW-12: a household has at most one owner row (migration 0031). The
+  // ownership service keeps it at exactly one; this is the database backstop.
+  oneOwner: uniqueIndex("household_members_one_owner")
+    .on(table.householdId)
+    .where(sql`role = 'owner'`),
 }));
 
 export const householdPreferences = pgTable("household_preferences", {
@@ -840,7 +940,10 @@ export const tags = pgTable("tags", {
   isArchived: boolean("is_archived").default(false), // FUNC-002: Proper archive support
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
-});
+}, (table) => ({
+  // NEW-39: one name per household in any case, archived or not, as the writers already require (NEW-36).
+  nameUnique: uniqueIndex("uq_tags_household_name").on(table.householdId, sql`lower(${table.name})`),
+}));
 
 // Tag validation schemas
 export const insertTagSchema = z.object({
@@ -938,7 +1041,27 @@ export const dataImports = pgTable("data_imports", {
   errorLog: text("error_log"),
   createdAt: timestamp("created_at").defaultNow(),
   completedAt: timestamp("completed_at"),
-});
+  // NEW-17 (D13): import batch history. Columns are nullable because rows
+  // written before 0046 carry none of them; no backfill.
+  householdId: uuid("household_id").references(() => households.id, { onDelete: "cascade" }),
+  accountId: uuid("account_id").references(() => accounts.id, { onDelete: "set null" }),
+  source: varchar("source", { length: 20 }),
+  // Client-chosen batch id: a replay with the same fingerprint returns this row,
+  // with a different fingerprint it is a 409.
+  batchKey: uuid("batch_key"),
+  fingerprint: varchar("fingerprint", { length: 64 }),
+  identityVersion: varchar("identity_version", { length: 32 }),
+  strategy: varchar("strategy", { length: 32 }),
+  importedCount: integer("imported_count").notNull().default(0),
+  duplicateCount: integer("duplicate_count").notNull().default(0),
+  skippedCount: integer("skipped_count").notNull().default(0),
+  deletedCount: integer("deleted_count").notNull().default(0),
+  rowOutcomes: jsonb("row_outcomes"),
+},
+(table) => ({
+  batchKeyIdx: uniqueIndex("uq_data_imports_household_batch").on(table.householdId, table.batchKey),
+  accountIdx: index("idx_data_imports_account").on(table.accountId, table.createdAt),
+}));
 
 // ============================================================================
 // FILTER PRESETS
@@ -989,6 +1112,28 @@ export const selectFilterPresetSchema = createSelectSchema(filterPresets);
 export type FilterPreset = typeof filterPresets.$inferSelect;
 export type InsertFilterPreset = z.infer<typeof insertFilterPresetSchema>;
 
+/**
+ * R05.2 named household saved views (AH-13). Owner and admin manage them,
+ * every member applies them. `filter` holds a `savedViewFilterSchema` value
+ * (shared/saved-views.ts) and only ever narrows the visible transaction list.
+ * `version` is the optimistic lock for edits and deletes.
+ */
+export const householdSavedViews = pgTable("household_saved_views", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  householdId: uuid("household_id").notNull()
+    .references(() => households.id, { onDelete: "cascade" }),
+  name: varchar("name", { length: 80 }).notNull(),
+  filter: jsonb("filter").notNull(),
+  createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  version: integer("version").notNull().default(1),
+}, (table) => ({
+  nameUnique: uniqueIndex("uq_household_saved_views_name").on(table.householdId, sql`lower(${table.name})`),
+}));
+
+export type HouseholdSavedView = typeof householdSavedViews.$inferSelect;
+
 // ============================================================================
 // ZOD SCHEMAS
 // ============================================================================
@@ -1037,7 +1182,8 @@ export const selectUserAIPreferencesSchema =
   createSelectSchema(userAIPreferences);
 
 // Household schemas
-export const insertHouseholdSchema = createInsertSchema(households);
+// Calendar policy is selected only through the current-owner calendar writer.
+export const insertHouseholdSchema = createInsertSchema(households).omit({ timeZone: true });
 export const selectHouseholdSchema = createSelectSchema(households);
 
 // Category schemas
@@ -1130,6 +1276,7 @@ export interface CustomChartConfig {
   primaryMetric: string;
   secondaryMetric?: string;
   groupBy?: string;
+  period?: CustomChartPeriod;
   aggregation?: string;
   order: number;
 }
@@ -1219,6 +1366,7 @@ export const accounts = pgTable("accounts", {
   householdIdx: index("idx_accounts_household")
     .on(table.householdId, table.displayOrder)
     .where(sql`deleted_at IS NULL AND is_archived = FALSE`),
+  tenantAccount: uniqueIndex("accounts_household_account_key").on(table.householdId, table.id),
   householdAssetIdx: index("idx_accounts_household_asset")
     .on(table.householdId, table.isAsset)
     .where(sql`deleted_at IS NULL AND is_hidden = FALSE`),
@@ -1255,6 +1403,10 @@ export const transactions = pgTable("transactions", {
   originalName: varchar("original_name", { length: 255 }), // Pre-rule/cleanup name
   amount: decimal("amount", { precision: 15, scale: 2 }).notNull(),
   currency: varchar("currency", { length: 3 }), // ISO 4217 code, defaults to account/household currency
+  // Written atomically by the ledger. Pre-receipt rows keep all three fields null.
+  postedBalanceDelta: decimal("posted_balance_delta", { precision: 15, scale: 2 }),
+  postedAccountIsAsset: boolean("posted_account_is_asset"),
+  postingMode: varchar("posting_mode", { length: 16 }).$type<"posted" | "history_only">(),
   type: transactionTypeEnum("type").notNull(), // income, expense, transfer, balance_adjustment
 
   // Categorization
@@ -1325,6 +1477,8 @@ export const transactions = pgTable("transactions", {
   householdDateIdx: index("idx_transactions_household_date")
     .on(table.householdId, table.date.desc())
     .where(sql`deleted_at IS NULL`),
+  transferAccountHousehold: foreignKey({ name: "transactions_transfer_account_household_fk",
+    columns: [table.householdId, table.transferAccountId], foreignColumns: [accounts.householdId, accounts.id] }),
   householdTypeDateIdx: index("idx_transactions_household_type_date")
     .on(table.householdId, table.type, table.date.desc())
     .where(sql`deleted_at IS NULL`),
@@ -1353,6 +1507,7 @@ export const transactions = pgTable("transactions", {
   categoryMonthIdx: index("idx_transactions_category_month")
     .on(table.categoryId, table.date)
     .where(sql`deleted_at IS NULL AND type = 'expense'`),
+  receiptPostingKey: uniqueIndex("transactions_household_id_id_unique").on(table.householdId, table.id),
   transferPairUniq: uniqueIndex("uniq_transactions_transfer_pair")
     .on(table.householdId, table.transferTransactionId, table.isTransferIn)
     .where(sql`deleted_at IS NULL AND type = 'transfer'`),
@@ -1364,6 +1519,13 @@ export const transactions = pgTable("transactions", {
     "chk_transaction_currency_length",
     sql`currency IS NULL OR LENGTH(currency) = 3`,
   ),
+  postingReceiptCheck: check("chk_transaction_posting_receipt", sql`(
+    (posting_mode IS NULL AND posted_account_is_asset IS NULL AND posted_balance_delta IS NULL)
+    OR (posting_mode IS NOT NULL AND posted_account_is_asset IS NOT NULL AND posted_balance_delta IS NOT NULL
+      AND currency IS NOT NULL AND currency ~ '^[A-Z]{3}$'
+      AND posted_balance_delta::text NOT IN ('NaN', 'Infinity', '-Infinity')
+      AND (posting_mode = 'posted' OR (posting_mode = 'history_only' AND posted_balance_delta = 0)))
+  )`),
 }));
 
 // ============================================================================
@@ -1501,6 +1663,9 @@ export const netWorthSnapshots = pgTable("net_worth_snapshots", {
   // Individual account balances at snapshot time
   accountBalances: jsonb("account_balances"), // [{ accountId, balance }, ...]
 
+  // Nullable for older writers; complete capture evidence travels with this row.
+  provenance: jsonb("provenance"),
+
   currency: varchar("currency", { length: 3 }).notNull().default("ZMW"),
 
   createdAt: timestamp("created_at").notNull().defaultNow(),
@@ -1516,6 +1681,73 @@ export const netWorthSnapshots = pgTable("net_worth_snapshots", {
     table.householdId,
     table.date.desc(),
   ),
+}));
+
+// ============================================================================
+// INDEPENDENT ACCOUNT WORTH CAPTURES
+// ============================================================================
+
+export interface AccountWorthCaptureRecord {
+  accountId: string;
+  accountType: typeof accountTypeEnum.enumValues[number];
+  sourceAmount: string | null;
+  sourceCurrency: string | null;
+  excluded: boolean | null;
+  hidden: boolean | null;
+  archived: boolean | null;
+  deleted: boolean;
+  investments: { holdings: number; tbills: number; pensions: number; bonds: number };
+}
+
+export interface AccountWorthCaptureEvidence {
+  version: 1;
+  captureId: string;
+  householdId: string;
+  date: string;
+  currency: string | null;
+  capturedAt: string;
+  inventoryComplete: true;
+  capturedAccountCount: number;
+  accounts: AccountWorthCaptureRecord[];
+}
+
+// The 0019 guard verifies each new generation against one database snapshot.
+// This receipt is independent of legacy aggregate and imported balance amounts.
+export const accountWorthCaptures = pgTable("account_worth_captures", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  householdId: uuid("household_id").notNull().references(() => households.id, { onDelete: "cascade" }),
+  date: date("date").notNull(),
+  captureId: uuid("capture_id").notNull(),
+  capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
+  currency: varchar("currency", { length: 3 }),
+  evidence: jsonb("evidence").$type<AccountWorthCaptureEvidence>(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  householdDate: uniqueIndex("uniq_account_worth_captures_household_date").on(table.householdId, table.date),
+  generation: uniqueIndex("uniq_account_worth_captures_generation").on(table.captureId),
+  valid: check("chk_account_worth_capture_header", sql`
+    isfinite(${table.date}) AND isfinite(${table.capturedAt})
+    AND isfinite(${table.createdAt}) AND isfinite(${table.updatedAt})
+    AND (${table.currency} IS NULL OR ${table.currency} ~ '^[A-Z]{3}$')
+  `),
+}));
+
+// Opaque accepted IDs remain spent even after household deletion. No identifying
+// household, date, money or timing information survives in this registry.
+export const accountWorthCaptureGenerations = pgTable("account_worth_capture_generations", {
+  captureId: uuid("capture_id").primaryKey(),
+});
+
+// Every scoped proof and legacy aggregate write advances this actual row,
+// including days with no receipt. 0019 serializes the two writers on this key.
+export const accountWorthCaptureDays = pgTable("account_worth_capture_days", {
+  householdId: uuid("household_id").notNull().references(() => households.id, { onDelete: "cascade" }),
+  date: date("date").notNull(),
+  writeId: uuid("write_id").notNull().defaultRandom(),
+}, (table) => ({
+  householdDate: uniqueIndex("uniq_account_worth_capture_days_household_date").on(table.householdId, table.date),
+  valid: check("chk_account_worth_capture_day", sql`isfinite(${table.date})`),
 }));
 
 // ============================================================================
@@ -1567,7 +1799,8 @@ export const budgets = pgTable("budgets", {
   ),
 
   // Budget configuration
-  amount: decimal("amount", { precision: 15, scale: 2 }).notNull(),
+  // A period-specific limit can exist without a recurring default.
+  amount: decimal("amount", { precision: 15, scale: 2 }),
   // Monthly-only until period-aware yearly/custom calculations are implemented.
   period: varchar("period", { length: 20 }).notNull().default("monthly"),
 
@@ -1770,9 +2003,10 @@ export const goals = pgTable("goals", {
   debtAccountIdx: index("idx_goals_debt_account")
     .on(table.debtAccountId)
     .where(sql`debt_account_id IS NOT NULL`),
+  // Pay-down goals target zero remaining debt. Existing positive targets stay valid.
   targetPositiveCheck: check(
     "chk_goal_target_positive",
-    sql`CAST(target_amount AS DECIMAL) > 0`,
+    sql`${table.targetAmount} > 0 OR (${table.type} = 'pay_down' AND ${table.targetAmount} = 0)`,
   ),
   currentNonnegativeCheck: check(
     "chk_goal_current_nonnegative",
@@ -1795,6 +2029,14 @@ export const goalContributions = pgTable("goal_contributions", {
     onDelete: "set null",
   }),
 
+  // R10.3: a mistaken contribution is reversed by a new correction row that
+  // points at it (never by deleting it); appliedDelta is the signed change
+  // this row made to the goal's progress.
+  kind: varchar("kind", { length: 16 }).notNull().default("contribution"),
+  correctsContributionId: uuid("corrects_contribution_id"),
+  appliedDelta: decimal("applied_delta", { precision: 15, scale: 2 }),
+  createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+
   createdAt: timestamp("created_at").notNull().defaultNow(),
 },
 (table) => ({
@@ -1802,6 +2044,16 @@ export const goalContributions = pgTable("goal_contributions", {
     table.goalId,
     table.date,
   ),
+  // Explicit short name: the generated one would pass Postgres's 63-byte limit.
+  correctsFk: foreignKey({
+    name: "goal_contributions_corrects_fk",
+    columns: [table.correctsContributionId],
+    foreignColumns: [table.id],
+  }).onDelete("cascade"),
+  correctsUnique: uniqueIndex("uq_goal_contributions_corrects")
+    .on(table.correctsContributionId)
+    .where(sql`corrects_contribution_id IS NOT NULL`),
+  kindCheck: check("chk_goal_contributions_kind", sql`kind IN ('contribution', 'correction')`),
 }));
 
 export const goalAccountAssignments = pgTable(
@@ -1870,6 +2122,36 @@ export const goalTransfers = pgTable("goal_transfers", {
   positiveAmountCheck: check("chk_positive_amount", sql`amount > 0`),
 }));
 
+/**
+ * Progress changes that are not a link or a contribution: a goal transfer in
+ * or out, or a partial-balance assignment being added, changed or removed.
+ * Each has its place in the goal's applied order (`placedAt`) and the effect
+ * the fold gave it (`appliedDelta`), so a later replay keeps it where it
+ * happened (GoalProgressFold). A positive amount adds; a negative one takes
+ * back at most what progress holds at that point.
+ */
+export const goalProgressAdjustments = pgTable("goal_progress_adjustments", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  goalId: uuid("goal_id")
+    .notNull()
+    .references(() => goals.id, { onDelete: "cascade" }),
+  kind: varchar("kind", { length: 16 }).notNull(),
+  // The goal transfer or the assigned account. No foreign key: the row must
+  // outlive a removed assignment, and the other goal's half of a transfer.
+  refId: uuid("ref_id").notNull(),
+  amount: decimal("amount", { precision: 15, scale: 2 }).notNull(),
+  appliedDelta: decimal("applied_delta", { precision: 15, scale: 2 }).notNull(),
+  placedAt: timestamp("placed_at").notNull(),
+  createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+},
+(table) => ({
+  goalPlacedIdx: index("idx_goal_progress_adjustments_goal").on(table.goalId, table.placedAt),
+  kindCheck: check("chk_goal_progress_adjustments_kind", sql`kind IN ('transfer_in', 'transfer_out', 'assignment')`),
+  nonZeroCheck: check("chk_goal_progress_adjustments_amount", sql`amount <> 0`),
+}));
+
+export type GoalProgressAdjustment = typeof goalProgressAdjustments.$inferSelect;
+
 export const transactionGoalLinks = pgTable("transaction_goal_links", {
   id: uuid("id").primaryKey().defaultRandom(),
   transactionId: uuid("transaction_id")
@@ -1884,6 +2166,14 @@ export const transactionGoalLinks = pgTable("transaction_goal_links", {
   linkedBy: uuid("linked_by").references(() => users.id, {
     onDelete: "set null",
   }),
+  // R10.3 provenance: where the amount came from, what it was in the source's
+  // own currency, the dated rate used, and the signed change it actually made
+  // to the goal (after the zero floor), so a reversal restores it exactly.
+  amountBasis: varchar("amount_basis", { length: 16 }),
+  sourceAmount: decimal("source_amount", { precision: 15, scale: 2 }),
+  sourceCurrency: varchar("source_currency", { length: 3 }),
+  fxRate: decimal("fx_rate", { precision: 20, scale: 10 }),
+  appliedDelta: decimal("applied_delta", { precision: 15, scale: 2 }),
 },
 (table) => ({
   transactionIdx: index("idx_transaction_goal_links_transaction").on(
@@ -1936,6 +2226,64 @@ export const goalImageUploads = pgTable("goal_image_uploads", {
     table.householdId,
   ),
 }));
+
+/**
+ * Manifest of every uploaded file held in the ObjectStore (OPS-001, R15.3/R19.1).
+ * `upload_name` is the logical name the referencing row already stores
+ * (`receipts/{household}/{file}`, relative to the legacy uploads root); `key` is
+ * the opaque store key. Reads re-check `household_id` and `sha256`.
+ * `moved_from_legacy_at` marks a file copied from the old uploads/ disk.
+ */
+export const storageObjects = pgTable("storage_objects", {
+  key: varchar("key", { length: 128 }).primaryKey(),
+  uploadName: varchar("upload_name", { length: 500 }).notNull(),
+  householdId: uuid("household_id")
+    .notNull()
+    .references(() => households.id, { onDelete: "cascade" }),
+  purpose: varchar("purpose", { length: 32 }).notNull(),
+  sha256: varchar("sha256", { length: 64 }).notNull(),
+  size: integer("size").notNull(),
+  mediaType: varchar("media_type", { length: 100 }).notNull(),
+  createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  movedFromLegacyAt: timestamp("moved_from_legacy_at"),
+},
+(table) => ({
+  uploadNameUnique: uniqueIndex("uq_storage_objects_upload_name").on(table.uploadName),
+  // Case-alias lookup: a name differing only by case never takes the legacy fallback.
+  uploadNameLowerIdx: index("idx_storage_objects_upload_name_lower").on(sql`lower(${table.uploadName})`),
+  householdIdx: index("idx_storage_objects_household").on(table.householdId),
+  sha256Format: check("chk_storage_objects_sha256", sql`${table.sha256} ~ '^[a-f0-9]{64}$'`),
+  positiveSize: check("chk_storage_objects_size", sql`${table.size} > 0`),
+}));
+
+/**
+ * A-34: stored files an erasure still has to delete. Written in the erasure
+ * transaction, so the purge list commits with the erasure and survives the
+ * household cascade of `storage_objects`: no household or user foreign key,
+ * and no e-mail or person's name. `upload_name` is the file's logical name,
+ * `{folder}/{householdId}/{file}`, so it does carry the household's id: the
+ * name is what deletes a legacy copy. A row is deleted once its file is gone.
+ * A row that reaches the attempt cap (5) stays, unclaimed, for an operator;
+ * an alert and a periodic retry are a follow-up. `last_error_code` is a
+ * storage code only, never a message.
+ */
+export const storagePurgeItems = pgTable("storage_purge_items", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  uploadName: varchar("upload_name", { length: 500 }).notNull(),
+  objectKey: varchar("object_key", { length: 128 }),
+  keepLegacy: boolean("keep_legacy").notNull().default(false),
+  attempts: integer("attempts").notNull().default(0),
+  lastErrorCode: varchar("last_error_code", { length: 32 }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  lastAttemptAt: timestamp("last_attempt_at"),
+},
+(table) => ({
+  uploadNameUnique: uniqueIndex("uq_storage_purge_items_upload_name").on(table.uploadName),
+  nonNegativeAttempts: check("chk_storage_purge_items_attempts", sql`${table.attempts} >= 0`),
+}));
+
+export type StoragePurgeItem = typeof storagePurgeItems.$inferSelect;
 
 // ============================================================================
 // RECURRING TRANSACTIONS
@@ -2023,9 +2371,7 @@ export const recurringTransactionLinks = pgTable(
   "recurring_transaction_links",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    recurringTransactionId: uuid("recurring_transaction_id")
-      .notNull()
-      .references(() => recurringTransactions.id, { onDelete: "cascade" }),
+    recurringTransactionId: uuid("recurring_transaction_id").notNull(),
     transactionId: uuid("transaction_id")
       .notNull()
       .references(() => transactions.id, { onDelete: "cascade" }),
@@ -2055,6 +2401,12 @@ export const recurringTransactionLinks = pgTable(
     transactionRecurringUnique: uniqueIndex(
       "uq_recurring_link_transaction_recurring",
     ).on(table.transactionId, table.recurringTransactionId),
+    // NEW-39: explicit FK names under Postgres's 63-byte identifier limit.
+    recurringFk: foreignKey({
+      name: "recurring_transaction_links_recurring_transaction_id_fk",
+      columns: [table.recurringTransactionId],
+      foreignColumns: [recurringTransactions.id],
+    }).onDelete("cascade"),
   }),
 );
 
@@ -2066,9 +2418,7 @@ export const recurringTransactionHistory = pgTable(
   "recurring_transaction_history",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    recurringTransactionId: uuid("recurring_transaction_id")
-      .notNull()
-      .references(() => recurringTransactions.id, { onDelete: "cascade" }),
+    recurringTransactionId: uuid("recurring_transaction_id").notNull(),
 
     // Change tracking
     action: varchar("action", { length: 30 }).notNull(),
@@ -2080,10 +2430,7 @@ export const recurringTransactionHistory = pgTable(
     performedBy: uuid("performed_by").references(() => users.id, {
       onDelete: "set null",
     }),
-    linkedTransactionId: uuid("linked_transaction_id").references(
-      () => transactions.id,
-      { onDelete: "set null" },
-    ),
+    linkedTransactionId: uuid("linked_transaction_id"),
 
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
@@ -2095,6 +2442,17 @@ export const recurringTransactionHistory = pgTable(
       table.recurringTransactionId,
       table.createdAt.desc(),
     ),
+    // NEW-39: explicit FK names under Postgres's 63-byte identifier limit.
+    recurringFk: foreignKey({
+      name: "recurring_transaction_history_recurring_transaction_id_fk",
+      columns: [table.recurringTransactionId],
+      foreignColumns: [recurringTransactions.id],
+    }).onDelete("cascade"),
+    linkedTransactionFk: foreignKey({
+      name: "recurring_transaction_history_linked_transaction_id_fk",
+      columns: [table.linkedTransactionId],
+      foreignColumns: [transactions.id],
+    }).onDelete("set null"),
   }),
 );
 
@@ -2213,6 +2571,7 @@ export const pendingReceipts = pgTable("pending_receipts", {
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 },
 (table) => ({
+  conversionReceiptKey: uniqueIndex("pending_receipts_household_id_id_unique").on(table.householdId, table.id),
   householdIdx: index("pending_receipts_household_idx").on(table.householdId),
   matchStatusIdx: index("pending_receipts_match_status_idx").on(
     table.matchStatus,
@@ -2224,6 +2583,63 @@ export const pendingReceipts = pgTable("pending_receipts", {
   imageHashIdx: index("pending_receipts_image_hash_idx")
     .on(table.householdId, table.imageHash)
     .where(sql`image_hash IS NOT NULL`),
+}));
+
+// Separate from mutable transaction ownership and from public transaction DTOs.
+export const transactionCreateOwnerIntents = pgTable("transaction_create_owner_intents", {
+  transactionId: uuid("transaction_id").primaryKey(),
+  idempotencyKey: uuid("idempotency_key").notNull(),
+  householdId: uuid("household_id").notNull(),
+  actorUserId: uuid("actor_user_id").notNull(),
+  ownerSelected: boolean("owner_selected").notNull(),
+  selectedOwnerId: uuid("selected_owner_id"),
+  operation: text("operation").notNull().default("ordinary"),
+  requestDigest: text("request_digest"),
+  transferGroupId: uuid("transfer_group_id"),
+  transferInflowId: uuid("transfer_inflow_id"),
+  transferCreationXid: text("transfer_creation_xid"),
+  transferInflowConfirmed: boolean("transfer_inflow_confirmed"),
+  postingConfirmed: boolean("posting_confirmed").notNull().default(false),
+}, table => ({
+  validSelection: check("transaction_create_owner_selection", sql`${table.ownerSelected} OR ${table.selectedOwnerId} IS NULL`),
+  transferGroup: uniqueIndex("transaction_create_transfer_group").on(table.transferGroupId).where(sql`${table.transferGroupId} IS NOT NULL`),
+  transferInflow: uniqueIndex("transaction_create_transfer_inflow").on(table.transferInflowId).where(sql`${table.transferInflowId} IS NOT NULL`),
+  validTransferPair: check("transaction_create_transfer_pair", sql`CASE WHEN ${table.operation} = 'transfer'
+    THEN ${table.transferGroupId} IS NOT NULL AND ${table.transferInflowId} IS NOT NULL AND ${table.transferInflowId} <> ${table.transactionId}
+    ELSE ${table.transferGroupId} IS NULL AND ${table.transferInflowId} IS NULL END`),
+  // NEW-39: explicit FK names under Postgres's 63-byte identifier limit.
+  transactionFk: foreignKey({ name: "transaction_create_owner_intents_transaction_id_fk",
+    columns: [table.transactionId], foreignColumns: [transactions.id] }).onDelete("cascade"),
+  transferInflowFk: foreignKey({ name: "transaction_create_owner_intents_transfer_inflow_id_fk",
+    columns: [table.transferInflowId], foreignColumns: [transactions.id] }),
+  validOperation: check("transaction_create_operation", sql`${table.operation} IN ('ordinary','recurring','account_import','grz_coupon','transfer')`),
+  validDigest: check("transaction_create_request_digest", sql`CASE WHEN ${table.operation} = 'transfer'
+    THEN ${table.requestDigest} IS NOT NULL AND ${table.requestDigest} ~ '^t1:[0-9a-f]{64}$' AND NOT ${table.ownerSelected}
+    ELSE ${table.requestDigest} IS NULL OR (${table.operation} = 'ordinary' AND ${table.requestDigest} ~ '^v1:[0-9a-f]{64}$') END`),
+}));
+
+// Immutable request identity for new receipt conversions. Legacy links have no record.
+export const receiptConversionRecords = pgTable("receipt_conversion_records", {
+  receiptId: uuid("receipt_id").primaryKey(),
+  householdId: uuid("household_id").notNull(),
+  transactionId: uuid("transaction_id").notNull().unique(),
+  sourceImageHash: varchar("source_image_hash", { length: 64 }),
+  requestVersion: smallint("request_version").notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+}, table => ({
+  imageIdentity: uniqueIndex("receipt_conversion_household_image_unique").on(table.householdId, table.sourceImageHash),
+  receiptFk: foreignKey({
+    name: "receipt_conversion_receipt_fk",
+    columns: [table.householdId, table.receiptId],
+    foreignColumns: [pendingReceipts.householdId, pendingReceipts.id],
+  }).onDelete("cascade"),
+  transactionFk: foreignKey({
+    name: "receipt_conversion_transaction_fk",
+    columns: [table.householdId, table.transactionId],
+    foreignColumns: [transactions.householdId, transactions.id],
+  }),
+  validRequest: check("receipt_conversion_valid_request",
+    sql`${table.requestVersion} > 0 AND ${table.requestHash} ~ '^[0-9a-f]{64}$'`),
 }));
 
 // Zod validators for receipt scanning
@@ -2299,7 +2715,9 @@ export const insertAccountSchema = createInsertSchema(accounts);
 export const selectAccountSchema = createSelectSchema(accounts);
 
 // Transaction schemas
-export const insertTransactionSchema = createInsertSchema(transactions);
+export const insertTransactionSchema = createInsertSchema(transactions).omit({
+  postedBalanceDelta: true, postedAccountIsAsset: true, postingMode: true,
+});
 export const selectTransactionSchema = createSelectSchema(transactions);
 
 // Budget schemas
@@ -2437,9 +2855,23 @@ export const securities = pgTable("securities", {
     scale: 2,
   }).default("15.00"),
 
+  // NEW-13: null = the operator-curated global list; set = a custom security
+  // private to that household (0058 also guards every row that points at it).
+  ownerHouseholdId: uuid("owner_household_id"),
+
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
-});
+}, (table) => ({
+  owner: foreignKey({
+    name: "securities_owner_household_fk",
+    columns: [table.ownerHouseholdId],
+    foreignColumns: [households.id],
+  }).onDelete("cascade"),
+  ownerIdx: index("idx_securities_owner_household").on(table.ownerHouseholdId),
+  customSymbol: uniqueIndex("uniq_securities_custom_symbol")
+    .on(table.ownerHouseholdId, sql`upper(${table.symbol})`)
+    .where(sql`${table.ownerHouseholdId} IS NOT NULL`),
+}));
 
 // ============================================================================
 // INVESTMENT - HOLDINGS
@@ -2464,9 +2896,10 @@ export const holdings = pgTable("holdings", {
   costBasis: decimal("cost_basis", { precision: 15, scale: 2 }),
   costBasisZmw: decimal("cost_basis_zmw", { precision: 15, scale: 2 }),
   acquiredDate: date("acquired_date"),
+  // NUMERIC(18,8) since 0047, the dated household rate's scale (as 0041 for lots).
   acquisitionFxRate: decimal("acquisition_fx_rate", {
-    precision: 10,
-    scale: 4,
+    precision: 18,
+    scale: 8,
   }),
 
   createdAt: timestamp("created_at").defaultNow(),
@@ -2477,6 +2910,62 @@ export const holdings = pgTable("holdings", {
   accountIdx: index("idx_holdings_account")
     .on(table.accountId)
     .where(sql`account_id IS NOT NULL`),
+}));
+
+// ============================================================================
+// INVESTMENT - OPENING OPERATION RECEIPTS
+// ============================================================================
+
+export type OpeningHoldingSnapshot = Omit<typeof holdings.$inferSelect, "createdAt" | "updatedAt"> & {
+  createdAt: string | null; updatedAt: string | null;
+};
+export interface OpeningCreationSnapshot { version: 1; holding: OpeningHoldingSnapshot; purchaseId: string | null; lotId: string | null }
+
+export const investmentOpeningOperationReceipts = pgTable("investment_opening_operation_receipts", {
+  householdId: uuid("household_id").notNull(),
+  actorUserId: uuid("actor_user_id").notNull(),
+  operationId: uuid("operation_id").notNull(),
+  requestVersion: smallint("request_version").notNull(),
+  requestDigest: varchar("request_digest", { length: 64 }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull(),
+  // Retain this historical identity after holding deletion. A receipt is not
+  // a live holding, and deleting a holding must not permit lost-ack recreation.
+  holdingId: uuid("holding_id").notNull(),
+  creationSnapshot: jsonb("creation_snapshot").$type<OpeningCreationSnapshot>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, table => ({
+  identity: primaryKey({ name: "investment_opening_operation_identity", columns: [table.householdId, table.actorUserId, table.operationId] }),
+  household: foreignKey({ name: "investment_opening_household_fk", columns: [table.householdId], foreignColumns: [households.id] }).onDelete("cascade"),
+  actor: foreignKey({ name: "investment_opening_actor_fk", columns: [table.actorUserId], foreignColumns: [users.id] }).onDelete("cascade"),
+  request: check("investment_opening_request_valid", sql`${table.requestVersion}=1 AND ${table.requestDigest} ~ '^[0-9a-f]{64}$' AND ${table.currency} ~ '^[A-Z]{3}$'`),
+  snapshot: check("investment_opening_snapshot_identity", sql`jsonb_typeof(${table.creationSnapshot})='object'
+    AND jsonb_typeof(${table.creationSnapshot}->'holding')='object'
+    AND coalesce(${table.creationSnapshot}->'holding'->>'id'=${table.holdingId}::text, false)
+    AND coalesce(${table.creationSnapshot}->'holding'->>'householdId'=${table.householdId}::text, false)`),
+}));
+
+// The resource UUID is the immutable DELETE business identity. Custody and
+// audit IDs survive the removed holding; neither is a cascading child link.
+// The effect hash binds the strict, private audit witness independently of
+// request identity, including original generation and unknown versus zero.
+export const investmentHoldingDeletionReceipts = pgTable("investment_holding_deletion_receipts", {
+  householdId: uuid("household_id").notNull(),
+  actorUserId: uuid("actor_user_id").notNull(),
+  holdingId: uuid("holding_id").notNull(),
+  accountId: uuid("account_id").notNull(),
+  securityId: uuid("security_id").notNull(),
+  requestVersion: smallint("request_version").notNull(),
+  requestDigest: varchar("request_digest", { length: 64 }).notNull(),
+  effectDigest: varchar("effect_digest", { length: 64 }).notNull(),
+  deleteAuditId: uuid("delete_audit_id").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, table => ({
+  identity: primaryKey({ name: "investment_holding_deletion_identity", columns: [table.householdId, table.actorUserId, table.holdingId] }),
+  physical: uniqueIndex("investment_holding_deletion_physical_identity").on(table.householdId, table.holdingId),
+  audit: uniqueIndex("investment_holding_deletion_audit_identity").on(table.deleteAuditId),
+  household: foreignKey({ name: "investment_holding_deletion_household_fk", columns: [table.householdId], foreignColumns: [households.id] }).onDelete("cascade"),
+  actor: foreignKey({ name: "investment_holding_deletion_actor_fk", columns: [table.actorUserId], foreignColumns: [users.id] }).onDelete("cascade"),
+  request: check("investment_holding_deletion_request_valid", sql`${table.requestVersion}=1 AND ${table.requestDigest} ~ '^[0-9a-f]{64}$' AND ${table.effectDigest} ~ '^[0-9a-f]{64}$'`),
 }));
 
 // ============================================================================
@@ -2506,6 +2995,47 @@ export const securityPrices = pgTable("security_prices", {
   ),
 }));
 
+// Draft mapping for household-authored marks. The companion SQL also validates
+// the native currency at insertion and preserves each recorded row on UPDATE.
+export const householdSecurityPriceOverrides = pgTable("household_security_price_overrides", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  householdId: uuid("household_id").notNull(),
+  securityId: uuid("security_id").notNull(),
+  actorUserId: uuid("actor_user_id").notNull(),
+  effectiveDate: date("effective_date").notNull(),
+  validThrough: date("valid_through").notNull(),
+  // A numeric(15,4) typmod would round before any CHECK could reject the input.
+  price: decimal("price").notNull(),
+  currency: varchar("currency", { length: 3 }).notNull(),
+  source: text("source", { enum: ["manual"] }).notNull().default("manual"),
+  recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+}, (table) => ({
+  household: foreignKey({
+    name: "household_security_price_override_household_fk",
+    columns: [table.householdId],
+    foreignColumns: [households.id],
+  }).onDelete("cascade"),
+  actor: foreignKey({
+    name: "household_security_price_override_actor_fk",
+    columns: [table.actorUserId],
+    foreignColumns: [users.id],
+  }),
+  security: foreignKey({
+    name: "household_security_price_override_security_fk",
+    columns: [table.securityId],
+    foreignColumns: [securities.id],
+  }),
+  scopeDate: unique("household_security_price_override_scope_date_key")
+    .on(table.householdId, table.securityId, table.effectiveDate),
+  priceFitsStorage: check("household_security_price_override_price_ck",
+    sql`${table.price} > 0 AND ${table.price} < 100000000000 AND scale(${table.price}) <= 4`),
+  dateRange: check("household_security_price_override_date_ck",
+    sql`${table.effectiveDate} BETWEEN DATE '0001-01-01' AND DATE '9999-12-31'
+      AND ${table.validThrough} BETWEEN ${table.effectiveDate} AND DATE '9999-12-31'`),
+  currencyCode: check("household_security_price_override_currency_ck", sql`${table.currency} ~ '^[A-Z]{3}$'`),
+  manualSource: check("household_security_price_override_source_ck", sql`${table.source} = 'manual'`),
+}));
+
 // ============================================================================
 // INVESTMENT - TRANSACTIONS
 // ============================================================================
@@ -2533,7 +3063,7 @@ export const investmentTransactions = pgTable("investment_transactions", {
   currency: varchar("currency", { length: 3 }).notNull().default("ZMW"),
 
   // FX conversion
-  fxRate: decimal("fx_rate", { precision: 10, scale: 4 }),
+  fxRate: decimal("fx_rate", { precision: 18, scale: 8 }), // 0041: dated household rates carry 8 places
   amountZmw: decimal("amount_zmw", { precision: 15, scale: 2 }),
 
   // Costs
@@ -2544,10 +3074,7 @@ export const investmentTransactions = pgTable("investment_transactions", {
   }).default("0"),
 
   // Linking to main transactions table
-  linkedTransactionId: uuid("linked_transaction_id").references(
-    () => transactions.id,
-    { onDelete: "set null" },
-  ),
+  linkedTransactionId: uuid("linked_transaction_id"),
 
   transactionDate: date("transaction_date").notNull(),
   notes: text("notes"),
@@ -2562,6 +3089,12 @@ export const investmentTransactions = pgTable("investment_transactions", {
   holdingIdx: index("idx_investment_transactions_holding")
     .on(table.holdingId, table.transactionDate.desc())
     .where(sql`holding_id IS NOT NULL`),
+  // NEW-39: explicit FK names under Postgres's 63-byte identifier limit.
+  linkedTransactionFk: foreignKey({
+    name: "investment_transactions_linked_transaction_id_fk",
+    columns: [table.linkedTransactionId],
+    foreignColumns: [transactions.id],
+  }).onDelete("set null"),
 }));
 
 // ============================================================================
@@ -2605,8 +3138,8 @@ export const taxLots = pgTable("tax_lots", {
   costBasisZmw: decimal("cost_basis_zmw", { precision: 15, scale: 2 }),
   acquiredDate: date("acquired_date").notNull(),
   acquisitionFxRate: decimal("acquisition_fx_rate", {
-    precision: 10,
-    scale: 4,
+    precision: 18,
+    scale: 8,
   }),
   remainingQuantity: decimal("remaining_quantity", {
     precision: 18,
@@ -2617,6 +3150,7 @@ export const taxLots = pgTable("tax_lots", {
 },
 (table) => ({
   holdingIdx: index("idx_tax_lots_holding").on(table.holdingId),
+  transactionIdx: index("idx_tax_lots_transaction").on(table.transactionId),
 }));
 
 export const taxLotDisposals = pgTable("tax_lot_disposals", {
@@ -2662,6 +3196,74 @@ export const fxRates = pgTable("fx_rates", {
 
   createdAt: timestamp("created_at").defaultNow(),
 });
+
+// R12 (NEW-13): a manual exchange rate belongs to the household whose owner or
+// admin recorded it, for an inclusive validity window. It never enters fx_rates,
+// so no other household can read it. Rows are immutable evidence.
+export const householdFxRateOverrides = pgTable("household_fx_rate_overrides", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  householdId: uuid("household_id").notNull(),
+  actorUserId: uuid("actor_user_id").notNull(),
+  fromCurrency: varchar("from_currency", { length: 3 }).notNull(),
+  toCurrency: varchar("to_currency", { length: 3 }).notNull(),
+  effectiveDate: date("effective_date").notNull(),
+  validThrough: date("valid_through").notNull(),
+  // Untyped numeric keeps the input scale so the CHECK can refuse it rather than round.
+  rate: decimal("rate").notNull(),
+  source: text("source", { enum: ["manual"] }).notNull().default("manual"),
+  recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+}, (table) => ({
+  household: foreignKey({
+    name: "household_fx_rate_override_household_fk",
+    columns: [table.householdId],
+    foreignColumns: [households.id],
+  }).onDelete("cascade"),
+  actor: foreignKey({
+    name: "household_fx_rate_override_actor_fk",
+    columns: [table.actorUserId],
+    foreignColumns: [users.id],
+  }),
+  scopeDate: unique("household_fx_rate_override_scope_date_key")
+    .on(table.householdId, table.fromCurrency, table.toCurrency, table.effectiveDate),
+  rateFitsStorage: check("household_fx_rate_override_rate_ck",
+    sql`${table.rate} > 0 AND ${table.rate} < 100000000000 AND scale(${table.rate}) <= 8`),
+  dateRange: check("household_fx_rate_override_date_ck",
+    sql`${table.effectiveDate} BETWEEN DATE '0001-01-01' AND DATE '9999-12-31'
+      AND ${table.validThrough} BETWEEN ${table.effectiveDate} AND DATE '9999-12-31'`),
+  pair: check("household_fx_rate_override_pair_ck",
+    sql`${table.fromCurrency} ~ '^[A-Z]{3}$' AND ${table.toCurrency} ~ '^[A-Z]{3}$'
+      AND ${table.fromCurrency} <> ${table.toCurrency}`),
+  manualSource: check("household_fx_rate_override_source_ck", sql`${table.source} = 'manual'`),
+}));
+
+export type HouseholdFxRateOverride = typeof householdFxRateOverrides.$inferSelect;
+
+// Provider observations have an independent write path. A user-supplied source label
+// on a legacy fx_rates row does not establish who observed the quote or its validity.
+export const providerFxQuotes = pgTable("provider_fx_quotes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  fromCurrency: varchar("from_currency", { length: 3 }).notNull(),
+  toCurrency: varchar("to_currency", { length: 3 }).notNull(),
+  provider: varchar("provider", { length: 32 }).notNull(),
+  quotedAt: timestamp("quoted_at", { withTimezone: true }).notNull(),
+  effectiveDate: date("effective_date").notNull(),
+  validThrough: date("valid_through").notNull(),
+  rate: decimal("rate", { precision: 30, scale: 12 }).notNull(),
+  recordedAt: timestamp("recorded_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  identity: uniqueIndex("provider_fx_quote_identity").on(table.fromCurrency, table.toCurrency, table.provider, table.quotedAt),
+  lookup: index("provider_fx_quote_lookup").on(table.fromCurrency, table.toCurrency, table.effectiveDate),
+  valid: check("provider_fx_quote_valid", sql`
+    ${table.rate} > 0 AND ${table.rate}::text NOT IN ('NaN', 'Infinity', '-Infinity')
+    AND isfinite(${table.quotedAt}) AND isfinite(${table.validThrough}) AND isfinite(${table.recordedAt})
+    AND ${table.validThrough} BETWEEN ${table.effectiveDate} AND ${table.effectiveDate} + 3
+    AND ${table.effectiveDate} = (${table.quotedAt} AT TIME ZONE 'UTC')::date
+    AND ${table.quotedAt} <= ${table.recordedAt}
+    AND ${table.provider} IN ('yahoo_finance', 'exchangerate_api')
+    AND ${table.fromCurrency} ~ '^[A-Z]{3}$' AND ${table.toCurrency} ~ '^[A-Z]{3}$'
+    AND ${table.fromCurrency} <> ${table.toCurrency}
+  `),
+}));
 
 // ============================================================================
 // INVESTMENT - CURRENCY ACCOUNTS
@@ -2859,11 +3461,26 @@ export const grzBonds = pgTable("grz_bonds", {
   soldDate: date("sold_date"),
   soldPrice: decimal("sold_price", { precision: 15, scale: 2 }),
   soldYield: decimal("sold_yield", { precision: 6, scale: 4 }),
+  // Sale settlement (migration 0033): cash posted once, fees, basis and the
+  // realised difference. Null on legacy sales recorded before settlement.
+  saleCashTransactionId: uuid("sale_cash_transaction_id").references(() => transactions.id),
+  saleFees: decimal("sale_fees", { precision: 15, scale: 2 }),
+  saleCostBasis: decimal("sale_cost_basis", { precision: 15, scale: 2 }),
+  saleRealizedGain: decimal("sale_realized_gain", { precision: 15, scale: 2 }),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 },
 (table) => ({
   householdIdx: index("idx_grz_bonds_household").on(table.householdId),
+  oneSaleCash: uniqueIndex("uq_grz_bonds_sale_cash").on(table.saleCashTransactionId),
+  saleSettlement: check("chk_grz_bonds_sale_settlement", sql`(${table.saleCashTransactionId} IS NULL AND ${table.saleFees} IS NULL
+    AND ${table.saleCostBasis} IS NULL AND ${table.saleRealizedGain} IS NULL)
+    OR (${table.saleCashTransactionId} IS NOT NULL AND ${table.status}='sold' AND ${table.soldDate} IS NOT NULL AND ${table.soldPrice} IS NOT NULL
+    AND ${table.saleFees} IS NOT NULL AND ${table.saleCostBasis} IS NOT NULL AND ${table.saleRealizedGain} IS NOT NULL
+    AND ${table.saleFees}>=0 AND ${table.soldPrice}>${table.saleFees} AND ${table.saleCostBasis}>0
+    AND ${table.soldPrice}::text NOT IN ('NaN','Infinity','-Infinity') AND ${table.saleFees}::text NOT IN ('NaN','Infinity','-Infinity')
+    AND ${table.saleCostBasis}::text NOT IN ('NaN','Infinity','-Infinity')
+    AND ${table.saleRealizedGain}=${table.soldPrice}-${table.saleFees}-${table.saleCostBasis})`),
 }));
 
 export const grzBondPayments = pgTable("grz_bond_payments", {
@@ -2881,14 +3498,19 @@ export const grzBondPayments = pgTable("grz_bond_payments", {
   netAmount: decimal("net_amount", { precision: 15, scale: 2 }).notNull(),
   status: grzBondPaymentStatusEnum("status").default("scheduled"),
   actualPaymentDate: date("actual_payment_date"),
-  investmentTransactionId: uuid("investment_transaction_id").references(
-    () => investmentTransactions.id,
-  ),
+  investmentTransactionId: uuid("investment_transaction_id"),
   incomeTransactionId: uuid("income_transaction_id").references(
     () => transactions.id,
   ),
   createdAt: timestamp("created_at").defaultNow(),
-});
+}, (table) => ({
+  // NEW-39: explicit FK names under Postgres's 63-byte identifier limit.
+  investmentTransactionFk: foreignKey({
+    name: "grz_bond_payments_investment_transaction_id_fk",
+    columns: [table.investmentTransactionId],
+    foreignColumns: [investmentTransactions.id],
+  }),
+}));
 
 export const grzTBills = pgTable("grz_tbills", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -2912,17 +3534,53 @@ export const grzTBills = pgTable("grz_tbills", {
   status: grzSecurityStatusEnum("status").default("active"),
   maturedDate: date("matured_date"),
   rolloverToId: uuid("rollover_to_id"),
-  maturityInvestmentTxId: uuid("maturity_investment_tx_id").references(
-    () => investmentTransactions.id,
-  ),
+  maturityInvestmentTxId: uuid("maturity_investment_tx_id"),
   maturityIncomeTxId: uuid("maturity_income_tx_id").references(
     () => transactions.id,
   ),
+  // A-36: fixed once when the bill falls due (one rounding, A-41). Null on
+  // bills that matured under the old auto-post.
+  maturityWithholdingTax: decimal("maturity_withholding_tax", { precision: 15, scale: 2 }),
+  maturityNetProceeds: decimal("maturity_net_proceeds", { precision: 15, scale: 2 }),
+  // A-36: the member's confirmed receipt. The cash row is the principal
+  // (purchase price) returning to the settlement account as asset_settlement.
+  settlementOperationId: uuid("settlement_operation_id"),
+  settlementRequestDigest: varchar("settlement_request_digest", { length: 64 }),
+  settlementCashTransactionId: uuid("settlement_cash_transaction_id"),
+  settlementReceiptDate: date("settlement_receipt_date"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 },
 (table) => ({
   householdIdx: index("idx_grz_tbills_household").on(table.householdId),
+  // NEW-39: explicit FK names under Postgres's 63-byte identifier limit.
+  maturityInvestmentTxFk: foreignKey({
+    name: "grz_tbills_maturity_investment_tx_id_fk",
+    columns: [table.maturityInvestmentTxId],
+    foreignColumns: [investmentTransactions.id],
+  }),
+  settlementCashTxFk: foreignKey({
+    name: "grz_tbills_settlement_cash_tx_id_fk",
+    columns: [table.settlementCashTransactionId],
+    foreignColumns: [transactions.id],
+  }),
+  oneSettlementOperation: uniqueIndex("uq_grz_tbills_settlement_operation").on(table.settlementOperationId),
+  oneSettlementCash: uniqueIndex("uq_grz_tbills_settlement_cash").on(table.settlementCashTransactionId),
+  confirmedInterestIdx: index("idx_grz_tbills_confirmed_interest").on(table.maturityIncomeTxId)
+    .where(sql`settlement_operation_id IS NOT NULL`),
+  // Proceeds are face less the booked withholding, exactly (A-41).
+  maturityTerms: check("chk_grz_tbills_maturity_terms", sql`(${table.maturityWithholdingTax} IS NULL AND ${table.maturityNetProceeds} IS NULL AND ${table.status}::text IS DISTINCT FROM 'awaiting_receipt')
+    OR (${table.maturityWithholdingTax} IS NOT NULL AND ${table.maturityNetProceeds} IS NOT NULL
+    AND ${table.status}::text IN ('awaiting_receipt','matured') AND ${table.maturityWithholdingTax}>=0
+    AND ${table.maturityWithholdingTax}::text NOT IN ('NaN','Infinity','-Infinity')
+    AND ${table.maturityNetProceeds}=${table.faceValue}-${table.maturityWithholdingTax})`),
+  // A settled bill carries every settlement field and is matured; others carry none.
+  receiptSettlement: check("chk_grz_tbills_receipt_settlement", sql`(${table.settlementOperationId} IS NULL AND ${table.settlementRequestDigest} IS NULL
+    AND ${table.settlementCashTransactionId} IS NULL AND ${table.settlementReceiptDate} IS NULL)
+    OR (${table.settlementOperationId} IS NOT NULL AND ${table.settlementRequestDigest} IS NOT NULL
+    AND ${table.settlementCashTransactionId} IS NOT NULL AND ${table.settlementReceiptDate} IS NOT NULL
+    AND ${table.status}::text='matured' AND ${table.maturityNetProceeds} IS NOT NULL AND ${table.maturityInvestmentTxId} IS NOT NULL
+    AND ${table.settlementReceiptDate}>=${table.maturityDate})`),
 }));
 
 // Zod Schemas
@@ -3081,16 +3739,49 @@ export const recurringInvestments = pgTable("recurring_investments", {
   currency: varchar("currency", { length: 3 }).notNull().default("ZMW"),
   nextExecutionDate: date("next_execution_date").notNull(),
   isActive: boolean("is_active").default(true).notNull(),
+  currentAuthorizationId: uuid("current_authorization_id"),
+  authorizationRevision: integer("authorization_revision").notNull().default(0),
 
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
+}, (table): PgTableExtraConfigValue[] => [
+  unique("investment_plan_household_identity").on(table.id, table.householdId),
+  check("investment_plan_authorization_revision_nonnegative", sql`${table.authorizationRevision} >= 0`),
+  foreignKey({
+    name: "investment_plan_current_authorization_fk",
+    columns: [table.currentAuthorizationId, table.id, table.householdId, table.authorizationRevision],
+    foreignColumns: [investmentPlanAuthorizations.id, investmentPlanAuthorizations.planId,
+      investmentPlanAuthorizations.householdId, investmentPlanAuthorizations.revision],
+  }),
+]);
+
+// Instantiate once after the existing tables/enum, without a runtime import cycle.
+export const { investmentPlanAuthorizations, investmentPlanOperations,
+  investmentPurchaseAuthorizationProofs, investmentSipPurchaseReservations } = createSipAuthorizationSchema({
+  households, users, recurringInvestments, investmentTransactions, recurringFrequencyEnum,
 });
+
+export type InvestmentPlanAuthorization = typeof investmentPlanAuthorizations.$inferSelect;
+export type InsertInvestmentPlanAuthorization = typeof investmentPlanAuthorizations.$inferInsert;
+export type InvestmentPlanOperation = typeof investmentPlanOperations.$inferSelect;
+export type InsertInvestmentPlanOperation = typeof investmentPlanOperations.$inferInsert;
+export type InvestmentPurchaseAuthorizationProof = typeof investmentPurchaseAuthorizationProofs.$inferSelect;
+export type InsertInvestmentPurchaseAuthorizationProof = typeof investmentPurchaseAuthorizationProofs.$inferInsert;
+export type InvestmentSipPurchaseReservation = typeof investmentSipPurchaseReservations.$inferSelect;
+export type InsertInvestmentSipPurchaseReservation = typeof investmentSipPurchaseReservations.$inferInsert;
+
+export const { investmentSipOccurrenceFences, investmentSipOccurrences, investmentSipConfirmations,
+  investmentSipConfirmedFills } = createSipOccurrenceSchema({
+  households, users, recurringInvestments, investmentTransactions, recurringFrequencyEnum,
+});
+export type InvestmentSipOccurrenceFence = typeof investmentSipOccurrenceFences.$inferSelect;
+export type InvestmentSipOccurrence = typeof investmentSipOccurrences.$inferSelect;
+export type InvestmentSipConfirmation = typeof investmentSipConfirmations.$inferSelect;
+export type InvestmentSipConfirmedFill = typeof investmentSipConfirmedFills.$inferSelect;
 
 export const recurringExecutionLog = pgTable("recurring_execution_log", {
   id: uuid("id").primaryKey().defaultRandom(),
-  recurringInvestmentId: uuid("recurring_investment_id")
-    .notNull()
-    .references(() => recurringInvestments.id, { onDelete: "cascade" }),
+  recurringInvestmentId: uuid("recurring_investment_id").notNull(),
 
   status: varchar("status", { length: 20 }).notNull(), // 'success', 'failed'
   executionDate: timestamp("execution_date").defaultNow().notNull(),
@@ -3099,7 +3790,14 @@ export const recurringExecutionLog = pgTable("recurring_execution_log", {
   errorMessage: text("error_message"),
 
   createdAt: timestamp("created_at").defaultNow(),
-});
+}, (table) => ({
+  // NEW-39: explicit FK names under Postgres's 63-byte identifier limit.
+  recurringInvestmentFk: foreignKey({
+    name: "recurring_execution_log_recurring_investment_id_fk",
+    columns: [table.recurringInvestmentId],
+    foreignColumns: [recurringInvestments.id],
+  }).onDelete("cascade"),
+}));
 
 // ============================================================================
 // PENSION & RECURRING - ZOD SCHEMAS
@@ -3142,6 +3840,8 @@ export const outboxEventStatusEnum = pgEnum("outbox_event_status", [
   "completed",
   "failed",
   "dead_letter",
+  "unknown",
+  "suppressed",
 ]);
 
 export const outboxEvents = pgTable("outbox_events", {
@@ -3159,9 +3859,17 @@ export const outboxEvents = pgTable("outbox_events", {
   lastError: text("last_error"),
   nextRetryAt: timestamp("next_retry_at"),
   processedAt: timestamp("processed_at"),
+  dispatchClaimToken: uuid("dispatch_claim_token"),
+  dispatchGeneration: integer("dispatch_generation").notNull().default(0),
+  dispatchLeaseUntil: timestamp("dispatch_lease_until"),
+  dispatchStartedAt: timestamp("dispatch_started_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow(),
-});
+}, (table) => ({
+  securityNoticeIdentity: uniqueIndex("idx_outbox_security_notice_identity")
+    .on(table.aggregateId, sql`lower(${table.payload}->>'recipient')`, sql`(${table.payload}->>'channel')`)
+    .where(sql`${table.eventType} = 'security.notice.requested'`),
+}));
 
 // Indexes for efficient polling
 // CREATE INDEX idx_outbox_pending ON outbox_events(status, next_retry_at) WHERE status IN ('pending', 'failed');
@@ -3184,7 +3892,9 @@ export type OutboxEventStatus =
   | "processing"
   | "completed"
   | "failed"
-  | "dead_letter";
+  | "dead_letter"
+  | "unknown"
+  | "suppressed";
 
 // ============================================================================
 // BACKGROUND JOBS
@@ -3305,3 +4015,145 @@ export type AiConversation = typeof aiConversations.$inferSelect;
 export type InsertAiConversation = typeof aiConversations.$inferInsert;
 export type AiMessage = typeof aiMessages.$inferSelect;
 export type InsertAiMessage = typeof aiMessages.$inferInsert;
+
+/**
+ * R17 durable admission ledger: one row per LOGICAL chat request.
+ *
+ * The identity is (household, actor, client key); the fingerprint binds that
+ * identity to one payload, so a changed payload under the same key is a 409.
+ * The row also carries the request's single chat-quota unit (reserved at
+ * admission, then consumed by an answer or refunded at most once) and the
+ * stored response that an identical replay returns. Rows count toward the
+ * rolling quota window by created_at, so they are never deleted to free quota.
+ */
+export const aiRequests = pgTable(
+  "ai_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    householdId: uuid("household_id")
+      .notNull()
+      .references(() => households.id, { onDelete: "cascade" }),
+    actorId: uuid("actor_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    clientRequestKey: varchar("client_request_key", { length: 128 }).notNull(),
+    // SHA-256 hex of the canonical request payload.
+    fingerprint: varchar("fingerprint", { length: 64 }).notNull(),
+    // The household consent version in force at admission (null = none).
+    consentVersion: varchar("consent_version", { length: 10 }),
+    status: varchar("status", { length: 16 }).notNull().default("in_progress"),
+    // Bumped by every re-admission of a failed request: each settlement and
+    // failure matches the generation that admitted it, so a stale worker never
+    // settles its retry's reservation (Astra #255 r4).
+    generation: integer("generation").notNull().default(1),
+    chatQuotaState: varchar("chat_quota_state", { length: 16 }).notNull().default("reserved"),
+    answerMode: varchar("answer_mode", { length: 16 }),
+    // The final response for exact replay; cleared when its conversation is
+    // deleted so a deleted thread's text does not survive here.
+    responseBody: jsonb("response_body"),
+    conversationId: uuid("conversation_id").references(() => aiConversations.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    completedAt: timestamp("completed_at"),
+  },
+  (table) => ({
+    identity: uniqueIndex("uq_ai_requests_identity").on(table.householdId, table.actorId, table.clientRequestKey),
+    quotaWindow: index("idx_ai_requests_household_created").on(table.householdId, table.createdAt),
+    conversation: index("idx_ai_requests_conversation").on(table.conversationId),
+    knownStatus: check("chk_ai_requests_status", sql`${table.status} IN ('in_progress', 'completed', 'failed')`),
+    knownQuota: check("chk_ai_requests_quota", sql`${table.chatQuotaState} IN ('reserved', 'consumed', 'refunded')`),
+    knownMode: check(
+      "chk_ai_requests_answer_mode",
+      sql`${table.answerMode} IS NULL OR ${table.answerMode} IN ('claude', 'gemini', 'local', 'unavailable')`,
+    ),
+    terminalShape: check(
+      "chk_ai_requests_terminal",
+      sql`(${table.status} = 'in_progress') = (${table.completedAt} IS NULL)`,
+    ),
+  }),
+);
+
+/**
+ * One claimed provider call under a logical request. The row is inserted
+ * BEFORE dispatch, so the unique (request, stage, ordinal) claim stops two
+ * workers dispatching the same attempt; a row left `dispatched` (crash) or
+ * settled `usage_unknown` (timeout, lost connection) is a possible charge that
+ * is never silently treated as free. A claim confirmed never to have reached
+ * the provider settles `not_dispatched` and counts toward neither the call
+ * cap nor provider health (Astra #255 r4).
+ */
+export const aiAttempts = pgTable(
+  "ai_attempts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // SET NULL, not cascade: a user or household erasure removes the request
+    // (and its stored answer) but keeps this de-identified call row, which
+    // still counts against the provider's rolling call cap (Astra #255).
+    requestId: uuid("request_id").references(() => aiRequests.id, { onDelete: "set null" }),
+    stage: varchar("stage", { length: 16 }).notNull(),
+    ordinal: integer("ordinal").notNull(),
+    provider: varchar("provider", { length: 16 }).notNull(),
+    // The configured model the call was claimed under: the cap and health
+    // accounting key, never rewritten. The provider's own reported model is
+    // kept separately in reported_model.
+    model: varchar("model", { length: 128 }),
+    reportedModel: varchar("reported_model", { length: 128 }),
+    status: varchar("status", { length: 16 }).notNull().default("dispatched"),
+    failureCategory: varchar("failure_category", { length: 32 }),
+    providerRequestId: varchar("provider_request_id", { length: 128 }),
+    // Set by right-to-erasure: the provider request id is scrubbed and a late
+    // settlement never writes one back (usage accounting is still recorded).
+    identityErased: boolean("identity_erased").notNull().default(false),
+    usageKnown: boolean("usage_known").notNull().default(false),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    cacheReadTokens: integer("cache_read_tokens"),
+    cacheWriteTokens: integer("cache_write_tokens"),
+    deadlineAt: timestamp("deadline_at").notNull(),
+    dispatchedAt: timestamp("dispatched_at").notNull().defaultNow(),
+    completedAt: timestamp("completed_at"),
+  },
+  (table) => ({
+    claim: uniqueIndex("uq_ai_attempts_claim").on(table.requestId, table.stage, table.ordinal),
+    health: index("idx_ai_attempts_provider_model_completed").on(table.provider, table.model, table.completedAt),
+    knownStage: check("chk_ai_attempts_stage", sql`${table.stage} IN ('analysis', 'answer')`),
+    knownProvider: check("chk_ai_attempts_provider", sql`${table.provider} IN ('anthropic', 'gemini')`),
+    knownStatus: check(
+      "chk_ai_attempts_status",
+      sql`${table.status} IN ('dispatched', 'not_dispatched', 'succeeded', 'failed', 'usage_unknown')`,
+    ),
+    positiveOrdinal: check("chk_ai_attempts_ordinal", sql`${table.ordinal} > 0`),
+  }),
+);
+
+/**
+ * Append-only history of household AI consent decisions (grant / revoke) and
+ * the disclosure version each grant accepted. `households.ai_consent_*` stays
+ * the current state; this table is the record of how it got there.
+ */
+export const aiConsentEvents = pgTable(
+  "ai_consent_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    householdId: uuid("household_id")
+      .notNull()
+      .references(() => households.id, { onDelete: "cascade" }),
+    actorId: uuid("actor_id").references(() => users.id, { onDelete: "set null" }),
+    action: varchar("action", { length: 16 }).notNull(),
+    consentVersion: varchar("consent_version", { length: 10 }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => ({
+    householdCreated: index("idx_ai_consent_events_household_created").on(table.householdId, table.createdAt),
+    knownAction: check("chk_ai_consent_events_action", sql`${table.action} IN ('grant', 'revoke')`),
+    grantHasVersion: check(
+      "chk_ai_consent_events_version",
+      sql`(${table.action} = 'grant') = (${table.consentVersion} IS NOT NULL)`,
+    ),
+  }),
+);
+
+export type AiRequest = typeof aiRequests.$inferSelect;
+export type InsertAiRequest = typeof aiRequests.$inferInsert;
+export type AiAttempt = typeof aiAttempts.$inferSelect;
+export type InsertAiAttempt = typeof aiAttempts.$inferInsert;
+export type AiConsentEvent = typeof aiConsentEvents.$inferSelect;

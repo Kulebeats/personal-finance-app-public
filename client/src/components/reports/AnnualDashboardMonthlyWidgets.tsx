@@ -15,6 +15,8 @@ import { useDrillDown } from "@/hooks/use-drilldown";
 import { TrendingWidget } from "./TrendingWidget";
 import { toMoneyNumber } from "@/lib/money";
 import { AggregationLevel } from "./AggregationFilter";
+import { monthRangeOf } from "./annualPeriods";
+import { formatNetWorthChange, netWorthChangeLabel } from "./netWorthChangePresentation";
 import {
   INCOME_COLOR,
   EXPENSE_COLOR,
@@ -31,31 +33,24 @@ interface BaseWidgetProps {
 interface BarClickDatum {
   label: string;
   value: number;
-  monthIndex?: number;
+  periodStart?: string;
   [key: string]: string | number | undefined;
 }
 
 export const IncomePerMonthWidget: React.FC<BaseWidgetProps> = (props) => {
-  const { from } = useCurrentYearRange();
+  const { year } = useCurrentYearRange();
   const { drillDown } = useDrillDown();
-  const { data, isLoading, error } = useReportsAnnual({
-    year: new Date(from).getFullYear(),
-  });
+  const { data, isLoading, error } = useReportsAnnual({ year });
   const trendingData = (data?.monthly || []).map((m) => ({
     label: m.month,
     value: toMoneyNumber(m.income),
-    monthIndex: m.monthIndex,
+    periodStart: m.periodStart,
   }));
 
   const handleBarClick = (datum: BarClickDatum) => {
-    const monthIdx = datum.monthIndex ?? 1;
-    const monthStart = `${new Date(from).getFullYear()}-${String(
-      monthIdx,
-    ).padStart(2, "0")}-01`;
-    const monthEnd = new Date(new Date(from).getFullYear(), monthIdx, 0)
-      .toISOString()
-      .split("T")[0];
-    drillDown({ from: monthStart, to: monthEnd, type: "income" });
+    // R12.3: the clicked month's own dates, never its label or array index.
+    if (typeof datum.periodStart !== "string") return;
+    drillDown({ ...monthRangeOf(datum.periodStart), type: "income" });
   };
 
   return (
@@ -74,26 +69,19 @@ export const IncomePerMonthWidget: React.FC<BaseWidgetProps> = (props) => {
 };
 
 export const ExpensesPerMonthWidget: React.FC<BaseWidgetProps> = (props) => {
-  const { from } = useCurrentYearRange();
+  const { year } = useCurrentYearRange();
   const { drillDown } = useDrillDown();
-  const { data, isLoading, error } = useReportsAnnual({
-    year: new Date(from).getFullYear(),
-  });
+  const { data, isLoading, error } = useReportsAnnual({ year });
   const trendingData = (data?.monthly || []).map((m) => ({
     label: m.month,
     value: toMoneyNumber(m.expenses),
-    monthIndex: m.monthIndex,
+    periodStart: m.periodStart,
   }));
 
   const handleBarClick = (datum: BarClickDatum) => {
-    const monthIdx = datum.monthIndex ?? 1;
-    const monthStart = `${new Date(from).getFullYear()}-${String(
-      monthIdx,
-    ).padStart(2, "0")}-01`;
-    const monthEnd = new Date(new Date(from).getFullYear(), monthIdx, 0)
-      .toISOString()
-      .split("T")[0];
-    drillDown({ from: monthStart, to: monthEnd, type: "expense" });
+    // R12.3: the clicked month's own dates, never its label or array index.
+    if (typeof datum.periodStart !== "string") return;
+    drillDown({ ...monthRangeOf(datum.periodStart), type: "expense" });
   };
 
   return (
@@ -112,26 +100,19 @@ export const ExpensesPerMonthWidget: React.FC<BaseWidgetProps> = (props) => {
 };
 
 export const SavingsPerMonthWidget: React.FC<BaseWidgetProps> = (props) => {
-  const { from } = useCurrentYearRange();
+  const { year } = useCurrentYearRange();
   const { drillDown } = useDrillDown();
-  const { data, isLoading, error } = useReportsAnnual({
-    year: new Date(from).getFullYear(),
-  });
+  const { data, isLoading, error } = useReportsAnnual({ year });
   const trendingData = (data?.monthly || []).map((m) => ({
     label: m.month,
     value: toMoneyNumber(m.savingsContributions),
-    monthIndex: m.monthIndex,
+    periodStart: m.periodStart,
   }));
 
   const handleBarClick = (datum: BarClickDatum) => {
-    const monthIdx = datum.monthIndex ?? 1;
-    const monthStart = `${new Date(from).getFullYear()}-${String(
-      monthIdx,
-    ).padStart(2, "0")}-01`;
-    const monthEnd = new Date(new Date(from).getFullYear(), monthIdx, 0)
-      .toISOString()
-      .split("T")[0];
-    drillDown({ from: monthStart, to: monthEnd });
+    // R12.3: the clicked month's own dates, never its label or array index.
+    if (typeof datum.periodStart !== "string") return;
+    drillDown({ ...monthRangeOf(datum.periodStart) });
   };
 
   return (
@@ -174,14 +155,14 @@ export const NetWorthChangeWidget: React.FC<BaseWidgetProps> = (props) => {
   const { from, to } = useCurrentYearRange();
   const { data, isLoading, error } = useReportsNetWorthChanges({ from, to });
   const trendingData = (data?.periods || []).map((m) => ({
-    label: m.period,
+    label: netWorthChangeLabel(m),
     value: toMoneyNumber(m.change),
   }));
   return (
     <TrendingWidget
       {...props}
       title="Net Worth Change"
-      description="Monthly delta in net worth"
+      description="Changes between recorded months"
       data={trendingData}
       isLoading={isLoading}
       error={error}
@@ -189,6 +170,9 @@ export const NetWorthChangeWidget: React.FC<BaseWidgetProps> = (props) => {
         d.value >= 0 ? NET_WORTH_COLOR : EXPENSE_COLOR
       }
       avgColor="#64748b"
+      average={data?.avgMonthlyChange
+        ? { value: toMoneyNumber(data.avgMonthlyChange), label: "Avg/Month" } : null}
+      formatValue={(amount) => formatNetWorthChange(amount, data?.range?.currency)}
     />
   );
 };

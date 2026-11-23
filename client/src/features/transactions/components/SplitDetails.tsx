@@ -18,10 +18,16 @@ import {
 
 export interface SplitItem {
   id?: string;
-  amount: MoneyDto | string;
-  categoryId?: string;
+  amount: MoneyDto | { amount: string; currency: null } | string;
+  categoryId?: string | null;
   categoryName?: string;
-  notes?: string;
+  notes?: string | null;
+}
+
+function formatSplitAmount(amount: SplitItem["amount"]) {
+  if (typeof amount === "string") return formatCurrency(amount);
+  if (!amount.currency) return `${amount.amount} (currency unknown)`;
+  return formatCurrency({ amount: amount.amount, currency: amount.currency });
 }
 
 export interface SplitDetailsProps {
@@ -76,7 +82,7 @@ function SplitInline({
           key={split.id || index}
           className="flex items-center gap-1.5 text-xs bg-muted/50 px-2 py-1 rounded"
         >
-          <span className="font-medium">{formatCurrency(split.amount)}</span>
+          <span className="font-medium">{formatSplitAmount(split.amount)}</span>
           <span className="text-muted-foreground">→</span>
           <span>{split.categoryName || "Unknown"}</span>
         </div>
@@ -121,7 +127,7 @@ function SplitFull({
               )}
             </div>
             <div className="font-medium tabular-nums">
-              {formatCurrency(split.amount)}
+              {formatSplitAmount(split.amount)}
             </div>
           </div>
         ))}

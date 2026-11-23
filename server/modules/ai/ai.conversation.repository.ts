@@ -15,9 +15,10 @@
 
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { db } from '../../db';
-import { aiConversations, aiMessages } from '@shared/schema';
+import { aiConversations, aiMessages, aiRequests } from '@shared/schema';
 import type { AiConversation, AiMessage } from '@shared/schema';
 import { withTransaction, type TransactionType } from '../../utils/withTransaction';
+import { fenceOutboundResult } from './ai.consent-policy';
 
 const MAX_TITLE_LENGTH = 200;
 
@@ -26,6 +27,9 @@ export interface PersistedMessage {
   content: string;
   toolsUsed?: string[];
 }
+
+/** Runs inside the exchange's transaction once the conversation id is known. */
+export type ExchangePersistedHook = (tx: TransactionType, conversationId: string) => Promise<void>;
 
 export interface ConversationListItem {
   conversation: AiConversation;
@@ -52,18 +56,26 @@ export class AIConversationRepository {
    * (household, user). Returns the conversation id that callers should reuse on
    * the next request so history persists across requests.
    *
+   * An actor no longer in the household (erased while the request ran) gets
+   * nothing written: the membership fence refuses with a ForbiddenError.
+   *
    * The whole operation is atomic: create/lookup, both message inserts, and the
-   * thread `updatedAt` bump happen in one transaction.
+   * thread `updatedAt` bump happen in one transaction. `onPersisted` runs last
+   * in that transaction (R17: the request's settlement), so the exchange and
+   * its ledger outcome commit together.
    */
   async appendExchange(params: {
     householdId: string;
     userId: string;
     conversationId?: string;
     messages: PersistedMessage[];
+    onPersisted?: ExchangePersistedHook;
   }): Promise<string> {
-    const { householdId, userId, conversationId, messages } = params;
+    const { householdId, userId, conversationId, messages, onPersisted } = params;
 
     return withTransaction(async (tx) => {
+      // Astra #255 r3: nothing is written for an actor erased meanwhile.
+      await fenceOutboundResult(tx, householdId, userId);
       const targetId = await this.resolveConversationId(tx, {
         householdId,
         userId,
@@ -92,6 +104,7 @@ export class AIConversationRepository {
           ),
         );
 
+      await onPersisted?.(tx, targetId);
       return targetId;
     });
   }
@@ -114,6 +127,8 @@ export class AIConversationRepository {
     const { householdId, userId, conversationId, firstMessage } = params;
 
     if (conversationId) {
+      // KEY SHARE: a concurrent delete of this thread waits for this write to
+      // commit (and then clears its replay), or committed first (not found).
       const [existing] = await tx
         .select({ id: aiConversations.id })
         .from(aiConversations)
@@ -124,7 +139,8 @@ export class AIConversationRepository {
             eq(aiConversations.userId, userId),
           ),
         )
-        .limit(1);
+        .limit(1)
+        .for("key share");
 
       if (existing) {
         return existing.id;
@@ -241,6 +257,23 @@ export class AIConversationRepository {
     return { conversation, messages };
   }
 
+  /** Whether `conversationId` names an existing thread of this (household, user). */
+  async isOwnedThread(params: { householdId: string; userId: string; conversationId: string }): Promise<boolean> {
+    const { householdId, userId, conversationId } = params;
+    const [row] = await db
+      .select({ id: aiConversations.id })
+      .from(aiConversations)
+      .where(
+        and(
+          eq(aiConversations.id, conversationId),
+          eq(aiConversations.householdId, householdId),
+          eq(aiConversations.userId, userId),
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
+  }
+
   /**
    * Delete a conversation (and, via cascade, its messages) scoped to the
    * caller. Returns true when a row was actually removed, false when nothing
@@ -253,18 +286,33 @@ export class AIConversationRepository {
   }): Promise<boolean> {
     const { householdId, userId, conversationId } = params;
 
-    const deleted = await db
-      .delete(aiConversations)
-      .where(
-        and(
-          eq(aiConversations.id, conversationId),
-          eq(aiConversations.householdId, householdId),
-          eq(aiConversations.userId, userId),
-        ),
-      )
-      .returning({ id: aiConversations.id });
-
-    return deleted.length > 0;
+    return withTransaction(async (tx) => {
+      const scope = and(
+        eq(aiConversations.id, conversationId),
+        eq(aiConversations.householdId, householdId),
+        eq(aiConversations.userId, userId),
+      );
+      // R17 (Astra #255): lock the thread first. An exchange being written to
+      // it holds KEY SHARE until its settlement commits, so this waits for it
+      // and the clear below then sees that answer's link.
+      const [target] = await tx.select({ id: aiConversations.id }).from(aiConversations).where(scope).for("update");
+      if (!target) return false;
+      // A stored replay of this thread's answers must not outlive it. Clear it
+      // BEFORE the delete (the FK then nulls conversation_id), scoped to the
+      // same owner so a foreign id clears nothing.
+      await tx
+        .update(aiRequests)
+        .set({ responseBody: null })
+        .where(
+          and(
+            eq(aiRequests.conversationId, conversationId),
+            eq(aiRequests.householdId, householdId),
+            eq(aiRequests.actorId, userId),
+          ),
+        );
+      const deleted = await tx.delete(aiConversations).where(scope).returning({ id: aiConversations.id });
+      return deleted.length > 0;
+    });
   }
 }
 

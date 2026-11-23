@@ -53,6 +53,7 @@ async function runMatchingCycle(): Promise<void> {
 
     if (result.processed > 0) {
       logger.info("Receipt matching cycle completed", {
+        job: "receipt-matcher",
         processed: result.processed,
         matched: result.matched,
         duration,

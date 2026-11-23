@@ -1,4 +1,7 @@
-import { useState } from "react";
+import { userErrorMessage } from "@/lib/errorCopy";
+import { throwIfResNotOk } from "@/lib/queryClient";
+import { protectedFetch } from "@/lib/protected-fetch";
+import { useRef, useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -17,6 +20,30 @@ interface WeeklyRecapSettings {
   includeRecurring: boolean;
 }
 
+type RecapDrafts = {
+  [K in keyof WeeklyRecapSettings]?: { value: WeeklyRecapSettings[K]; revision: number };
+};
+const SETTINGS_KEY = ["weekly-recap-settings"];
+const SETTING_FIELDS = ["enabled", "emailEnabled", "dayOfWeek", "includeGoals", "includeRecurring"] as const;
+
+function settingsFromResponse(result: unknown): WeeklyRecapSettings {
+  const invalid = "Invalid weekly recap settings response. Please try again.";
+  if (typeof result !== "object" || result === null ||
+    !("success" in result) || result.success !== true || !("data" in result)) throw new Error(invalid);
+  const data = result.data;
+  if (typeof data !== "object" || data === null ||
+    !("enabled" in data) || typeof data.enabled !== "boolean" ||
+    !("emailEnabled" in data) || typeof data.emailEnabled !== "boolean" ||
+    !("includeGoals" in data) || typeof data.includeGoals !== "boolean" ||
+    !("includeRecurring" in data) || typeof data.includeRecurring !== "boolean" ||
+    !("dayOfWeek" in data) || typeof data.dayOfWeek !== "number" ||
+    !Number.isInteger(data.dayOfWeek) || data.dayOfWeek < 0 || data.dayOfWeek > 6) throw new Error(invalid);
+  return {
+    enabled: data.enabled, emailEnabled: data.emailEnabled, dayOfWeek: data.dayOfWeek,
+    includeGoals: data.includeGoals, includeRecurring: data.includeRecurring,
+  };
+}
+
 // Exported for tests: goes through apiCall so the PATCH carries x-csrf-token
 // (raw fetch 403s in a real browser session).
 export async function updateWeeklyRecapSettings(
@@ -26,7 +53,11 @@ export async function updateWeeklyRecapSettings(
     "/weekly-recap/settings",
     { method: "PATCH", body: JSON.stringify(data) },
   );
-  return result.data;
+  const saved = settingsFromResponse(result);
+  if (SETTING_FIELDS.some(field => data[field] !== undefined && data[field] !== saved[field])) {
+    throw new Error("Invalid weekly recap settings response. Please try again.");
+  }
+  return saved;
 }
 
 const DAY_OPTIONS = [
@@ -43,62 +74,85 @@ export default function WeeklyRecapSection() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  const { data: settings, isLoading } = useQuery<WeeklyRecapSettings>({
-    queryKey: ["weekly-recap-settings"],
-    queryFn: async () => {
-      const response = await fetch("/api/weekly-recap/settings", {
-        credentials: "include",
+  const { data: settings, error: loadError, refetch } = useQuery<WeeklyRecapSettings>({
+    queryKey: SETTINGS_KEY,
+    queryFn: async ({ signal }) => {
+      const response = await protectedFetch("/api/weekly-recap/settings", {
+        credentials: "include", signal,
       });
-      if (!response.ok) throw new Error("Failed to fetch settings");
+      await throwIfResNotOk(response);
+
       const result = await response.json();
-      return result.data;
+      return settingsFromResponse(result);
     },
   });
 
-  const [formData, setFormData] = useState<WeeklyRecapSettings>({
-    enabled: settings?.enabled ?? true,
-    emailEnabled: settings?.emailEnabled ?? false,
-    dayOfWeek: settings?.dayOfWeek ?? 0,
-    includeGoals: settings?.includeGoals ?? true,
-    includeRecurring: settings?.includeRecurring ?? true,
-  });
-
-  // Update form data when settings load
-  useState(() => {
-    if (settings) {
-      setFormData(settings);
-    }
-  });
+  const [drafts, setDrafts] = useState<RecapDrafts>({});
+  const revision = useRef(0);
+  const edit = <K extends keyof WeeklyRecapSettings>(field: K, value: WeeklyRecapSettings[K]) => {
+    const changed = { value, revision: ++revision.current };
+    // Keep reverts too: an in-flight save may still persist the previous edit.
+    setDrafts(current => ({ ...current, [field]: changed }));
+  };
 
   const updateMutation = useMutation({
-    mutationFn: updateWeeklyRecapSettings,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["weekly-recap-settings"] });
+    mutationFn: ({ patch }: { patch: Partial<WeeklyRecapSettings>; submitted: RecapDrafts }) => updateWeeklyRecapSettings(patch),
+    onSuccess: (saved, { patch, submitted }) => {
+      queryClient.setQueryData(SETTINGS_KEY, saved);
+      setDrafts(current => {
+        const remaining = { ...current };
+        for (const field of SETTING_FIELDS) {
+          if (field in patch && current[field]?.revision === submitted[field]?.revision) delete remaining[field];
+        }
+        return remaining;
+      });
       toast({
         title: "Settings updated",
-        description: "Your weekly recap preferences have been saved.",
+        description: "Your submitted weekly recap preferences have been saved.",
       });
     },
-    onError: () => {
+    onError: (error) => {
       toast({
         title: "Error",
-        description: "Failed to update settings. Please try again.",
+        description: userErrorMessage(error, "Failed to update settings. Please try again."),
         variant: "destructive",
       });
     },
   });
 
   const handleSave = () => {
-    updateMutation.mutate(formData);
+    if (!settings || updateMutation.isPending) return;
+    const patch: Partial<WeeklyRecapSettings> = {};
+    const addChanged = <K extends keyof WeeklyRecapSettings>(field: K) => {
+      const draft = drafts[field];
+      if (draft && draft.value !== settings[field]) patch[field] = draft.value;
+    };
+    SETTING_FIELDS.forEach(addChanged);
+    if (Object.keys(patch).length) updateMutation.mutate({ patch, submitted: drafts });
   };
 
-  if (isLoading) {
+  if (!settings) {
+    if (loadError) return (
+      <div className="space-y-4">
+        <p role="alert">Unable to load weekly recap preferences: {loadError.message}</p>
+        <Button onClick={() => { void refetch(); }}>Retry</Button>
+      </div>
+    );
     return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+      <div role="status" className="flex items-center justify-center gap-2 py-12">
+        <Loader2 aria-hidden="true" className="w-6 h-6 animate-spin text-muted-foreground" />
+        Loading weekly recap preferences…
       </div>
     );
   }
+
+  const formData: WeeklyRecapSettings = {
+    enabled: drafts.enabled?.value ?? settings.enabled,
+    emailEnabled: drafts.emailEnabled?.value ?? settings.emailEnabled,
+    dayOfWeek: drafts.dayOfWeek?.value ?? settings.dayOfWeek,
+    includeGoals: drafts.includeGoals?.value ?? settings.includeGoals,
+    includeRecurring: drafts.includeRecurring?.value ?? settings.includeRecurring,
+  };
 
   return (
     <div className="space-y-6">
@@ -110,7 +164,6 @@ export default function WeeklyRecapSection() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
-          {/* Enable/Disable */}
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <Label htmlFor="enabled">Enable Weekly Recap</Label>
@@ -121,13 +174,10 @@ export default function WeeklyRecapSection() {
             <Switch
               id="enabled"
               checked={formData.enabled}
-              onCheckedChange={(checked) =>
-                setFormData({ ...formData, enabled: checked })
-              }
+              onCheckedChange={(checked) => edit("enabled", checked)}
             />
           </div>
 
-          {/* Day of Week */}
           <div className="space-y-2">
             <Label htmlFor="dayOfWeek" className="flex items-center gap-2">
               <Calendar className="w-4 h-4" />
@@ -135,9 +185,7 @@ export default function WeeklyRecapSection() {
             </Label>
             <Select
               value={formData.dayOfWeek.toString()}
-              onValueChange={(value) =>
-                setFormData({ ...formData, dayOfWeek: parseInt(value) })
-              }
+              onValueChange={(value) => edit("dayOfWeek", parseInt(value, 10))}
             >
               <SelectTrigger id="dayOfWeek">
                 <SelectValue placeholder="Select day" />
@@ -151,11 +199,11 @@ export default function WeeklyRecapSection() {
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              Which day should the weekly recap be shown
+              Your recap email goes out on this day, by your household&apos;s time zone,
+              from 09:00 UTC, and covers the seven days before it.
             </p>
           </div>
 
-          {/* Email Notifications */}
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <Label htmlFor="emailEnabled" className="flex items-center gap-2">
@@ -169,13 +217,10 @@ export default function WeeklyRecapSection() {
             <Switch
               id="emailEnabled"
               checked={formData.emailEnabled}
-              onCheckedChange={(checked) =>
-                setFormData({ ...formData, emailEnabled: checked })
-              }
+              onCheckedChange={(checked) => edit("emailEnabled", checked)}
             />
           </div>
 
-          {/* Include Goals */}
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <Label htmlFor="includeGoals" className="flex items-center gap-2">
@@ -189,13 +234,10 @@ export default function WeeklyRecapSection() {
             <Switch
               id="includeGoals"
               checked={formData.includeGoals}
-              onCheckedChange={(checked) =>
-                setFormData({ ...formData, includeGoals: checked })
-              }
+              onCheckedChange={(checked) => edit("includeGoals", checked)}
             />
           </div>
 
-          {/* Include Recurring */}
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
               <Label htmlFor="includeRecurring" className="flex items-center gap-2">
@@ -209,13 +251,11 @@ export default function WeeklyRecapSection() {
             <Switch
               id="includeRecurring"
               checked={formData.includeRecurring}
-              onCheckedChange={(checked) =>
-                setFormData({ ...formData, includeRecurring: checked })
-              }
+              onCheckedChange={(checked) => edit("includeRecurring", checked)}
             />
           </div>
 
-          {/* Save Button */}
+          {updateMutation.error && <p role="alert">{updateMutation.error.message}</p>}
           <div className="flex justify-end pt-4">
             <Button
               onClick={handleSave}

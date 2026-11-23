@@ -69,7 +69,11 @@ const safeShortNameArb = fc.string({
 });
 
 const validProfileDataArb = fc.record({
-  fullName: safeNameArb,
+  // The other generated fields are alphanumeric, email or phone text and never contain a space, so
+  // a space-bearing full name can never equal another field. Without it fast-check sometimes
+  // produced the same value (e.g. "bind") for fullName and firstName, and getByDisplayValue
+  // found two inputs.
+  fullName: safeShortNameArb.map((name) => `${name} Full`),
   firstName: fc.option(safeNameArb, { nil: undefined }),
   lastName: fc.option(safeNameArb, { nil: undefined }),
   email: fc.emailAddress(),

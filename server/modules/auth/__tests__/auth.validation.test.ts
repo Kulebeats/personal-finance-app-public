@@ -102,7 +102,7 @@ describe("Auth Validation Tests", () => {
     const validRegistration = {
       email: "test@example.com",
       username: "testuser",
-      password: "Password1",
+      password: "Password1!",
       fullName: "Test User",
     };
 
@@ -142,7 +142,7 @@ describe("Auth Validation Tests", () => {
 
       it("should accept password at max length (128 chars)", () => {
         // Create 128 char password with required complexity
-        const longPassword = "Aa1" + "x".repeat(125);
+        const longPassword = "Aa1!" + "x".repeat(124);
         const result = registerSchema.safeParse({
           ...validRegistration,
           password: longPassword,
@@ -151,7 +151,7 @@ describe("Auth Validation Tests", () => {
       });
 
       it("should reject password over max length (129 chars)", () => {
-        const tooLongPassword = "Aa1" + "x".repeat(126);
+        const tooLongPassword = "Aa1!" + "x".repeat(125);
         const result = registerSchema.safeParse({
           ...validRegistration,
           password: tooLongPassword,
@@ -196,7 +196,7 @@ describe("Auth Validation Tests", () => {
         const result = registerSchema.safeParse({
           ...validRegistration,
           email: "test@example.com",
-          password: "DifferentPass1",
+          password: "DifferentPass1!",
         });
         expect(result.success).toBe(true);
       });
@@ -231,7 +231,7 @@ describe("Auth Validation Tests", () => {
       it("should accept password meeting all complexity requirements", () => {
         const result = registerSchema.safeParse({
           ...validRegistration,
-          password: "ValidPass1",
+          password: "ValidPass1!",
         });
         expect(result.success).toBe(true);
       });
@@ -288,7 +288,7 @@ describe("Auth Validation Tests", () => {
         // Passwords can contain Unicode for increased entropy
         const result = registerSchema.safeParse({
           ...validRegistration,
-          password: "Pässwörd1€", // Contains umlauts and Euro sign
+          password: "Pässwörd1€!", // Unicode plus the shared required special character
         });
         expect(result.success).toBe(true);
       });
@@ -296,7 +296,7 @@ describe("Auth Validation Tests", () => {
       it("should accept password with emoji", () => {
         const result = registerSchema.safeParse({
           ...validRegistration,
-          password: "Password1🔐",
+          password: "Password1🔐!",
         });
         expect(result.success).toBe(true);
       });
@@ -423,8 +423,8 @@ describe("Auth Validation Tests", () => {
     it("should accept valid password change data", () => {
       const result = changePasswordSchema.safeParse({
         currentPassword: "OldPass123",
-        newPassword: "NewPass123",
-        confirmPassword: "NewPass123",
+        newPassword: "NewPass123!",
+        confirmPassword: "NewPass123!",
       });
       expect(result.success).toBe(true);
     });
@@ -432,7 +432,7 @@ describe("Auth Validation Tests", () => {
     it("should reject if confirmPassword does not match newPassword", () => {
       const result = changePasswordSchema.safeParse({
         currentPassword: "OldPass123",
-        newPassword: "NewPass123",
+        newPassword: "NewPass123!",
         confirmPassword: "DifferentPass",
       });
       expect(result.success).toBe(false);

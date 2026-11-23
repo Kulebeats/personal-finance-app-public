@@ -2,11 +2,14 @@ import { db } from "../db";
 import {
   goals,
   goalContributions,
+  transactions,
   type Goal,
   type InsertGoal,
 } from "@shared/schema";
-import { eq, and } from "drizzle-orm";
-import { withTransaction } from "../utils/withTransaction";
+import { eq, and, isNull, or, sql } from "drizzle-orm";
+import { visibleTransactionPredicate } from "../core/authz/transaction-visibility";
+import type { HouseholdContext } from "../middleware/householdGuard";
+import { withTransaction, type TransactionType } from "../utils/withTransaction";
 import { Money } from "../core/money";
 
 /**
@@ -68,8 +71,8 @@ export class GoalRepository {
   /**
    * Create a new goal
    */
-  async create(data: InsertGoal): Promise<Goal> {
-    const [goal] = await db.insert(goals).values(data).returning();
+  async create(data: InsertGoal, tx?: TransactionType): Promise<Goal> {
+    const [goal] = await (tx ?? db).insert(goals).values(data).returning();
     return goal;
   }
 
@@ -79,9 +82,10 @@ export class GoalRepository {
   async update(
     id: string,
     householdId: string,
-    data: Partial<Goal>
+    data: Partial<Goal>,
+    tx?: TransactionType
   ): Promise<Goal | undefined> {
-    const [goal] = await db
+    const [goal] = await (tx ?? db)
       .update(goals)
       .set({ ...data, updatedAt: new Date() })
       .where(and(eq(goals.id, id), eq(goals.householdId, householdId)))
@@ -173,6 +177,29 @@ export class GoalRepository {
       .select()
       .from(goalContributions)
       .where(eq(goalContributions.goalId, goalId))
+      .orderBy(goalContributions.date);
+  }
+
+  /**
+   * Contributions whose source the viewer may see: the cited transaction, or
+   * for one with none, the goal itself. A holdings-tracked goal's contribution
+   * cites no transaction but went into its investment account, so it is shown
+   * only when `uncitedVisible` (the viewer can see that goal's progress).
+   */
+  async getVisibleContributions(
+    goalId: string,
+    actor: HouseholdContext,
+    uncitedVisible = true,
+  ): Promise<Array<typeof goalContributions.$inferSelect>> {
+    const citedVisible = sql`exists (select 1 from ${transactions}
+      where ${transactions.id} = ${goalContributions.transactionId} and ${visibleTransactionPredicate(actor)})`;
+    return await db
+      .select()
+      .from(goalContributions)
+      .where(and(
+        eq(goalContributions.goalId, goalId),
+        uncitedVisible ? or(isNull(goalContributions.transactionId), citedVisible) : citedVisible,
+      ))
       .orderBy(goalContributions.date);
   }
 

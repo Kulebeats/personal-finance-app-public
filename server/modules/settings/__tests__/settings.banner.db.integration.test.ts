@@ -30,6 +30,7 @@ import {
   createTestHousehold,
 } from "../../../__tests__/fixtures";
 import { hashPassword } from "../../../auth";
+import { isStored, removeStoredUnder, storedNamesUnder } from "../../../__tests__/stored-upload-fixture";
 
 const UPLOADS_ROOT = path.resolve(process.cwd(), "uploads");
 const PASSWORD = "TestPassword123!";
@@ -39,20 +40,6 @@ const PNG_BUFFER = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
   "base64",
 );
-
-/** Resolve a stored bannerUrl ("/uploads/banners/{hh}/{file}") to its disk path. */
-function diskPathFor(bannerUrl: string): string {
-  return path.join(UPLOADS_ROOT, bannerUrl.replace(/^\/uploads\//, ""));
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 describe("Profile Banner — Real DB Integration", () => {
   let app: Express;
@@ -136,6 +123,7 @@ describe("Profile Banner — Real DB Integration", () => {
   });
 
   afterAll(async () => {
+    await removeStoredUnder(`banners/${householdId}/`);
     // Files/dirs created by uploads
     await fs.rm(path.join(UPLOADS_ROOT, "banners", householdId), {
       recursive: true,
@@ -256,7 +244,7 @@ describe("Profile Banner — Real DB Integration", () => {
     expect(user.bannerUrl).toBe(bannerUrl);
 
     // File really on disk
-    expect(await fileExists(diskPathFor(bannerUrl))).toBe(true);
+    expect(await isStored(bannerUrl)).toBe(true);
 
     // DPA audit row (Rule 9)
     const auditRows = await fetchBannerAuditRows();
@@ -299,8 +287,8 @@ describe("Profile Banner — Real DB Integration", () => {
     const newUrl: string = res.body.data.bannerUrl;
     expect(newUrl).not.toBe(oldUrl);
 
-    expect(await fileExists(diskPathFor(newUrl))).toBe(true);
-    expect(await fileExists(diskPathFor(oldUrl))).toBe(false);
+    expect(await isStored(newUrl)).toBe(true);
+    expect(await isStored(oldUrl)).toBe(false);
   });
 
   it("deletes the banner: clears users.bannerUrl, removes the file, writes an audit row", async () => {
@@ -319,7 +307,7 @@ describe("Profile Banner — Real DB Integration", () => {
     const user = await fetchUser();
     expect(user.bannerUrl).toBeNull();
 
-    expect(await fileExists(diskPathFor(bannerUrl))).toBe(false);
+    expect(await isStored(bannerUrl)).toBe(false);
 
     const deleteRows = (await fetchBannerAuditRows()).filter((row) => {
       const details = row.details as Record<string, unknown>;
@@ -375,10 +363,10 @@ describe("Profile Banner — Real DB Integration", () => {
     const user = await fetchUser();
     expect(user.bannerUrl).toBeTruthy();
 
-    const dir = path.join(UPLOADS_ROOT, "banners", householdId);
-    const filesOnDisk = await fs.readdir(dir);
+    // OPS-001: files are stored objects; the manifest lists what is stored.
+    const filesOnDisk = (await storedNamesUnder(`banners/${householdId}/`)).map((name) => path.basename(name));
     expect(filesOnDisk.length).toBe(1);
     expect(path.basename(user.bannerUrl!)).toBe(filesOnDisk[0]);
-    expect(await fileExists(diskPathFor(user.bannerUrl!))).toBe(true);
+    expect(await isStored(user.bannerUrl!)).toBe(true);
   });
 });

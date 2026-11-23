@@ -15,6 +15,7 @@ import {
 } from "@/hooks/use-reports";
 import { toMoneyNumber } from "@/lib/money";
 import { CHART_COLORS } from "../constants";
+import { toCashflowBars, toNetWorthPoints, toSavingsRateBars } from "../chartSeries";
 import { ReportTab } from "../types";
 
 interface UseReportsDataOptions {
@@ -109,13 +110,7 @@ export function useReportsData({
   // Transform cashflow data for bar chart
   const barData = useMemo(() => {
     if (!cashflowData?.series) return [];
-    return cashflowData.series.slice(-6).map((s) => ({
-      month: new Date(s.periodStart).toLocaleDateString("en-US", {
-        month: "short",
-      }),
-      income: toMoneyNumber(s.income),
-      expenses: toMoneyNumber(s.expenses),
-    }));
+    return toCashflowBars(cashflowData.series);
   }, [cashflowData]);
 
   // Transform net worth data for line chart
@@ -124,10 +119,7 @@ export function useReportsData({
     return [
       {
         id: "Net Worth",
-        data: netWorthData.series[0].data.map((d) => ({
-          x: new Date(d.x).toLocaleDateString("en-US", { month: "short" }),
-          y: toMoneyNumber(d.y),
-        })),
+        data: toNetWorthPoints(netWorthData.series[0].data),
       },
     ];
   }, [netWorthData]);
@@ -135,30 +127,16 @@ export function useReportsData({
   // Transform savings data for bar chart
   const savingsRateData = useMemo(() => {
     if (!savingsData?.series) return [];
-    return savingsData.series.map((s) => ({
-      month:
-        s.periodStart || s.label
-          ? new Date(s.periodStart || s.label).toLocaleDateString("en-US", {
-              month: "short",
-            })
-          : "",
-      rate: s.savingsRate,
-    }));
+    return toSavingsRateBars(savingsData.series);
   }, [savingsData]);
 
-  // Totals from cashflow
-  const totals = cashflowData?.totals ?? {
-    income: { amount: "0", currency: "USD" },
-    expenses: { amount: "0", currency: "USD" },
-    savings: { amount: "0", currency: "USD" },
-    savingsRate: 0,
-  };
-
-  // Currency from any data source
+  // Totals and currency come only from the server. Until a report arrives
+  // neither is known (null): the page shows that, never a guessed currency.
+  const totals = cashflowData?.totals ?? null;
   const currency =
     spendingData?.range?.baseCurrency ??
     cashflowData?.range?.baseCurrency ??
-    "USD";
+    null;
 
   return {
     // Raw data

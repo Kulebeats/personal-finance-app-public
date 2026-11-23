@@ -18,7 +18,7 @@ import request from "supertest";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Express } from "express";
 import { randomUUID } from "crypto";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { db } from "../../db";
 import {
   grzBonds,
@@ -50,6 +50,7 @@ describe("GRZ V7 envelope (P8a)", () => {
   // A second household, used only to prove the cross-household 403 path.
   let otherHouseholdId: string;
   let otherUserId: string;
+  let privateReaderId: string | undefined;
   let otherAuthCookie: string;
   let otherCsrfToken: string;
 
@@ -171,31 +172,32 @@ describe("GRZ V7 envelope (P8a)", () => {
 
   afterAll(async () => {
     try {
+      // A settled sale's bond and cash can only be deleted with their household,
+      // in one transaction, as account erasure does (migration 0039).
       for (const hh of [householdId, otherHouseholdId]) {
-        await db.delete(auditLogs).where(eq(auditLogs.householdId, hh));
-        const bonds = await db
-          .select({ id: grzBonds.id })
-          .from(grzBonds)
-          .where(eq(grzBonds.householdId, hh));
-        for (const b of bonds) {
-          await db
-            .delete(grzBondPayments)
-            .where(eq(grzBondPayments.bondId, b.id));
-        }
-        await db.delete(grzBonds).where(eq(grzBonds.householdId, hh));
-        await db.delete(grzTBills).where(eq(grzTBills.householdId, hh));
-        await db
-          .delete(investmentTransactions)
-          .where(eq(investmentTransactions.householdId, hh));
-        await db.delete(transactions).where(eq(transactions.householdId, hh));
-        await db.delete(accounts).where(eq(accounts.householdId, hh));
-        await db
-          .delete(householdMembers)
-          .where(eq(householdMembers.householdId, hh));
-        await db.delete(households).where(eq(households.id, hh));
+        await db.transaction(async (tx) => {
+          await tx.delete(auditLogs).where(eq(auditLogs.householdId, hh));
+          const bonds = tx
+            .select({ id: grzBonds.id })
+            .from(grzBonds)
+            .where(eq(grzBonds.householdId, hh));
+          await tx.delete(grzBondPayments).where(inArray(grzBondPayments.bondId, bonds));
+          await tx.delete(grzBonds).where(eq(grzBonds.householdId, hh));
+          await tx.delete(grzTBills).where(eq(grzTBills.householdId, hh));
+          await tx
+            .delete(investmentTransactions)
+            .where(eq(investmentTransactions.householdId, hh));
+          await tx.delete(transactions).where(eq(transactions.householdId, hh));
+          await tx.delete(accounts).where(eq(accounts.householdId, hh));
+          await tx
+            .delete(householdMembers)
+            .where(eq(householdMembers.householdId, hh));
+          await tx.delete(households).where(eq(households.id, hh));
+        });
       }
       await db.delete(users).where(eq(users.id, userId));
       await db.delete(users).where(eq(users.id, otherUserId));
+      if (privateReaderId) await db.delete(users).where(eq(users.id, privateReaderId));
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error("GRZ envelope test cleanup error", error);
@@ -208,7 +210,7 @@ describe("GRZ V7 envelope (P8a)", () => {
     faceValue: "100000.00",
     purchasePrice: "98000.00",
     purchaseDate: "2026-01-01",
-    couponRate: "11.0000",
+    couponRate: "0.1100",
     maturityDate: "2031-01-01",
     accountId,
     ...overrides,
@@ -239,6 +241,73 @@ describe("GRZ V7 envelope (P8a)", () => {
     );
     expect(res.body.success).toBe(true);
     expect(Array.isArray(res.body.data)).toBe(true);
+  });
+
+  it("scopes bond and bill lists to readable holdings and linked receipt transactions", async () => {
+    const privateReader = createTestUser();
+    const [reader] = await db.insert(users).values({ id: privateReader.id, username: `grz-private-${privateReader.id}`,
+      email: `grz-private-${privateReader.id}@example.com`, emailVerified: true, passwordHash: await hashPassword("TestPassword123") }).returning();
+    privateReaderId = reader.id;
+    await db.insert(householdMembers).values({ householdId, userId: reader.id, role: "member" });
+    const signer = await loginAndGetCsrf(reader.email, "TestPassword123");
+    const shared = (await authRequest(request(app).post("/api/grz/bonds")).send(bondPayload()).expect(201)).body.data;
+    const [restricted] = await db.insert(accounts).values({ householdId, ownerUserId: reader.id, isPrivate: true,
+      name: "Restricted destination", type: "checking", currency: "ZMW", balance: "0" }).returning();
+    const privateBond = bondPayload({ accountId: restricted.id }), privateBill = tbillPayload({ accountId: restricted.id });
+    for (const [path, payload] of [["bonds", privateBond], ["tbills", privateBill]] as const) {
+      const rejected = await authRequest(request(app).post(`/api/grz/${path}`)).send(payload);
+      expect.soft(rejected.status).toBe(404);
+    }
+    expect.soft(await db.select({ id: grzBonds.id }).from(grzBonds).where(eq(grzBonds.accountId, restricted.id))).toEqual([]);
+    expect.soft(await db.select({ id: grzTBills.id }).from(grzTBills).where(eq(grzTBills.accountId, restricted.id))).toEqual([]);
+    const ownerPost = (path: string) => request(app).post(`/api/grz/${path}`).set("Cookie", signer.cookie).set("X-CSRF-Token", signer.csrfToken);
+    const hidden = (await ownerPost("bonds").send(privateBond).expect(201)).body.data;
+    const bill = (await ownerPost("tbills").send(privateBill).expect(201)).body.data;
+    const payments = await db.select().from(grzBondPayments).where(eq(grzBondPayments.bondId, shared.id));
+    const [privatePosting] = await db.insert(transactions).values({
+      householdId, accountId, name: "Private receipt", date: "2026-07-01", type: "income",
+      amount: "25.00", currency: "ZMW", isPrivate: true, ownerUserId: reader.id,
+    }).returning();
+    await db.update(grzBondPayments).set({ status: "paid", incomeTransactionId: privatePosting.id })
+      .where(eq(grzBondPayments.id, payments[0].id));
+    const [privateInvestment] = await db.insert(investmentTransactions).values({ householdId, accountId: restricted.id,
+      type: "sell", amount: "25.00", currency: "ZMW", transactionDate: "2026-07-01" }).returning();
+    await db.update(grzBondPayments).set({ investmentTransactionId: privateInvestment.id })
+      .where(eq(grzBondPayments.id, payments[1].id));
+    const invalidBills = [{ maturityIncomeTxId: privatePosting.id }, { maturityInvestmentTxId: privateInvestment.id },
+      { rolloverToId: bill.id }, { status: "matured" }, { maturedDate: "2026-04-02" }];
+    for (const extra of invalidBills) {
+      const response = await authRequest(request(app).post("/api/grz/tbills"))
+        .send(tbillPayload({ accountId: null, tbillName: "Unadmitted acquisition", ...extra }));
+      expect.soft(response.status).toBe(400);
+    }
+    const sold = await authRequest(request(app).post("/api/grz/bonds"))
+      .send(bondPayload({ accountId: null, bondName: "Unadmitted acquisition", soldDate: "2026-01-01" }));
+    expect.soft(sold.status).toBe(400);
+    expect.soft(await db.select({ id: grzTBills.id }).from(grzTBills).where(eq(grzTBills.tbillName, "Unadmitted acquisition"))).toEqual([]);
+    expect.soft(await db.select({ id: grzBonds.id }).from(grzBonds).where(eq(grzBonds.bondName, "Unadmitted acquisition"))).toEqual([]);
+    const bonds = (await authRequest(request(app).get("/api/grz/bonds")).expect(200)).body.data as Array<{ id: string; payments: { id: string }[] }>;
+    expect.soft(bonds.map(row => row.id)).not.toContain(hidden.id);
+    const visiblePayments = bonds.find(row => row.id === shared.id)?.payments.map(row => row.id);
+    expect.soft(visiblePayments).not.toContain(payments[0].id);
+    expect.soft(visiblePayments).not.toContain(payments[1].id);
+    expect(visiblePayments).toContain(payments[2].id);
+    const newBill = async () => (await authRequest(request(app).post("/api/grz/tbills")).send(tbillPayload()).expect(201)).body.data.id as string;
+    const cashBill = await newBill(), investmentBill = await newBill(), rollover = await newBill();
+    await db.update(grzTBills).set({ maturityIncomeTxId: privatePosting.id }).where(eq(grzTBills.id, cashBill));
+    await db.update(grzTBills).set({ maturityInvestmentTxId: privateInvestment.id }).where(eq(grzTBills.id, investmentBill));
+    await db.update(grzTBills).set({ rolloverToId: cashBill }).where(eq(grzTBills.id, rollover));
+    type BillRow = { id: string; rolloverToId: string | null };
+    const bills = (await authRequest(request(app).get("/api/grz/tbills")).expect(200)).body.data as BillRow[];
+    const visibleIds = bills.map(row => row.id);
+    for (const restrictedId of [bill.id, cashBill, investmentBill]) expect.soft(visibleIds).not.toContain(restrictedId);
+    expect(bills.find(row => row.id === rollover)?.rolloverToId).toBeNull();
+    const ownerBills = (await request(app).get("/api/grz/tbills").set("Cookie", signer.cookie).expect(200)).body.data as BillRow[];
+    expect(ownerBills.map(row => row.id)).toEqual(expect.arrayContaining([bill.id, cashBill, investmentBill, rollover]));
+    expect(ownerBills.find(row => row.id === rollover)?.rolloverToId).toBe(cashBill);
+    const ownerBonds = (await request(app).get("/api/grz/bonds").set("Cookie", signer.cookie).expect(200)).body.data as typeof bonds;
+    expect(ownerBonds.map(row => row.id)).toContain(hidden.id);
+    expect(ownerBonds.find(row => row.id === shared.id)?.payments.map(row => row.id)).toEqual(expect.arrayContaining(payments.map(row => row.id)));
   });
 
   it("POST /api/grz/bonds returns { success: true, data: bond } on success (201)", async () => {
@@ -301,6 +370,48 @@ describe("GRZ V7 envelope (P8a)", () => {
     expect(res.body.data.investmentTx.amount).toBe("97000.00");
   });
 
+  it.each(["separate", "hidden source", "hidden destination", "foreign currency"] as const)(
+    "validates the chosen sale destination and holding access for %s", async mode => {
+      const name = `GRZ disposal ${randomUUID()}`;
+      const created = await authRequest(request(app).post("/api/grz/bonds")).send(bondPayload({ bondName: name })).expect(201);
+      const bondId = created.body.data.id as string;
+      const [alternate] = await db.insert(accounts).values({
+        householdId, name: "Synthetic sale destination", type: "checking", balance: "20.00",
+        currency: mode === "foreign currency" ? "USD" : "ZMW",
+        isPrivate: mode.startsWith("hidden"), ownerUserId: mode.startsWith("hidden") ? otherUserId : userId,
+      }).returning();
+      if (mode === "hidden source") {
+        await db.update(grzBonds).set({ accountId: alternate.id }).where(eq(grzBonds.id, bondId));
+      }
+      const chosen = mode === "hidden source" ? accountId : alternate.id;
+      const reply = await authRequest(request(app).put(`/api/grz/bonds/${bondId}/sell`))
+        .send({ soldPrice: "97000.00", soldDate: "2026-06-01", accountId: chosen });
+      expect(reply.status).toBe(mode === "separate" ? 200 : mode === "foreign currency" ? 400 : 404);
+      const [holding] = await db.select().from(grzBonds).where(eq(grzBonds.id, bondId));
+      const sales = await db.select().from(investmentTransactions).where(eq(investmentTransactions.notes, `GRZ Bond Sale: ${name}`));
+      if (mode === "separate") {
+        expect(sales.map(sale => sale.accountId)).toEqual([chosen]);
+        expect(holding.status).toBe("sold");
+      } else {
+        if (mode.startsWith("hidden")) expect(reply.body.error.message).toBe("Bond not found");
+        expect(sales).toHaveLength(0);
+        expect(holding.status).toBe("active");
+        expect(holding.soldDate).toBeNull();
+      }
+    },
+  );
+
+  it("returns the existing disposal conflict for a visible sold bond before checking the selected currency", async () => {
+    const created = await authRequest(request(app).post("/api/grz/bonds")).send(bondPayload()).expect(201);
+    const url = `/api/grz/bonds/${created.body.data.id}/sell`;
+    await authRequest(request(app).put(url)).send({ soldPrice: "97000.00", accountId }).expect(200);
+    const [dollars] = await db.insert(accounts).values({
+      householdId, name: "Synthetic USD account", type: "checking", balance: "0", currency: "USD",
+    }).returning();
+    const denied = await authRequest(request(app).put(url)).send({ soldPrice: "97000.00", accountId: dollars.id }).expect(409);
+    expect(denied.body.error.message).toBe("Bond is already sold");
+  });
+
   it("PUT /api/grz/bonds/:id/sell returns a NOT_FOUND envelope (404) for an unknown bond", async () => {
     const res = await authRequest(
       request(app).put(`/api/grz/bonds/${randomUUID()}/sell`),
@@ -311,7 +422,7 @@ describe("GRZ V7 envelope (P8a)", () => {
     expect(res.body.error.code).toBe("NOT_FOUND");
   });
 
-  it("PUT /api/grz/bonds/:id/sell returns a FORBIDDEN envelope (403) for another household's bond", async () => {
+  it("PUT /api/grz/bonds/:id/sell returns the same NOT_FOUND response as an absent bond for another household's bond", async () => {
     const createRes = await authRequest(request(app).post("/api/grz/bonds"))
       .send(bondPayload({ bondName: "GRZ Envelope Cross-HH Bond" }))
       .expect(201);
@@ -321,9 +432,11 @@ describe("GRZ V7 envelope (P8a)", () => {
       request(app).put(`/api/grz/bonds/${bondId}/sell`),
     )
       .send({ soldPrice: "97000.00" })
-      .expect(403);
+      .expect(404);
     expect(res.body.success).toBe(false);
-    expect(res.body.error.code).toBe("FORBIDDEN");
+    const missing = await otherAuthRequest(request(app).put(`/api/grz/bonds/${randomUUID()}/sell`))
+      .send({ soldPrice: "97000.00" }).expect(404);
+    expect([res.body.error.code, res.body.error.message]).toEqual([missing.body.error.code, missing.body.error.message]);
   });
 
   it("PUT /api/grz/bonds/:id/sell returns a CONFLICT envelope (409) when already sold", async () => {

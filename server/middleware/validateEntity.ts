@@ -3,6 +3,7 @@ import { db } from "../db";
 import { accounts, categories, merchants, tags } from "@shared/schema";
 import { eq, and, isNull } from "drizzle-orm";
 import { logger } from "../utils/logger";
+import { isHouseholdRole, type HouseholdRole } from "../core/authz/capabilities";
 
 /**
  * Entity Validation Middleware - Phase 0A.5
@@ -256,18 +257,17 @@ export function validateEntity(options: EntityValidationOptions) {
 /**
  * Role-based access control middleware
  *
- * Ensures user has required role level for the action
- *
- * Roles hierarchy: owner > admin > member > view_only
+ * Compatibility adapter for existing minimum-role callers. New operations use
+ * named capabilities; this adapter does not infer authority from ordinal values.
  */
 export function requireRole(
   minRole: "owner" | "admin" | "member" | "view_only"
 ) {
-  const roleHierarchy = {
-    owner: 4,
-    admin: 3,
-    member: 2,
-    view_only: 1,
+  const permitted: Record<typeof minRole, readonly HouseholdRole[]> = {
+    owner: ["owner"],
+    admin: ["owner", "admin"],
+    member: ["owner", "admin", "member"],
+    view_only: ["owner", "admin", "member", "view_only", "professional"],
   };
 
   return (req: Request, res: Response, next: NextFunction) => {
@@ -281,10 +281,9 @@ export function requireRole(
       });
     }
 
-    const userRoleLevel = roleHierarchy[req.householdContext.role];
-    const requiredRoleLevel = roleHierarchy[minRole];
-
-    if (userRoleLevel < requiredRoleLevel) {
+    const role = req.householdContext.role;
+    if (!isHouseholdRole(role) || !Object.hasOwn(permitted, minRole) ||
+        !permitted[minRole].includes(role)) {
       logger.warn("Insufficient role for action", {
         requestId: req.requestId,
         route: req.path,

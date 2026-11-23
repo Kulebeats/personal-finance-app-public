@@ -108,7 +108,7 @@ export default function DashboardBudgetWidget() {
               sibling dashboard widgets. */}
           <Link
             href="/budget"
-            className="group flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+            className="group flex items-center gap-1 text-xs font-medium text-primary hover:underline max-md:min-h-11"
           >
             View Budget
             <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />

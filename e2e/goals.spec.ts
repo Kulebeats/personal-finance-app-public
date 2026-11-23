@@ -16,7 +16,7 @@
  * markup that isn't there) and none of it matched the shipped UI.
  */
 
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./protected-test";
 import { login } from "./utils/login";
 import { selectRadixOption } from "./utils/locators";
 

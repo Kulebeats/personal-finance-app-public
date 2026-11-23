@@ -9,7 +9,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { CURRENT_AI_CONSENT_VERSION } from '../ai.consent-policy';
 import { Money } from '../../../core/money';
+import { aiCache } from '../ai.cache';
+import { TOOL_ARG_SCHEMAS } from '../ai.validation';
 
 // Mock logger to suppress output
 vi.mock('../../../utils/logger', () => ({
@@ -23,20 +26,7 @@ vi.mock('../../../utils/logger', () => ({
 
 describe('AI Module Integration', () => {
   describe('Tool Names and Configuration', () => {
-    const VALID_TOOLS = [
-      'get_spending_by_category',
-      'get_budget_status',
-      'get_goals_status',
-      'get_upcoming_recurring',
-      'get_recent_transactions',
-      'get_account_balances',
-      'get_merchant_spending',
-      'get_category_trends',
-      'get_monthly_summary',
-      'get_transaction_search',
-      'get_goal_assignments',
-      'get_cash_flow'
-    ];
+    const VALID_TOOLS = Object.keys(TOOL_ARG_SCHEMAS);
 
     it('should have exactly 12 tools defined', () => {
       expect(VALID_TOOLS).toHaveLength(12);
@@ -49,30 +39,8 @@ describe('AI Module Integration', () => {
       });
     });
 
-    const CACHEABLE_TOOLS = [
-      'get_spending_by_category',
-      'get_budget_status',
-      'get_goals_status',
-      'get_upcoming_recurring',
-      'get_account_balances',
-      'get_merchant_spending',
-      'get_category_trends',
-      'get_monthly_summary',
-      'get_goal_assignments',
-      'get_cash_flow'
-    ];
-
-    const NON_CACHEABLE_TOOLS = [
-      'get_recent_transactions',
-      'get_transaction_search'
-    ];
-
-    it('should have 10 cacheable tools', () => {
-      expect(CACHEABLE_TOOLS).toHaveLength(10);
-    });
-
-    it('should have 2 non-cacheable tools', () => {
-      expect(NON_CACHEABLE_TOOLS).toHaveLength(2);
+    it.each(VALID_TOOLS)('executes %s without cross-request result reuse', toolName => {
+      expect(aiCache.isCacheable(toolName)).toBe(false);
     });
   });
 
@@ -127,14 +95,13 @@ describe('AI Module Integration', () => {
   });
 
   describe('Consent Version', () => {
-    const CURRENT_CONSENT_VERSION = 'v1.0';
-
-    it('should have v1.0 as current version', () => {
-      expect(CURRENT_CONSENT_VERSION).toBe('v1.0');
+    // R17: the disclosure names Anthropic and Google, so the version moved on.
+    it('should have v2.0 as current version', () => {
+      expect(CURRENT_AI_CONSENT_VERSION).toBe('v2.0');
     });
 
     it('should follow version format', () => {
-      expect(CURRENT_CONSENT_VERSION).toMatch(/^v\d+\.\d+$/);
+      expect(CURRENT_AI_CONSENT_VERSION).toMatch(/^v\d+\.\d+$/);
     });
   });
 

@@ -1,3 +1,4 @@
+import { ProtectedImage } from "@/components/session/ProtectedImage";
 import { useRef, useState, type ChangeEvent } from "react";
 import {
   Dialog,
@@ -39,7 +40,7 @@ export function GoalImagePicker({ value, onChange }: GoalImagePickerProps) {
       <div className="flex items-center gap-3">
         <div className="h-16 w-16 overflow-hidden rounded-lg border bg-muted/40">
           {value ? (
-            <img src={value} alt="" className="h-full w-full object-cover" />
+            <ProtectedImage src={value} alt="" className="h-full w-full object-cover" />
           ) : (
             <div className="h-full w-full" />
           )}
@@ -120,7 +121,7 @@ export function GoalImagePicker({ value, onChange }: GoalImagePickerProps) {
                   }}
                   className="overflow-hidden rounded-lg border hover:border-primary transition-colors"
                 >
-                  <img
+                  <ProtectedImage
                     src={image.url}
                     alt={image.originalFilename}
                     className="h-24 w-full object-cover"

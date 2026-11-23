@@ -1,158 +1,99 @@
-import cron from "node-cron";
+import cron, { type ScheduledTask } from "node-cron";
 import { logger } from "./utils/logger";
-import { authSecurityReportService } from "./modules/auth/auth.security.report";
-import { notificationRepository } from "./repositories/NotificationRepository";
-import { processWeeklyRecapEmails } from "./modules/weekly-recap/weekly-recap.email.service";
-import { db } from "./db";
-import { users } from "../shared/schema";
-import { withRedisLock } from "./config/redis";
+import { startProcessor, stopProcessor } from "./core/events/processor";
+import { recoveryWindowDays } from "./core/scheduling/jobCatalog";
+import { recordSchedulerStart } from "./core/scheduling/jobJournal";
+import { SCHEDULED_JOBS } from "./core/scheduling/jobRegistry";
+import { runScheduledJob, type ScheduledJobDefinition } from "./core/scheduling/scheduledJob";
+import { isSchedulerEnabled } from "./core/scheduling/schedulerConfig";
+import { isWithinScheduledWindow, scheduledSlotAtOrBefore } from "./core/scheduling/schedulePeriod";
 
 /**
- * Distributed-lock TTLs for scheduled jobs (SCP-308).
+ * In-process scheduler (OPS-003, NEW-38).
  *
- * Each cron job is registered on every instance, so without coordination it
- * would double-fire under horizontal scaling. `withRedisLock` ensures exactly
- * one instance runs each job per tick. The TTL is a safety net: if the holder
- * crashes mid-run, the lock auto-expires so the next tick can proceed. It is
- * sized comfortably below the job's cron interval (all daily/weekly) so a slow
- * run never blocks the following scheduled run.
- *
- * When REDIS_URL is unset in local dev/test, `withRedisLock` runs the job
- * directly. Production requires Redis at startup.
+ * On the declared single instance (SCP-306) this one process drives every
+ * scheduled financial and notification job, and the outbox event processor
+ * that delivers security notices. Each job runs under its own Postgres
+ * advisory lock and journals its outcome, so an overlapping tick or a second
+ * instance skips instead of double-running. SCHEDULER_ENABLED controls both
+ * halves; see core/scheduling/schedulerConfig.ts.
  */
-const SCHEDULER_LOCK_TTL_SECONDS = 10 * 60; // 10 minutes
+const SCHEDULER_TIMEZONE = "UTC";
+const RECOVERY_CRON = "7,22,37,52 * * * *";
+const RECOVERY_TASK = "scheduler.retry-incomplete";
 
-/**
- * Daily security report generation for all active users.
- */
-async function runDailySecurityReport(): Promise<void> {
-  logger.info("Starting daily security report generation");
+let scheduledTasks: readonly ScheduledTask[] = [];
+let isStarted = false;
+
+function scheduleJob(job: ScheduledJobDefinition): ScheduledTask {
+  if (!cron.validate(job.cron)) throw new Error(`Invalid cron expression for scheduled job ${job.name}`);
+  return cron.schedule(job.cron, () => runTick(job, new Date()), {
+    name: job.name, timezone: SCHEDULER_TIMEZONE, noOverlap: true,
+  });
+}
+
+async function runTick(job: ScheduledJobDefinition, now: Date): Promise<void> {
   try {
-    // Get all active users
-    // Optimization: In a real app, we might process in batches or queues
-    const allUsers = await db.select({ id: users.id }).from(users);
+    await runScheduledJob(job, undefined, now);
+  } catch (error) {
+    logger.error("Scheduled job tick failed", { jobName: job.name, outcome: "error", error });
+  }
+}
 
-    logger.info(`Processing security reports for ${allUsers.length} users`);
-
-    for (const user of allUsers) {
-      try {
-        await authSecurityReportService.sendDailySecurityReport(user.id);
-      } catch (err) {
-        logger.error(`Failed to generate report for user ${user.id}`, {
-          error: err,
-        });
-      }
+function scheduleRecovery(jobs: readonly ScheduledJobDefinition[]): ScheduledTask {
+  return cron.schedule(RECOVERY_CRON, async () => {
+    for (const job of jobs) {
+      const now = new Date();
+      const slot = scheduledSlotAtOrBefore(job.cron, now);
+      // A slot's recovery uses its own UTC day (or Monday–Sunday report week).
+      // The worker never reconstructs a past day/week using current balances.
+      if (isWithinScheduledWindow(slot, now, recoveryWindowDays(job.name) ?? 0)) await runTick(job, now);
     }
-
-    logger.info("Daily security report generation completed");
-  } catch (error) {
-    logger.error("Failed to run daily security report job", { error });
-  }
+  }, { name: RECOVERY_TASK, timezone: SCHEDULER_TIMEZONE, noOverlap: true });
 }
 
-/**
- * Daily notification cleanup: archive old read, purge old archived.
- */
-async function runNotificationCleanup(): Promise<void> {
-  logger.info("Starting notification cleanup job");
+async function recordStart(): Promise<void> {
   try {
-    // Auto-archive old read notifications (30 days)
-    const archivedCount = await notificationRepository.autoArchiveOldRead(30);
-    logger.info(`Auto-archived ${archivedCount} old read notifications`);
-
-    // Purge archived notifications older than retention period (90 days)
-    const purgedCount = await notificationRepository.purgeArchived(90);
-    logger.info(`Purged ${purgedCount} archived notifications`);
-
-    logger.info("Notification cleanup completed", {
-      archived: archivedCount,
-      purged: purgedCount,
-    });
+    await recordSchedulerStart();
   } catch (error) {
-    logger.error("Failed to run notification cleanup job", { error });
+    logger.error("Scheduler start could not be recorded", { outcome: "error", error });
   }
 }
 
-/**
- * Weekly recap email digest for the previous week (Monday-Sunday).
- */
-async function runWeeklyRecap(): Promise<void> {
-  logger.info("Starting weekly recap email job");
-  try {
-    // dayOfWeek: 1 = Monday (week starts on Monday)
-    const result = await processWeeklyRecapEmails(1);
-    logger.info("Weekly recap email job completed", {
-      sent: result.sent,
-      failed: result.failed,
-    });
-  } catch (error) {
-    logger.error("Failed to run weekly recap email job", { error });
+/** Returns whether scheduled work was started. */
+export function initScheduler(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  jobs: readonly ScheduledJobDefinition[] = SCHEDULED_JOBS,
+): boolean {
+  if (!isSchedulerEnabled(env)) {
+    logger.info("Scheduler disabled; no scheduled jobs or outbox processing in this process");
+    return false;
   }
+  if (isStarted) {
+    logger.warn("Scheduler already running");
+    return true;
+  }
+  const tasks = jobs.map(scheduleJob);
+  const recoverable = jobs.filter(job => recoveryWindowDays(job.name) !== undefined);
+  if (recoverable.length > 0) tasks.push(scheduleRecovery(recoverable));
+  scheduledTasks = Object.freeze(tasks);
+  startProcessor();
+  isStarted = true;
+  // Readiness measures never-run jobs from the first recorded start (OPS-002).
+  // A failure here must not stop the jobs; readiness then reads the journal alone.
+  void recordStart();
+  logger.info("Scheduler initialized", { count: scheduledTasks.length });
+  return true;
 }
 
-/**
- * Wraps a scheduled job in a distributed lock so it runs once cluster-wide.
- * Falls back to running directly when Redis is not configured (single instance).
- *
- * Exported for testing the lock-wrapping behaviour without standing up cron.
- */
-export async function runScheduledJob(
-  jobName: string,
-  job: () => Promise<void>,
-): Promise<void> {
-  const lockKey = `scheduler:lock:${jobName}`;
-  const { ran } = await withRedisLock(
-    lockKey,
-    SCHEDULER_LOCK_TTL_SECONDS,
-    job,
-  );
-  if (!ran) {
-    logger.info("Scheduled job skipped; running on another instance", {
-      jobName,
-    });
-  }
+export async function stopScheduler(): Promise<void> {
+  const tasks = scheduledTasks;
+  scheduledTasks = [];
+  isStarted = false;
+  for (const task of tasks) await task.stop();
+  stopProcessor();
 }
 
-/**
- * Initialize scheduled jobs
- */
-export function initScheduler() {
-  logger.info("Initializing scheduler...");
-
-  // Daily Security Report - Runs at 8:00 AM every day
-  cron.schedule("0 8 * * *", () => {
-    runScheduledJob("daily-security-report", runDailySecurityReport).catch(
-      (error) => {
-        logger.error("Scheduled job failed", {
-          jobName: "daily-security-report",
-          error,
-        });
-      },
-    );
-  });
-
-  // Daily Notification Cleanup - Runs at 2:00 AM every day
-  cron.schedule("0 2 * * *", () => {
-    runScheduledJob("notification-cleanup", runNotificationCleanup).catch(
-      (error) => {
-        logger.error("Scheduled job failed", {
-          jobName: "notification-cleanup",
-          error,
-        });
-      },
-    );
-  });
-
-  // Weekly Recap Email Digest - Runs every Monday at 9:00 AM
-  // Sends recap for the previous week (Monday-Sunday)
-  cron.schedule("0 9 * * 1", () => {
-    runScheduledJob("weekly-recap", runWeeklyRecap).catch((error) => {
-      logger.error("Scheduled job failed", {
-        jobName: "weekly-recap",
-        error,
-      });
-    });
-  });
-
-  logger.info("Scheduler initialized");
+export function isSchedulerRunning(): boolean {
+  return isStarted;
 }

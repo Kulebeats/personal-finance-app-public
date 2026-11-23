@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TestWrapper } from "@/test/test-utils";
 import Investments from "@/pages/Investments";
@@ -6,6 +6,8 @@ import * as useInvestmentsDataHook from "../hooks/useInvestmentsData";
 
 // Mock the feature hook
 vi.mock("../hooks/useInvestmentsData");
+// These dashboard-composition cases do not open the lifetime-owned holding form.
+vi.mock("@/contexts/SessionContext", () => ({ useSession: () => ({ status: null, lifetime: null }) }));
 
 // The page subscribes to useHoldings directly (deduped by query key) to surface
 // load errors vs. an empty portfolio. It is not part of useInvestmentsData, so
@@ -59,7 +61,6 @@ vi.mock("recharts", async (importOriginal) => {
 });
 
 describe("Investments Page Integration", () => {
-  const mockRefresh = vi.fn();
   const defaultMockData = {
     displayCurrency: "ZMW",
     setDisplayCurrency: vi.fn(),
@@ -70,7 +71,7 @@ describe("Investments Page Integration", () => {
       {
         id: "1",
         quantity: "100",
-        currentValue: 1000,
+        currentValue: { amount: "1000.00", currency: "ZMW" },
         gainLossPercent: 10,
         security: {
           symbol: "TEST",
@@ -81,8 +82,8 @@ describe("Investments Page Integration", () => {
       },
     ],
     portfolioSummary: {
-      totalValue: 1000,
-      totalGainLoss: 100,
+      totalValue: { amount: "1000.00", currency: "ZMW" },
+      totalGainLoss: { amount: "100.00", currency: "ZMW" },
       totalGainLossPercent: 10,
     },
     performanceHistory: [{ date: "Jan", value: 1000 }],
@@ -92,7 +93,6 @@ describe("Investments Page Integration", () => {
     totalValue: 1000,
     totalGainLoss: 100,
     totalGainLossPercent: 10,
-    refreshMarketData: { mutate: mockRefresh, isPending: false },
     formatCurrency: (val: number, curr: string) => `${curr} ${val}`,
   };
 
@@ -165,16 +165,13 @@ describe("Investments Page Integration", () => {
     expect(stockElements.length).toBeGreaterThan(0);
   });
 
-  it("calls refresh market data when button clicked", () => {
+  it("offers members no market price refresh: that is an operator action (NEW-13)", () => {
     render(
       <TestWrapper>
         <Investments />
       </TestWrapper>
     );
 
-    const refreshBtn = screen.getByText(/Refresh Prices/i);
-    fireEvent.click(refreshBtn);
-
-    expect(mockRefresh).toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /Refresh Prices/i })).not.toBeInTheDocument();
   });
 });

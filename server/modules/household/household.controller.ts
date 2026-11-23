@@ -8,6 +8,7 @@
  */
 
 import { Request, Response, NextFunction } from "express";
+import { resolveRequestHousehold } from "../../core/authz/session-preconditions";
 import { householdRepository } from "../../repositories/HouseholdRepository";
 import { userRepository } from "../../repositories/UserRepository";
 import { logger } from "../../utils/logger";
@@ -16,10 +17,10 @@ import { success, created } from "../../core/http";
 import {
   ValidationError,
   NotFoundError,
-  ForbiddenError,
   HouseholdNotFoundError,
 } from "../../core/errors";
 import { businessAuditService } from "../../services/BusinessAuditService";
+import { updateHouseholdGeneral } from "./household.general.service";
 
 // Re-export member and invitation controllers
 import { membersController } from "./members.controller";
@@ -46,7 +47,7 @@ export const householdController = {
   async getGeneral(req: Request, res: Response, next: NextFunction) {
     try {
       const userId = req.session.userId!;
-      const household = await householdRepository.findByUserId(userId);
+      const household = await resolveRequestHousehold(req, userId);
       if (!household) {
         // This is the "brand-new user, no household yet" case the client's
         // onboarding gate keys off. Use the distinguishable HOUSEHOLD_NOT_FOUND
@@ -120,47 +121,19 @@ export const householdController = {
         );
       }
 
-      const household = await householdRepository.findByUserId(userId);
+      const household = await resolveRequestHousehold(req, userId);
       if (!household) {
         throw new NotFoundError("No household found");
       }
 
-      // SCP-333: only owners/admins may rename the household or change its base
-      // currency. Without this check a view_only (or plain member) could rename
-      // the household or change the base currency. Mirrors the role-check
-      // pattern in members.controller.ts.
-      const currentMember = await householdRepository.findMember(
+      // SCP-333 role check, SET-05 ledger guard and the audit row run in one
+      // transaction under the household lock (household.general.service).
+      const updatedHousehold = await updateHouseholdGeneral(
         household.id,
         userId,
-      );
-      if (!currentMember || !["owner", "admin"].includes(currentMember.role)) {
-        throw new ForbiddenError(
-          "Only owners and admins can change household settings",
-        );
-      }
-
-      const oldValues = {
-        name: household.name,
-        currency: household.currency,
-        fiscalYearStartMonth: household.fiscalYearStartMonth,
-      };
-
-      const updatedHousehold = await householdRepository.update(
-        household.id,
         parseResult.data,
+        businessAuditService.getIpAddress(req),
       );
-
-      // AUDIT-006: Log settings updates
-      await businessAuditService.logUpdate({
-        householdId: household.id,
-        userId,
-        entityType: "household_preferences",
-        entityId: household.id,
-        oldValue: oldValues,
-        newValue: parseResult.data,
-        ipAddress: businessAuditService.getIpAddress(req),
-        metadata: { action: "settings_update" },
-      });
 
       success(res, { household: updatedHousehold });
     } catch (error) {

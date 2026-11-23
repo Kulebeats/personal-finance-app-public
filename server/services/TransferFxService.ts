@@ -90,7 +90,8 @@ export async function calculateFxData(
       const { getLatestFxRates } = await import("../core/calculations");
       const fxRatesToBase = await getLatestFxRates(
         [fromCurrency, toCurrency],
-        baseCurrency
+        baseCurrency,
+        householdId
       );
 
       const fromToBaseRate = fxRatesToBase.get(fromCurrency);

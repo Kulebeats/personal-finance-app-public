@@ -1,10 +1,10 @@
 import { stringify } from "csv-stringify/sync";
-
-type ExportFormat = "csv" | "json";
+import { CsvDecimal, neutralizeCsvFormula } from "../core/csv";
 
 export class ExportService {
   /**
-   * Convert array of objects to CSV
+   * Convert array of objects to CSV. Text cells a spreadsheet would run as a
+   * formula are neutralized; numbers and CsvDecimal cells stay numeric.
    */
   generateCsv(data: Record<string, unknown>[], columns?: string[]): string {
     if (!data || data.length === 0) {
@@ -16,6 +16,8 @@ export class ExportService {
       columns: columns,
       cast: {
         date: (date) => date.toISOString().split("T")[0],
+        string: (value) => neutralizeCsvFormula(value),
+        object: (value) => (value instanceof CsvDecimal ? value.text : JSON.stringify(value)),
       },
     });
   }

@@ -158,32 +158,27 @@ export function useMerchantHandlers({
   };
 
   const handleDeleteMerchant = () => {
-    const {
-      editingMerchant,
-      deleteAction,
-      mergeTarget,
-      deleteConfirmText,
-      deleteAcknowledged,
-    } = formDialog.state;
-    if (!editingMerchant) return;
-    if (deleteAction === "merge" && !mergeTarget) return;
-    if (deleteAction === "hard" && deleteConfirmText.trim() !== "DELETE")
-      return;
-    if (!deleteAcknowledged) return;
-    mutations.deleteMerchant.mutate(
-      {
-        id: editingMerchant.id,
-        options:
-          deleteAction === "merge"
-            ? { action: "merge", mergeTargetId: mergeTarget }
-            : { action: deleteAction },
+    const { editingMerchant, deleteAction, mergeTarget, deleteAcknowledged } =
+      formDialog.state;
+    if (!editingMerchant || !deleteAcknowledged) return;
+    const closeDialog = {
+      onSuccess: () => {
+        formDialog.actions.setDialogOpen(false);
+        formDialog.actions.setEditingMerchant(null);
       },
-      {
-        onSuccess: () => {
-          formDialog.actions.setDialogOpen(false);
-          formDialog.actions.setEditingMerchant(null);
-        },
-      }
+    };
+    if (deleteAction === "merge") {
+      // The merge endpoint moves the transactions and records the undo.
+      if (!mergeTarget) return;
+      mutations.mergeMerchants.mutate(
+        { sourceId: editingMerchant.id, targetId: mergeTarget },
+        closeDialog
+      );
+      return;
+    }
+    mutations.deleteMerchant.mutate(
+      { id: editingMerchant.id, options: { action: "soft" } },
+      closeDialog
     );
   };
 

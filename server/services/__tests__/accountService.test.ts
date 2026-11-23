@@ -1,4 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { createAccountSummarySqlFixture, type SummaryAccountInput } from "./accountSummarySql.fixture";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { providerFxQuotes } from "@shared/schema";
+const summaryDb = vi.hoisted(() => ({ transaction: vi.fn(), execute: vi.fn() }));
+vi.mock("../../db", () => ({ db: summaryDb }));
+vi.mock("../../repositories/AccountCreationGrant", () => ({ lockAccountCreationGrant: vi.fn(), lockAccountHousehold: vi.fn() }));
+// adjustBalance dates its ledger row on the household calendar (FIN-13).
+vi.mock("../householdCalendarToday", () => ({ householdToday: vi.fn(async () => "2026-10-06") }));
 
 /**
  * Account Service Tests
@@ -19,6 +27,7 @@ vi.mock("../../repositories/AccountRepository", () => ({
     softDelete: vi.fn(),
     archive: vi.fn(),
     unarchive: vi.fn(),
+    lockForAudit: vi.fn(),
     getNextDisplayOrder: vi.fn().mockResolvedValue(0),
     getBalancesForNetWorth: vi.fn(),
   },
@@ -206,6 +215,7 @@ describe("AccountService", () => {
           isAsset: true,
           type: "checking",
         }),
+        expect.any(Object),
       );
       expect(result.type).toBe("checking");
     });
@@ -234,6 +244,7 @@ describe("AccountService", () => {
           isAsset: false,
           type: "credit",
         }),
+        expect.any(Object),
       );
     });
 
@@ -335,10 +346,8 @@ describe("AccountService", () => {
   describe("getNetWorthSummary", () => {
     it("correctly calculates net worth from assets and liabilities", async () => {
       const { accountService } = await import("../AccountService");
-      const { accountRepository } =
-        await import("../../repositories/AccountRepository");
 
-      const balances = [
+      const balances: SummaryAccountInput[] = [
         {
           id: "1",
           balance: "10000.00",
@@ -361,9 +370,9 @@ describe("AccountService", () => {
           currency: "ZMW",
         }, // Liability
       ];
-      (accountRepository.getBalancesForNetWorth as any).mockResolvedValue(
-        balances,
-      );
+      const fixture = createAccountSummarySqlFixture(balances);
+      summaryDb.transaction.mockImplementation(fixture.transaction);
+      summaryDb.execute.mockImplementation(fixture.publication);
 
       const result = await accountService.getNetWorthSummary(
         testHouseholdId,
@@ -374,14 +383,15 @@ describe("AccountService", () => {
       expect(result.totalLiabilities).toBe(2000);
       expect(result.netWorth).toBe(13000);
       expect(result.currency).toBe("ZMW");
+      expect(summaryDb.transaction).toHaveBeenCalledOnce();
+      expect(fixture.publication).toHaveBeenCalledOnce();
     });
 
     it("handles empty accounts list", async () => {
       const { accountService } = await import("../AccountService");
-      const { accountRepository } =
-        await import("../../repositories/AccountRepository");
-
-      (accountRepository.getBalancesForNetWorth as any).mockResolvedValue([]);
+      const fixture = createAccountSummarySqlFixture([]);
+      summaryDb.transaction.mockImplementation(fixture.transaction);
+      summaryDb.execute.mockImplementation(fixture.publication);
 
       const result = await accountService.getNetWorthSummary(
         testHouseholdId,
@@ -392,6 +402,42 @@ describe("AccountService", () => {
       expect(result.totalLiabilities).toBe(0);
       expect(result.netWorth).toBe(0);
       expect(result.currency).toBe("ZMW");
+    });
+
+    it("keeps mixed-currency cash inputs on the first and final transaction-bound dated quote selection", async () => {
+      const { accountService } = await import("../AccountService");
+      const fixture = createAccountSummarySqlFixture([
+        { id: "asset-usd", balance: "10.00", isAsset: true, type: "checking", currency: "USD" },
+        { id: "liability-usd", balance: "2.00", isAsset: false, type: "credit", currency: "USD" },
+      ], "ZMW", [{ fromCurrency: "USD", rate: "20.00" }]);
+      summaryDb.transaction.mockImplementation(fixture.transaction);
+      summaryDb.execute.mockImplementation(fixture.publication);
+      const result = await accountService.getNetWorthSummary(testHouseholdId, testUserId);
+      expect(result).toMatchObject({ totalAssets: 200, totalLiabilities: 40, netWorth: 160, currency: "ZMW" });
+      expect(fixture.tx.selectDistinctOn).toHaveBeenCalledOnce();
+      const predicates = fixture.tx.selectDistinctOn.mock.results.map(selection => {
+        expect(selection.value.from).toHaveBeenCalledWith(providerFxQuotes);
+        const query = selection.value.from.mock.results[0].value;
+        expect(query.where).toHaveBeenCalledOnce();
+        expect(query.orderBy).toHaveBeenCalledOnce();
+        return new PgDialect().sqlToQuery(query.where.mock.calls[0][0]);
+      });
+      // First assembly and publication proof use the same pair, UTC day and
+      // instant; the second selection is necessary even if the amount is stable.
+      expect(predicates[0].params.slice(0, 4)).toEqual(["USD", "ZMW", result.valuationDate, result.valuationDate]);
+      expect(predicates[0].sql).toMatch(/"effective_date" =/);
+      expect(predicates[0].sql).toMatch(/"quoted_at" <=/);
+      expect(fixture.publication).toHaveBeenCalledOnce();
+      const final = new PgDialect().sqlToQuery(fixture.publication.mock.calls[0][0]);
+      expect(final.sql).toContain('"provider_fx_quotes"');
+      expect(final.sql).toMatch(/q\.quoted_at\s*<=/);
+      expect(final.params).toContain(result.valuationDate);
+      expect(final.params).toContain(predicates[0].params[4]);
+      const input = final.params.find(value => typeof value === "string" && value.startsWith('{"currency":'));
+      expect(JSON.parse(String(input))).toMatchObject({ currency: "ZMW", accounts: [
+        expect.objectContaining({ id: "asset-usd", balance: "10.00", currency: "USD" }),
+        expect.objectContaining({ id: "liability-usd", balance: "2.00", currency: "USD" }),
+      ], quotes: [expect.objectContaining({ from: "USD", to: "ZMW", rate: "20.00", effectiveDate: result.valuationDate })] });
     });
   });
 
@@ -434,7 +480,9 @@ describe("AccountService", () => {
           amount: "50.00",
           type: "balance_adjustment",
           isBalanceAdjustmentIncrease: true,
+          date: "2026-10-06",
         }),
+        { audit: expect.objectContaining({ userId: testUserId, householdId: testHouseholdId }) },
       );
     });
 
@@ -471,7 +519,9 @@ describe("AccountService", () => {
           amount: "30.00",
           type: "balance_adjustment",
           isBalanceAdjustmentIncrease: false,
+          date: "2026-10-06",
         }),
+        { audit: expect.objectContaining({ userId: testUserId, householdId: testHouseholdId }) },
       );
     });
 
@@ -507,7 +557,12 @@ describe("AccountService", () => {
         isPrivate: false,
         ownerUserId: testUserId,
       };
-      vi.spyOn(accountRepository, "findByIdWithVisibility").mockResolvedValue({
+      // The pre-transaction visibility read is stale (it says archived); the
+      // audit's before-state must come from the locked read instead.
+      vi.spyOn(accountRepository, "findByIdWithVisibility").mockResolvedValue(
+        mockAccount as any,
+      );
+      vi.spyOn(accountRepository, "lockForAudit").mockResolvedValue({
         ...mockAccount,
         isArchived: false,
       } as any);
@@ -522,10 +577,12 @@ describe("AccountService", () => {
       );
 
       expect(result.isArchived).toBe(true);
+      expect(accountRepository.lockForAudit).toHaveBeenCalledWith(expect.anything(), "acc-1", testHouseholdId);
       expect(accountRepository.archive).toHaveBeenCalledWith(
         "acc-1",
         testHouseholdId,
         { userId: testUserId },
+        expect.anything(), // the write's transaction, shared with its audit row
       );
       expect(businessAuditService.logUpdate).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -574,6 +631,10 @@ describe("AccountService", () => {
         ...mockAccount,
         isArchived: true,
       } as any);
+      vi.spyOn(accountRepository, "lockForAudit").mockResolvedValue({
+        ...mockAccount,
+        isArchived: true,
+      } as any);
       vi.spyOn(accountRepository, "unarchive").mockResolvedValue(
         { account: mockAccount } as any,
       );
@@ -589,6 +650,7 @@ describe("AccountService", () => {
         "acc-1",
         testHouseholdId,
         { userId: testUserId },
+        expect.anything(), // the write's transaction, shared with its audit row
       );
       expect(businessAuditService.logUpdate).toHaveBeenCalledWith(
         expect.objectContaining({

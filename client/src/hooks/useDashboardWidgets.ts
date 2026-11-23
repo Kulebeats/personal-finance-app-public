@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   useDisplaySettings,
   useUpdateDisplaySettings,
 } from "@/hooks/use-settings";
 import { WidgetConfig } from "@/components/dashboard/CustomizeDashboardModal";
 import { arrayMove } from "@dnd-kit/sortable";
-import { useDebounce } from "@/hooks/use-debounce"; // Assuming this exists, if not will implement simple timeout or checking imports
+import { assertOperationLifetime, captureOperationLifetime } from "@/lib/operation-lifetime";
 
 const DEFAULT_WIDGETS: WidgetConfig[] = [
   { id: "weekly-recap", label: "Weekly Recap", enabled: true },
@@ -64,74 +64,122 @@ function sanitizeWidgets(rawWidgets: unknown): WidgetConfig[] | null {
 }
 
 export function useDashboardWidgets() {
-  const { data: settings, isLoading } = useDisplaySettings();
-  const { mutate: updateSettings } = useUpdateDisplaySettings();
+  const { data: settings, isLoading, isFetching, error: settingsError, refetch } = useDisplaySettings();
+  const { mutateAsync: updateSettings } = useUpdateDisplaySettings();
   const [widgets, setWidgets] = useState<WidgetConfig[]>(DEFAULT_WIDGETS);
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "unsaved" | "saving" | "saved" | "error">("idle");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const save = useRef(updateSettings);
+  save.current = updateSettings;
+  const operation = useRef(captureOperationLifetime());
+  const queue = useRef({
+    active: true,
+    pending: false,
+    failed: false,
+    draft: DEFAULT_WIDGETS,
+    acknowledged: DEFAULT_WIDGETS,
+    timer: null as ReturnType<typeof setTimeout> | null,
+  });
+  const sameLayout = (a: WidgetConfig[], b: WidgetConfig[]) => JSON.stringify(a) === JSON.stringify(b);
 
-  // Debounce the widgets state for saving
-  const debouncedWidgets = useDebounce(widgets, 1000);
+  const saveLatest = useCallback(async function persistLatest(force = false): Promise<void> {
+    const current = queue.current;
+    if (!current.active || current.pending || (current.failed && !force)) return;
+    try { assertOperationLifetime(operation.current); } catch { return; }
+    if (current.timer) clearTimeout(current.timer);
+    current.timer = null;
+    if (!force && sameLayout(current.draft, current.acknowledged)) return;
 
-  // Ref to track if the current widgets state differs from what we loaded/saved
-  // This helps prevent saving the initial load or circular updates
-  const isDirty = useRef(false);
-
-  // Sync with settings when loaded (only once or if remote changes and we aren't dirty?)
-  // For simplicity, we only load once on mount/fetch.
-  // Real-time sync with other tabs would require more complex logic.
-  useEffect(() => {
-    const savedWidgets = sanitizeWidgets(settings?.dashboardWidgets?.widgets);
-
-    if (!savedWidgets) {
-      if (settings && !hasLoaded) {
-        setHasLoaded(true);
+    const sent = current.draft;
+    current.pending = true;
+    current.failed = false;
+    setSaveError(null);
+    setSaveStatus("saving");
+    try {
+      const acknowledged = await save.current({ dashboardWidgets: { widgets: sent, version: 1 } });
+      if (!current.active) return;
+      assertOperationLifetime(operation.current);
+      const stored = acknowledged?.dashboardWidgets;
+      if (!stored || stored.version !== 1 || !Array.isArray(stored.widgets) || stored.widgets.length !== sent.length ||
+        !stored.widgets.every((widget, index) => isWidgetConfig(widget) && widget.id === sent[index].id && widget.label === sent[index].label && widget.enabled === sent[index].enabled)) {
+        throw new Error("Dashboard layout was not acknowledged. Retry saving.");
       }
-      return;
+      current.acknowledged = sent;
+      current.pending = false;
+      if (sameLayout(current.draft, sent)) {
+        setSaveStatus("saved");
+      } else {
+        setSaveStatus("unsaved");
+        // A newer draft whose debounce already expired follows this acknowledgement.
+        if (!current.timer) void persistLatest();
+      }
+    } catch (error) {
+      if (!current.active) return;
+      try { assertOperationLifetime(operation.current); } catch { return; }
+      current.pending = false;
+      current.failed = true;
+      setSaveError(error instanceof Error ? error.message : "Unable to save dashboard layout");
+      setSaveStatus("error");
     }
+  }, []);
 
-    // Only update from settings if we haven't modified locally yet,
-    // OR if we want to enforce server state (but that breaks UX if typing/dragging)
-    // Here we just do it on initial load.
-    if (!hasLoaded) {
-      const savedIds = new Set(savedWidgets.map((w) => w.id));
-      const missingWidgets = DEFAULT_WIDGETS.filter((w) => !savedIds.has(w.id));
+  // SessionBoundary keys this hook's tree by lifetime; discard its timer and response on unmount.
+  useEffect(() => {
+    queue.current.active = true;
+    return () => {
+      queue.current.active = false;
+      if (queue.current.timer) clearTimeout(queue.current.timer);
+    };
+  }, []);
 
-      setWidgets([...savedWidgets, ...missingWidgets]);
-      setHasLoaded(true);
-    }
+  useEffect(() => {
+    if (hasLoaded || !settings) return;
+    const savedWidgets = sanitizeWidgets(settings?.dashboardWidgets?.widgets);
+    const savedIds = new Set(savedWidgets?.map((widget) => widget.id));
+    const loaded = savedWidgets
+      ? [...savedWidgets, ...DEFAULT_WIDGETS.filter((widget) => !savedIds.has(widget.id))]
+      : DEFAULT_WIDGETS;
+    queue.current.acknowledged = loaded;
+    queue.current.draft = loaded;
+    setWidgets(loaded);
+    setHasLoaded(true);
   }, [settings, hasLoaded]);
 
-  // Effect to save when debounced widgets change
   useEffect(() => {
-    if (hasLoaded && isDirty.current) {
-      updateSettings({
-        dashboardWidgets: {
-          widgets: debouncedWidgets,
-          version: 1,
-        },
-      });
-      isDirty.current = false;
+    if (!hasLoaded) return;
+    const current = queue.current;
+    current.draft = widgets;
+    if (current.timer) clearTimeout(current.timer);
+    current.timer = null;
+    if (current.failed) return; // Explicit Retry resumes after a failure, without a retry loop.
+    if (!current.pending && sameLayout(widgets, current.acknowledged)) {
+      setSaveStatus(status => status === "saved" ? status : "idle");
+      return;
     }
-  }, [debouncedWidgets, hasLoaded, updateSettings]);
+    setSaveStatus(current.pending ? "saving" : "unsaved");
+    current.timer = setTimeout(() => { current.timer = null; void saveLatest(); }, 1000);
+  }, [widgets, hasLoaded, saveLatest]);
 
   const toggleWidget = (id: string) => {
-    isDirty.current = true;
+    if (!hasLoaded) return;
     setWidgets((prev) =>
       prev.map((w) => (w.id === id ? { ...w, enabled: !w.enabled } : w))
     );
   };
 
   const reorderWidgets = (activeId: string, overId: string) => {
-    isDirty.current = true;
+    if (!hasLoaded) return;
     setWidgets((items) => {
       const oldIndex = items.findIndex((item) => item.id === activeId);
       const newIndex = items.findIndex((item) => item.id === overId);
+      if (oldIndex < 0 || newIndex < 0 || oldIndex === newIndex) return items;
       return arrayMove(items, oldIndex, newIndex);
     });
   };
 
   const resetToDefault = () => {
-    isDirty.current = true;
+    if (!hasLoaded) return;
     setWidgets(DEFAULT_WIDGETS);
   };
 
@@ -140,6 +188,15 @@ export function useDashboardWidgets() {
     toggleWidget,
     reorderWidgets,
     resetToDefault,
-    isLoading: isLoading || !hasLoaded,
+    saveStatus,
+    saveError,
+    isDirty: saveStatus === "unsaved" || saveStatus === "saving" || saveStatus === "error",
+    retrySave: () => { if (queue.current.failed) void saveLatest(true); },
+    loadError: !hasLoaded && settingsError ? settingsError.message : null,
+    retryLoad: () => {
+      try { assertOperationLifetime(operation.current); } catch { return; }
+      void refetch();
+    },
+    isLoading: !hasLoaded && (isLoading || isFetching || !settingsError),
   };
 }

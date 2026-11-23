@@ -28,6 +28,7 @@ import {
 } from "@shared/schema";
 import { recurringRepository } from "../../../repositories/RecurringRepository";
 import { recurringService } from "../RecurringService";
+import { recordRecurringDenomination } from "../RecurringDenomination";
 import {
   createTestUser,
   createTestHousehold,
@@ -124,12 +125,13 @@ describe("processRecurring atomicity (SCP-330)", () => {
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error("SCP-330 cleanup error", error);
+      throw error;
     }
   });
 
   async function seedRule(nextDueDate: string): Promise<string> {
     const ruleId = randomUUID();
-    await db.insert(recurringTransactions).values({
+    const [rule] = await db.insert(recurringTransactions).values({
       id: ruleId,
       householdId,
       accountId,
@@ -142,7 +144,9 @@ describe("processRecurring atomicity (SCP-330)", () => {
       nextDueDate,
       isActive: true,
       isPaused: false,
-    });
+    }).returning();
+    // Explicit synthetic unit proof keeps the existing rollback oracle focused on its real writer.
+    await db.transaction(tx => recordRecurringDenomination(tx, rule, "ZMW", userId, "trusted_recovery"));
     return ruleId;
   }
 

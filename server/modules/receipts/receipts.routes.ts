@@ -8,7 +8,7 @@ import { Router } from "express";
 import multer from "multer";
 import { requireAuth, requireRole } from "../../middleware/auth";
 import { householdGuard } from "../../middleware/householdGuard";
-import { generalLimiter, uploadLimiter } from "../../middleware/rateLimit";
+import { uploadLimiter } from "../../middleware/rateLimit";
 import { receiptsController } from "./receipts.controller";
 
 const router = Router();
@@ -20,7 +20,6 @@ const upload = multer({
 // Authentication and household context required for all routes
 router.use(requireAuth);
 router.use(householdGuard);
-router.use(generalLimiter);
 
 // Receipt images (read-only, view_only can access)
 router.get("/:id/thumbnail", receiptsController.getThumbnail);

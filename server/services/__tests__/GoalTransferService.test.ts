@@ -15,6 +15,7 @@ const {
   mockWithTransaction,
   mockGoalActivityLogService,
   mockNotificationService,
+  mockApplyProgressAdjustment,
 } = vi.hoisted(() => ({
   mockDb: {
     select: vi.fn(),
@@ -28,6 +29,18 @@ const {
   mockNotificationService: {
     triggerGoalMilestone: vi.fn().mockResolvedValue(undefined),
   },
+  // The fold itself runs against real Postgres in the goal-hardening suite;
+  // here it applies the signed amount so the service's own logic is tested.
+  mockApplyProgressAdjustment: vi.fn(async (_tx: unknown, goal: { id: string; currentAmount: string }, adjustment: { kind: string; amount: { toString(): string }; refId: string }) => {
+    const { Money } = await import("../../core/money");
+    const previous = new Money(goal.currentAmount);
+    const next = previous.add(new Money(adjustment.amount.toString()));
+    return { write: { goal: { ...goal, currentAmount: next.toString() }, previous, next }, net: next.subtract(previous), rebalanced: [], effects: new Map() };
+  }),
+}));
+
+vi.mock("../goal/GoalProgressAdjustments", () => ({
+  applyProgressAdjustment: mockApplyProgressAdjustment,
 }));
 
 vi.mock("../../db", () => ({
@@ -142,12 +155,19 @@ describe("GoalTransferService", () => {
       const result = await service.transfer("house-123", "user-123", {
         fromGoalId: "goal-from",
         toGoalId: "goal-to",
-        amount: "500.00",
+        amount: { amount: "500.00", currency: "ZMW" },
         reason: "Rebalancing",
       });
 
       expect(result.transfer).toBeDefined();
       expect(mockGoalActivityLogService.log).toHaveBeenCalledTimes(2);
+      const adjustments = mockApplyProgressAdjustment.mock.calls.map(([, goal, adjustment]) =>
+        [goal.id, adjustment.kind, adjustment.amount.toString(), adjustment.refId]);
+      expect(adjustments).toEqual([
+        ["goal-from", "transfer_out", "-500.00", "transfer-1"],
+        ["goal-to", "transfer_in", "500.00", "transfer-1"],
+      ]);
+      expect([result.fromGoal.currentAmount, result.toGoal.currentAmount]).toEqual(["4500.00", "1000.00"]);
     });
 
     it("should reject transfer with negative amount", async () => {
@@ -155,7 +175,7 @@ describe("GoalTransferService", () => {
         service.transfer("house-123", "user-123", {
           fromGoalId: "goal-from",
           toGoalId: "goal-to",
-          amount: "-100.00",
+          amount: { amount: "-100.00", currency: "ZMW" },
         })
       ).rejects.toThrow("Transfer amount must be positive");
     });
@@ -165,7 +185,7 @@ describe("GoalTransferService", () => {
         service.transfer("house-123", "user-123", {
           fromGoalId: "goal-from",
           toGoalId: "goal-to",
-          amount: "0.00",
+          amount: { amount: "0.00", currency: "ZMW" },
         })
       ).rejects.toThrow("Transfer amount must be positive");
     });
@@ -188,7 +208,7 @@ describe("GoalTransferService", () => {
         service.transfer("house-123", "user-123", {
           fromGoalId: "goal-from",
           toGoalId: "goal-from",
-          amount: "100.00",
+          amount: { amount: "100.00", currency: "ZMW" },
         })
       ).rejects.toThrow("Cannot transfer to the same goal");
     });
@@ -216,7 +236,7 @@ describe("GoalTransferService", () => {
         service.transfer("house-123", "user-123", {
           fromGoalId: "goal-from",
           toGoalId: "goal-to",
-          amount: "100.00",
+          amount: { amount: "100.00", currency: "ZMW" },
         })
       ).rejects.toThrow("Cannot transfer between different goal types");
     });
@@ -244,7 +264,7 @@ describe("GoalTransferService", () => {
         service.transfer("house-123", "user-123", {
           fromGoalId: "goal-from",
           toGoalId: "goal-to",
-          amount: "100.00",
+          amount: { amount: "100.00", currency: "ZMW" },
         })
       ).rejects.toThrow("Cannot transfer between goals with different currencies");
     });
@@ -272,7 +292,7 @@ describe("GoalTransferService", () => {
         service.transfer("house-123", "user-123", {
           fromGoalId: "goal-from",
           toGoalId: "goal-to",
-          amount: "100.00",
+          amount: { amount: "100.00", currency: "ZMW" },
         })
       ).rejects.toThrow("Cannot transfer from a completed goal");
     });
@@ -295,7 +315,7 @@ describe("GoalTransferService", () => {
         service.transfer("house-123", "user-123", {
           fromGoalId: "goal-from",
           toGoalId: "goal-to",
-          amount: "10000.00", // More than currentAmount (5000.00)
+          amount: { amount: "10000.00", currency: "ZMW" }, // More than currentAmount (5000.00)
         })
       ).rejects.toThrow("Insufficient balance for transfer");
     });
@@ -307,7 +327,8 @@ describe("GoalTransferService", () => {
           from: vi.fn().mockReturnThis(),
           where: vi.fn().mockReturnThis(),
           for: vi.fn().mockReturnThis(),
-          limit: vi.fn().mockResolvedValueOnce([]),
+          // The destination lock comes first because its ID sorts before the source.
+          limit: vi.fn().mockResolvedValueOnce([mockToGoal]).mockResolvedValueOnce([]),
         };
         return fn(mockTx);
       });
@@ -316,7 +337,7 @@ describe("GoalTransferService", () => {
         service.transfer("house-123", "user-123", {
           fromGoalId: "non-existent",
           toGoalId: "goal-to",
-          amount: "100.00",
+          amount: { amount: "100.00", currency: "ZMW" },
         })
       ).rejects.toThrow("Goal not found");
     });
@@ -362,7 +383,7 @@ describe("GoalTransferService", () => {
       const result = await service.transfer("house-123", "user-123", {
         fromGoalId: "goal-from",
         toGoalId: "goal-to",
-        amount: "33.33",
+        amount: { amount: "33.33", currency: "ZMW" },
       });
 
       expect(result.transfer).toBeDefined();
@@ -381,7 +402,7 @@ describe("GoalTransferService", () => {
       (mockDb as any).where = vi.fn().mockReturnThis();
       (mockDb as any).orderBy = vi.fn().mockResolvedValue(mockTransfers);
 
-      const result = await service.getTransfers("house-123");
+      const result = await service.getTransfers("house-123", { householdId: "house-123", userId: "user-1", role: "member" });
 
       expect(result).toEqual(mockTransfers);
     });
@@ -398,7 +419,7 @@ describe("GoalTransferService", () => {
       (mockDb as any).where = vi.fn().mockReturnThis();
       (mockDb as any).orderBy = vi.fn().mockResolvedValue(mockTransfers);
 
-      const result = await service.getTransfersForGoal("goal-1", "house-123");
+      const result = await service.getTransfersForGoal("goal-1", "house-123", { householdId: "house-123", userId: "user-1", role: "member" });
 
       expect(result).toEqual(mockTransfers);
     });

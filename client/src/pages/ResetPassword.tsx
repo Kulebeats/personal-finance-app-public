@@ -7,6 +7,7 @@
  * link to request a new one (no oracle about which check failed).
  */
 
+import { PASSWORD_MAX_LENGTH } from "@shared/password-policy";
 import { useEffect, useState } from "react";
 import { Link } from "wouter";
 import {
@@ -142,6 +143,7 @@ export default function ResetPassword() {
                   aria-describedby="password-requirements"
                   required
                   minLength={8}
+                  maxLength={PASSWORD_MAX_LENGTH}
                 />
                 <div id="password-requirements" className="mt-2">
                   <PasswordStrengthMeter password={password} />
@@ -157,6 +159,7 @@ export default function ResetPassword() {
                   id="confirmPassword"
                   type="password"
                   placeholder="Re-enter your new password"
+                  maxLength={PASSWORD_MAX_LENGTH}
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   autoComplete="new-password"

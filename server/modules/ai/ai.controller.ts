@@ -12,6 +12,11 @@ import { db } from '../../db';
 import { households } from '@shared/schema';
 import { eq } from 'drizzle-orm';
 import { AIService } from './ai.service';
+import { AIChatAdmissionService } from './ai.chat-admission.service';
+import { AiQuotaExceededError, aiAdmissionRepository } from './ai.admission.repository';
+import { AI_CONSENT_PROCESSORS, CURRENT_AI_CONSENT_VERSION, consentStanding } from './ai.consent-policy';
+import { readServiceHealth } from './ai.health.service';
+import { recordConsentDecision } from './ai.consent.service';
 import { aiConversationService } from './ai.conversation.service';
 import {
   chatRequestSchema,
@@ -21,15 +26,16 @@ import {
 } from './ai.validation';
 import { ValidationError, NotFoundError } from '../../core/errors';
 import { logger } from '../../utils/logger';
-import { businessAuditService } from '../../services/BusinessAuditService';
-import { getRateLimitStatus } from './ai.middleware';
+import { rejectForQuota, setQuotaHeaders } from './ai.middleware';
 import { aiTracking } from './ai.tracking';
-import { geminiClient } from './ai.gemini';
+import { abortSignalForResponse } from './ai.request-signal';
+import { providerClients } from './ai.provider-caps';
 import type { AIStatusResponse } from './ai.types';
 
-const CURRENT_CONSENT_VERSION = 'v1.0';
+const CURRENT_CONSENT_VERSION = CURRENT_AI_CONSENT_VERSION;
 
 const aiService = new AIService();
+const chatAdmission = new AIChatAdmissionService(aiService);
 
 /**
  * POST /api/ai/chat
@@ -47,27 +53,27 @@ export async function chat(
       throw new ValidationError('Invalid request', validation.error.errors);
     }
 
-    const { message, conversationId } = validation.data;
-    const userId = req.user!.id;
-    const householdId = req.householdContext!.householdId;
-    const ipAddress = req.ip;
+    const { message, conversationId, clientRequestKey } = validation.data;
 
-    // Process query
-    const response = await aiService.processQuery({
-      userId,
-      householdId,
+    // R17: admission, replay and quota come from the durable ledger. The
+    // quota is read back after settlement, so headers and remainingQueries
+    // agree and reflect any refund.
+    const outcome = await chatAdmission.chat({
+      actor: req.householdContext!,
       message,
       conversationId,
-      ipAddress
+      clientRequestKey,
+      consent: req.aiConsent!,
+      ipAddress: req.ip,
+      // P2-2: a client disconnect cancels outstanding provider work.
+      signal: abortSignalForResponse(res)
     });
 
-    // Remaining quota comes from the limiter via the request, not by reading
-    // back an outbound header — the header is a client-facing concern and its
-    // name must not be load-bearing for internal values.
-    response.remainingQueries = req.aiRateLimit?.remaining ?? 0;
-
-    res.status(200).json(response);
+    setQuotaHeaders(res, outcome.quota);
+    if (outcome.replayed) res.setHeader('Idempotent-Replayed', 'true');
+    res.status(200).json({ ...outcome.response, remainingQueries: outcome.quota.remaining });
   } catch (error) {
+    if (error instanceof AiQuotaExceededError) rejectForQuota(req, res, error.quota);
     next(error);
   }
 }
@@ -76,13 +82,11 @@ export async function chat(
  * GET /api/ai/status
  * Get AI service status and rate limit info
  *
- * `available` stays hardcoded true: the keyword-matching fallback in
- * ai.service.ts genuinely answers when Gemini isn't configured, so this is
- * not a provider-outage signal (product stance, v1.1 Workstream E4).
- * `degraded` is the honest, ADDITIVE signal for that case, wired to the real
- * Gemini client's own configuration check rather than reading
- * GEMINI_API_KEY here directly - the client is the single source of truth
- * for whether it initialized successfully.
+ * `available` stays true: the labelled local mode answers even when no
+ * provider is usable (product stance, v1.1 Workstream E4). R17: `state` and
+ * `providers` report real health from the attempt ledger for the configured
+ * model (configured is not healthy); `degraded` is true whenever the primary
+ * is not the one serving. Quota comes from the same ledger as chat admission.
  */
 export async function getStatus(
   req: Request,
@@ -91,15 +95,24 @@ export async function getStatus(
 ): Promise<void> {
   try {
     const householdId = req.householdContext!.householdId;
-    const rateLimitStatus = await getRateLimitStatus(householdId);
+    const [quota, health] = await Promise.all([
+      aiAdmissionRepository.readQuota(householdId),
+      readServiceHealth(providerClients)
+    ]);
+    const isLimited = quota.remaining === 0;
 
     const response: AIStatusResponse = {
+      // The labelled local mode always answers, so the service is available
+      // even in an outage; `state` and `providers` carry the real health.
       available: true,
-      degraded: !geminiClient.isAvailable(),
+      degraded: health.state !== 'operational',
+      state: health.state,
+      quotaLimited: isLimited,
+      providers: health.providers,
       rateLimit: {
-        remaining: rateLimitStatus.remaining,
-        resetTime: rateLimitStatus.resetTime.toISOString(),
-        isLimited: rateLimitStatus.isLimited
+        remaining: quota.remaining,
+        resetTime: quota.resetAt.toISOString(),
+        isLimited
       }
     };
     res.status(200).json(response);
@@ -159,11 +172,13 @@ export async function getConversation(
     const userId = req.user!.id;
     const householdId = req.householdContext!.householdId;
 
-    const conversation = await aiConversationService.get({
+    const stored = await aiConversationService.get({
       householdId,
       userId,
       conversationId: validation.data.id
     });
+    // Stored replies hold labels; the viewer sees their own account names.
+    const conversation = await aiService.nameStoredConversation(req.householdContext!, stored);
 
     res.status(200).json(conversation);
   } catch (error) {
@@ -229,10 +244,10 @@ export async function getConsent(
     res.status(200).json({
       consentGiven: household.aiConsentGiven ?? false,
       consentDate: household.aiConsentDate?.toISOString() || null,
-      consentVersion: household.aiConsentVersion || CURRENT_CONSENT_VERSION,
+      consentVersion: household.aiConsentGiven ? household.aiConsentVersion ?? null : null,
       currentVersion: CURRENT_CONSENT_VERSION,
-      needsReconsent: household.aiConsentGiven &&
-        household.aiConsentVersion !== CURRENT_CONSENT_VERSION
+      needsReconsent: consentStanding(household.aiConsentGiven, household.aiConsentVersion) === 'outdated',
+      processors: [...AI_CONSENT_PROCESSORS]
     });
   } catch (error) {
     next(error);
@@ -255,40 +270,18 @@ export async function setConsent(
       throw new ValidationError('Invalid request', validation.error.errors);
     }
 
-    const { consentGiven } = validation.data;
+    const { consentGiven, consentVersion: shownVersion } = validation.data;
     const userId = req.user!.id;
     const householdId = req.householdContext!.householdId;
-    const ipAddress = req.ip;
 
-    // Update consent status
-    const now = new Date();
-    await db.update(households)
-      .set({
-        aiConsentGiven: consentGiven,
-        aiConsentDate: now,
-        aiConsentVersion: consentGiven ? CURRENT_CONSENT_VERSION : null
-      })
-      .where(eq(households.id, householdId));
-
-    // Audit log the consent change
-    // FIX (packet R4): entityId must be a valid UUID (auditLogs.entityId is a
-    // uuid column). The household is the entity whose consent changed, so use
-    // householdId with the dedicated 'ai_consent' entity type. The previous
-    // `consent_${householdId}` string failed Postgres uuid parsing on every
-    // call, and BusinessAuditService.log() swallows non-tx write failures
-    // (by design, non-blocking), so consent changes were never recorded.
-    await businessAuditService.log({
+    // R17 (Astra #255 r3): the grant names the disclosure the actor was shown,
+    // and the role is rechecked under lock in the write transaction.
+    const decision = await recordConsentDecision({
       householdId,
-      userId,
-      action: consentGiven ? 'CREATE' : 'DELETE',
-      entityType: 'ai_consent',
-      entityId: householdId,
-      details: {
-        consent_given: consentGiven,
-        consent_version: consentGiven ? CURRENT_CONSENT_VERSION : null,
-        action: consentGiven ? 'AI consent granted' : 'AI consent revoked'
-      },
-      ipAddress
+      actorId: userId,
+      consentGiven,
+      shownVersion,
+      ipAddress: req.ip
     });
 
     logger.info('AI consent updated', {
@@ -317,8 +310,8 @@ export async function setConsent(
 
     res.status(200).json({
       consentGiven,
-      consentDate: now.toISOString(),
-      consentVersion: consentGiven ? CURRENT_CONSENT_VERSION : null
+      consentDate: decision.decidedAt.toISOString(),
+      consentVersion: decision.consentVersion
     });
   } catch (error) {
     next(error);

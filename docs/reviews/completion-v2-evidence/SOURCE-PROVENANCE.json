@@ -1,0 +1,514 @@
+[
+  {
+    "path": "docs/plans/2026-10-15-master-completion-spec.md",
+    "sha256": "4194D2A9D2194681C9ABB6A9F312F29A81EAED75B9CE3CBD7C4FD290AA9ED7F0",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/plans/2026-10-15-astra-implementation-kickoff.md",
+    "sha256": "EAA9A4003F8E2F7B7893BBD9998617ABB6DAA5BBA2A7B14C52AB24BCBC12B2A4",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/plans/2026-10-15-full-application-remediation.md",
+    "sha256": "7A6BABA6AE1E32C9D2DA40F7B7869E03BABD10B692CE17836068C9B5A6EDE641",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-11-deep-readiness/COMPLETION_SPEC.md",
+    "sha256": "CF780CFDF4A9A657E0D477188197B8EF003D8397E02DD5D8A8DA31932CC1EF54",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-11-deep-readiness/EVIDENCE.md",
+    "sha256": "9C3EB1D6541992A1B17BADA45364366C01B618669AB3C6E92183E550D23D741D",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-11-deep-readiness/LAUNCH_PLAN.md",
+    "sha256": "F539FA086D620391D315B2006A4209D159D08D3622E91A82A44333F84F1D5483",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-11-deep-readiness/PROGRESS.md",
+    "sha256": "F615BD481D8EFF383ABFAAD7DACA229112246D99F25400E6BECC2E982F705593",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-11-deep-readiness/README.md",
+    "sha256": "070F254B77CE084FAE37CC19175C8175870D46E31384FDFF50ACCB9AAAB44A64",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-11-deep-readiness/THANDI_PROVIDER_SPEC.md",
+    "sha256": "51BC35CCD1DC1DD562C398EDE116B4B19B33149F02217A1AF48439C4728A6394",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-11-deep-readiness/auth-household-review.md",
+    "sha256": "3876839E48558F48AB4E61D959B4A56C890CF7FFE1FF13CB68A4FBF0B2EAB103",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-11-deep-readiness/financial-integrity-review.md",
+    "sha256": "2200560C7DCF0D82F7D830BC71CE2AAF716C4CB85C65309A9A3A4B0E1191DD31",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-11-deep-readiness/operations-integrations-review.md",
+    "sha256": "7BCD20631D98D6C3BADA81B8766BECA5229D4918E75FBD337BC8BA825D42C590",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-11-deep-readiness/organization-review.md",
+    "sha256": "BDF7464A89F25C452DF4E4B2924CF336BB62ECC592E1CF54CB64318CD05A3FC7",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-11-deep-readiness/remaining-work.csv",
+    "sha256": "FD8AFB202C85FA65D44B05EFACFA6A66F1BAB3A1CC77C0E09B32072C834F22E6",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/COMPARISON-vs-2026-10-11.md",
+    "sha256": "C4CE0F3D9636A73631B07AD2CD01B5EB0B71CECD2FC95A6BBA70E8AB21AE9775",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/COMPLETION_SPEC.md",
+    "sha256": "E91A1BA6F11A12B5DDBE109F648C3B50BFAB576D392420ADACFDBD6A5D4A109A",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/COVERAGE.md",
+    "sha256": "AE4733DC36260687DF1AFF810886EDFF4713F62802AD4FFFC879502BE34E0DB5",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/DECISIONS.md",
+    "sha256": "1A195EB858F1BA621026D2948D48DD2F4628CC41D87CB13F5D397C027F81CDAF",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/ENHANCEMENTS.md",
+    "sha256": "79A0ACABEB8ECCF05ADF902A2564F37496B2CC671C44953E77EEDD19DB78DAAC",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/EVIDENCE.md",
+    "sha256": "1748DC3E3281E7F00EE04CC64B136830DDC59950D4D0E2137B30A4541AF2FA58",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/GAPS.md",
+    "sha256": "42964AF90EFD22C160CEA23BE28B1FF146A48620EE5C858C098C12EC02F21752",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/LAUNCH_PLAN.md",
+    "sha256": "B1BF490C78B398D52CD234836FF1907E7B6A4E213A68CB98AF04EA736E7336CB",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/PROGRESS.md",
+    "sha256": "1F8A810BB124D17164367E8DEFAAA5544E3DE45391132D68DDD81095AD25136E",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/README.md",
+    "sha256": "5E60664CEDECE0B4D3BED6E1A8AB2BA8C5797A2EC07BF58BB11C51A0C8FC0562",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/THANDI_SPEC_ASSESSMENT.md",
+    "sha256": "8FB9B3F951126D31A9222787D3235EEADB3046F198F60DF20F605BF3C0DC674B",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/evidence/domain-budgets-goals-recurring.md",
+    "sha256": "E58B42C31F5497C84B20D576479AE46A138AD62103816E1208EFDDA4DC58316F",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/evidence/domain-import-receipts-organization.md",
+    "sha256": "13B08F438A161E30BC574974A7881D6089973085548CCD75560F75A5D0320DDB",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/evidence/domain-investments-grz.md",
+    "sha256": "1655814D72C5819D8ECAE64C238B3CB715A0600E252676B4B69AE96775C17FCD",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/evidence/domain-reports-consistency.md",
+    "sha256": "BAA556E3D0A86156148FC78B18288362F6A6264C2FFFAAF991CF4054E50CAB28",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/evidence/domain-security-privacy.md",
+    "sha256": "9AF090E363A474AE83DA67CF3E5573131023C35409DBBD0C21CAD860BD928CD3",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/evidence/domain-settings-notifications-ai.md",
+    "sha256": "D6DD7536970B767BEFF49B4906A8FA281F2ACEE7F28FE16F73E53CDC5DF63AFB",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/evidence/findings-draft.md",
+    "sha256": "7DCB1B6BC60C9F066D618D19AD2097A7463D29D6F5281DED36639ACFDC8C86BE",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/evidence/inventory-client-surface.md",
+    "sha256": "FC2FBF600551DF6439F9022C89E6D5D2745D503926B49191505A24A8B87E7CEA",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/evidence/inventory-operations.md",
+    "sha256": "A7952D586F46AAD1F11D224033DA633422011A709A106A58B04A81567266EB73",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/evidence/inventory-schema.md",
+    "sha256": "22ADCCB40C7B52874DE2EB9037E5E9A0EB183C092BC571069048B3E9A49780AF",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/evidence/inventory-server-surface.md",
+    "sha256": "886D17AF3BE00CFB44AE372E299282D2550C60BA1CB78AB980303F87FB00637C",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/evidence/inventory-verification-system.md",
+    "sha256": "5B5105655A58D184E1C85FD985FBD0E313C3854D971001E47F812D79C2E7F73A",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-13-independent-readiness-fable/evidence/skeptic-pass.md",
+    "sha256": "B4AD9BF573D552EA0AAC45780812515700A03FD3FDD1C6A093763721132C6D9B",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-14-assessment-comparison.md",
+    "sha256": "25F988E9A3B9EA145A723F3D7C70B94D856530C8D91E992D2DC9ACD28CF7A704",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-14-assessment-crosswalk.csv",
+    "sha256": "C56D4D93CC775829EA458E3D8769FC32507DE17B1F02FB6EA04551C98B37555A",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-assessment-comparison-update.md",
+    "sha256": "CDDE17B359C6EEABB6B09C05562C385C4D1421ED069D949AF68B18AEF057F83F",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion-fable/ACCEPTANCE_CATALOGUE.md",
+    "sha256": "595DE6E332E1FD50AFC78A4F503227A10FDF3EC3FDC746F08DA959340B1D0ECC",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion-fable/COMPARISON-OF-CONSOLIDATIONS.md",
+    "sha256": "016C93B400AD5B22C42FC6BBC821CB22A18BF0C3DAA02B6F67A17531A31B772E",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion-fable/COMPLETION_SPEC.md",
+    "sha256": "0FB7C677549E85AC3B853D6C0A287F71CF85CA6AAFF99B12A9245BCD0900ED2A",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion-fable/DECISIONS.md",
+    "sha256": "DD6A3830E95B5E6A59D668170442F6B32CD367B072F9DFC32C1B2114ADAC3B99",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion-fable/README.md",
+    "sha256": "54ACA7D9CDAD5758F239BBAFA0A8DA125C07772F5B959FF0DCC4F1FB2A840118",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion-fable/REGISTER.md",
+    "sha256": "DAE3ADDBA249B798C144B3A3DA6F908A1147FEEE7D4FE620C1FFFE8260EF4C51",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion-fable/REMEDIATION_PLAN.md",
+    "sha256": "60320F62F2C0F8656F0ED83097B9CFC8DCD43BE73C0DAF4D0ED704274A3B9F51",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion-fable/RESPONSE-TO-CODEX-COMPARISON.md",
+    "sha256": "43DF2BB4CFF6B35349DFF4A69BA43C4EA1A5EAA62A7BFA3BDC61C6C484A55F6E",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion/ACCEPTANCE.md",
+    "sha256": "A27048CF5B1B2F9F5B07DE53BF4A5C634CD2488E527E1926C0066DF222D57C2F",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion/AGENT_HANDOFF.md",
+    "sha256": "47297EBAF83B4CA8D0D764DDB959989D371BF5E748467617CCF4A3A52E94DEA5",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion/DECISIONS.md",
+    "sha256": "23FDFD7C68BBFC3DC33601A2B46C52C58E9DFA5FCBCD8CECAA78C07D0033D40F",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion/PACKET_INDEX.csv",
+    "sha256": "7867C9E8DF3011757AB6421EC5A36A3065F0ABBC490D6855B5AB9300C247C6A7",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion/README.md",
+    "sha256": "E1312C05A46801C75D54DD8A688CB714CFE34AE70C48EA2A7D4F64E07C6B2672",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion/REMAINING_WORK.csv",
+    "sha256": "43A25F13C8EC8D39D56C950475370B3FDE670887606C730BA9FF07E9C4CF307E",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion/REMAINING_WORK.md",
+    "sha256": "F981207B2D0DD7A40A344CAC879D16DE0E7821B0C3FD51A1851FE620887AF6B8",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion/SOURCE_COVERAGE.md",
+    "sha256": "B9ABE15371BC2156A16D187A4B290ADBC2125B90312099D01A7E221C20E8DE98",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion/SPEC.md",
+    "sha256": "C2EC33F81ECC05A9B912889D65750F58BDFE713AE3A80292F2F3EE4AE088D71B",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion/THANDI_SPEC.md",
+    "sha256": "6D3B6D7EC86D77819117F8A39321AF2E63B9C7B9CC0DB459C73CBA772341D2A2",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidated-completion/VALIDATION.md",
+    "sha256": "F8C92C4DC9B622CE718319CF0B4E56D609EB863B33439BE66F4C962412C7D3A8",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-consolidation-comparison.md",
+    "sha256": "CF8178B709017E2468A49C661365475D97919D579E5D88C726F1B82E6EB27285",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-unified-completion-spec/FINAL_COMPLETION_SPEC.md",
+    "sha256": "4B243C91FC4879BB4C69230648A3BF0E09CA11D0FAA8FF00C17FB72195039169",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-unified-completion-spec/REGISTER.csv",
+    "sha256": "F746062C4919C24068D640ECC54357AC3B44C4FD3AB8ABCCAFBEE5DB112C6EC6",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  },
+  {
+    "path": "docs/reviews/2026-10-15-unified-completion-spec/REVIEW_PROTOCOL.md",
+    "sha256": "781EDB8D1E680DC4D4C68C3B751FA854F4DECD182311C86CA6D2F95B8BA31458",
+    "source": "C:\\Dev\\personal-finance-app",
+    "sourceApplicationSha": "381e9439afabe7c6cf829cb1cbded91d36da44ee",
+    "sourceState": "untracked at dispatch",
+    "match": true
+  }
+]

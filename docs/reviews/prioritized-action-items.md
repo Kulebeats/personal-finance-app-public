@@ -797,7 +797,7 @@ Complete health documentation at `/docs/system/health.md` with:
 **Verified Status:**
 - `server/seed.ts` - 9 console.log statements (1,182 LOC total)
 - `server/seed-tbills.ts` - Minimal logging (53 LOC)
-- `server/reseed-kuwan.ts` - Minimal file (1,166 bytes)
+- `server/reseed-USER.ts` - Minimal file (1,166 bytes)
 
 **Rationale:**
 Console.log is acceptable and even preferred in seed scripts as they are:

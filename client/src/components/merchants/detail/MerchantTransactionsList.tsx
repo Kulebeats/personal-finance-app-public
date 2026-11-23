@@ -5,13 +5,13 @@
 import { Button } from "@/components/ui/button";
 import { useSettings } from "@/hooks/use-settings";
 import { formatCurrency } from "@/lib/format";
-import { toMoneyNumber } from "@/lib/money";
+import { toMoneyNumber, type MoneyValue } from "@/lib/money";
 
 interface Transaction {
   id: string;
   name: string;
   date: string;
-  amount: string | number | null;
+  amount: MoneyValue | number | null;
 }
 
 interface MerchantTransactionsListProps {

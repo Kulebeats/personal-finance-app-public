@@ -4,6 +4,8 @@
  * Extracted from TransactionRepository to keep the primary repository focused on
  * core write flows and balance integrity logic.
  */
+import { TransferCreateRequest } from "../services/TransferCreateRequest";
+
 export class TransactionRepositoryDelegates {
   /**
    * Find all transactions for a household with pagination and filtering.
@@ -59,10 +61,12 @@ export class TransactionRepositoryDelegates {
       import("./TransactionTransferRepository").TransactionTransferRepository["createTransfer"]
     >
   ) {
+    const [from, to, amount, input] = args;
+    const snapshot = input instanceof TransferCreateRequest ? input : structuredClone(input);
     const { transactionTransferRepository } = await import(
       "./TransactionTransferRepository"
     );
-    return transactionTransferRepository.createTransfer(...args);
+    return transactionTransferRepository.createTransfer(from, to, amount, snapshot);
   }
 
   /**

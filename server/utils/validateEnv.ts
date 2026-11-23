@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { assertRequiredJobCapabilities, productionRedis } from "../config/redis";
+import { databaseTlsIssues } from "../dbSsl";
+import { publicAuthOrigin } from "../core/public-auth-link";
 
 /**
  * Environment variable validation schema using Zod.
@@ -9,13 +12,14 @@ import { z } from "zod";
  *
  * **SCP-324 (fail-closed):** Required operational vars must be present and well-formed
  * or the app refuses to boot - nothing required silently fails open. Feature-optional
- * vars (GEMINI_API_KEY, VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY, CRON_SECRET) are
- * absent => feature disabled (NOT a boot failure), but if PRESENT they must be well-formed.
- * REDIS_URL is optional in dev/test but required in production so distributed
- * rate limiting, scheduler locks, and AI cost counters cannot fail open.
+ * vars (GEMINI_API_KEY, VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY) are absent => feature
+ * disabled (NOT a boot failure), but if PRESENT they must be well-formed.
+ * CRON_SECRET is required in production (OPS-003) and optional in dev/test.
+ * REDIS_URL is optional in dev/test. Production accepts it only when an admitted
+ * profile binding is absent; that binding is separately fenced by its facades.
  */
 
-// Minimum length for secret-like optional values (CRON_SECRET) to resist guessing.
+// Minimum length for CRON_SECRET, to resist guessing.
 const MIN_SECRET_LENGTH = 16;
 
 /**
@@ -26,6 +30,18 @@ const MIN_SECRET_LENGTH = 16;
  * export blank values, and the consuming code (redis.ts, cron.ts, push.ts) already
  * treats a falsy value as "not configured".
  */
+function aiModelIdSchema(name: string): z.ZodType<string> {
+  return z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]{1,127}$/, `${name} must be a model id`);
+}
+
+function aiProviderSchema(name: string): z.ZodType<string> {
+  return z.enum(["anthropic", "gemini", "none"], { message: `${name} must be anthropic, gemini or none` });
+}
+
+function positiveIntegerString(name: string): z.ZodType<string> {
+  return z.string().regex(/^[1-9]\d*$/, `${name} must be a positive integer`);
+}
+
 function optionalFeatureVar(format: z.ZodType<string>) {
   return z.preprocess(
     (val) => (val === "" || val === undefined ? undefined : val),
@@ -88,16 +104,30 @@ export const envSchema = z
       .string()
       .url("CLIENT_URL must be a valid URL")
       .optional(),
+    APP_URL: z.string().optional(),
 
     // -------------------------------------------------------------------------
     // FEATURE-OPTIONAL vars: absent => feature disabled (boot OK). Present =>
     // must be well-formed (fail closed on malformed config, never silently).
     // -------------------------------------------------------------------------
 
-    // Google Gemini API key - enables the AI assistant. Absent => AI disabled.
+    // Thandi providers (R17). Claude is primary, Gemini the fallback. A key
+    // without its model id leaves that provider unconfigured: there is no
+    // default model, and /api/ai/status reports the gap to the operator.
+    // No provider configured => the labelled local mode only.
     GEMINI_API_KEY: optionalFeatureVar(
       z.string().min(1, "GEMINI_API_KEY must not be empty when set")
     ),
+    GEMINI_MODEL: optionalFeatureVar(aiModelIdSchema("GEMINI_MODEL")),
+    ANTHROPIC_API_KEY: optionalFeatureVar(
+      z.string().min(1, "ANTHROPIC_API_KEY must not be empty when set")
+    ),
+    ANTHROPIC_MODEL: optionalFeatureVar(aiModelIdSchema("ANTHROPIC_MODEL")),
+    AI_PRIMARY_PROVIDER: optionalFeatureVar(aiProviderSchema("AI_PRIMARY_PROVIDER")),
+    AI_FALLBACK_PROVIDER: optionalFeatureVar(aiProviderSchema("AI_FALLBACK_PROVIDER")),
+    AI_REQUEST_DEADLINE_MS: optionalFeatureVar(positiveIntegerString("AI_REQUEST_DEADLINE_MS")),
+    AI_STAGE_TIMEOUT_MS: optionalFeatureVar(positiveIntegerString("AI_STAGE_TIMEOUT_MS")),
+    AI_FALLBACK_RESERVE_MS: optionalFeatureVar(positiveIntegerString("AI_FALLBACK_RESERVE_MS")),
 
     // Web Push (VAPID) keys - enable push notifications. Absent => push disabled.
     // If either is set, both must be set (see superRefine below).
@@ -112,20 +142,24 @@ export const envSchema = z
     // allowed only in dev/test; production requires it in superRefine below.
     REDIS_URL: optionalFeatureVar(redisUrlSchema),
 
-    // Database TLS controls. Production enables TLS by default in dbSsl.ts; the
-    // rejectUnauthorized flip is intentionally staging-gated until W9 proves the
-    // CA path against the real Render database.
+    // Database TLS is verified by default. A private CA must be explicitly supplied;
+    // no production plaintext or certificate-verification opt-out is allowed.
+    PFA_TEST_MODE: z.enum(["unit", "database"]).optional(),
     DATABASE_SSL: optionalFeatureVar(booleanFlagSchema),
     DATABASE_SSL_REJECT_UNAUTHORIZED: optionalFeatureVar(booleanFlagSchema),
-    DATABASE_SSL_CA_CERT: optionalFeatureVar(
-      z.string().min(1, "DATABASE_SSL_CA_CERT must not be empty when set")
-    ),
-    DATABASE_SSL_CA_FILE: optionalFeatureVar(
-      z.string().min(1, "DATABASE_SSL_CA_FILE must not be empty when set")
-    ),
+    DATABASE_SSL_CA_CERT: z.string().min(1, "DATABASE_SSL_CA_CERT must not be empty when set").optional(),
+    DATABASE_SSL_CA_FILE: z.string().min(1, "DATABASE_SSL_CA_FILE must not be empty when set").optional(),
 
-    // Cron authentication secret - protects scheduled-job endpoints. Absent =>
-    // cron endpoints are dev-only (and rejected in production, see cron.ts).
+    // In-process scheduler + outbox processor (server/scheduler.ts). Absent =>
+    // on in production, off elsewhere; always off under NODE_ENV=test.
+    SCHEDULER_ENABLED: optionalFeatureVar(booleanFlagSchema),
+    // HTTP cron trigger door (/api/cron/*). Absent => mounted.
+    CRON_HTTP_ENABLED: optionalFeatureVar(booleanFlagSchema),
+
+    // Cron authentication secret - protects the HTTP cron routes and the
+    // operator health view. Required in production (superRefine below). In
+    // dev/test it is optional: without it those routes refuse every request
+    // and startup logs one warning (core/scheduling/cronSecret.ts).
     CRON_SECRET: optionalFeatureVar(
       z
         .string()
@@ -136,6 +170,8 @@ export const envSchema = z
     ),
   })
   .superRefine((env, ctx) => {
+    try { publicAuthOrigin(env.APP_URL, env.NODE_ENV === "production"); }
+    catch { ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["APP_URL"], message: "APP_URL must be a valid public application origin (HTTPS required in production)" }); }
     if (env.NODE_ENV === "production" && !env.CLIENT_URL) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -145,34 +181,44 @@ export const envSchema = z
       });
     }
 
-    if (env.NODE_ENV === "production" && !env.REDIS_URL) {
+    if (env.NODE_ENV === "production" && !env.CRON_SECRET) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["CRON_SECRET"],
+        message:
+          `CRON_SECRET is required in production (it authenticates /api/cron and the operator health view); set a random value of at least ${MIN_SECRET_LENGTH} characters`,
+      });
+    }
+
+    let admittedRedisAvailable = false;
+    if (env.NODE_ENV === "production" && productionRedis) {
+      try {
+        assertRequiredJobCapabilities();
+        admittedRedisAvailable = true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["REDIS_URL"],
+          message: message === "REDIS_PROFILE_REQUIRED_JOB_CAPABILITY_MISSING"
+            ? message
+            : "The admitted production Redis profile is no longer current",
+        });
+      }
+    }
+
+    if (env.NODE_ENV === "production" && !env.REDIS_URL && !admittedRedisAvailable) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["REDIS_URL"],
         message:
-          "REDIS_URL is required in production for distributed rate limiting, scheduler locks, and AI cost controls",
+          "REDIS_URL or an admitted production Redis profile is required for distributed Redis controls",
       });
     }
 
-    if (
-      env.DATABASE_SSL === "false" &&
-      env.DATABASE_SSL_REJECT_UNAUTHORIZED === "true"
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["DATABASE_SSL_REJECT_UNAUTHORIZED"],
-        message:
-          "DATABASE_SSL_REJECT_UNAUTHORIZED=true requires DATABASE_SSL to be enabled",
-      });
-    }
 
-    if (env.DATABASE_SSL_CA_CERT && env.DATABASE_SSL_CA_FILE) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["DATABASE_SSL_CA_FILE"],
-        message:
-          "Set only one database CA source: DATABASE_SSL_CA_CERT or DATABASE_SSL_CA_FILE",
-      });
+    for (const issue of databaseTlsIssues(env)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [issue.variable], message: issue.message });
     }
 
     // VAPID keys come as a pair: configuring one without the other is a

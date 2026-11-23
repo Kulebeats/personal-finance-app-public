@@ -1,6 +1,5 @@
 import { Loader2, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
-
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -28,10 +27,13 @@ import type { Transaction } from "@/lib/api";
 
 import { useTransactionForm } from "./hooks/useTransactionForm";
 import { TransactionFormFields } from "./form/TransactionFormFields";
+import { TransactionPrivacyField } from "./form/TransactionPrivacyField";
+import { TransactionCreateRecovery } from "./form/TransactionCreateRecovery";
 import { RecurringSettingsSection } from "./form/RecurringSettingsSection";
 import { GoalLinkingSection } from "./form/GoalLinkingSection";
 import { TagsSection } from "./form/TagsSection";
-import { TransactionFormValues } from "./form/schema";
+import { TransactionFormValues, TRANSACTION_FIELD_LABELS } from "./form/schema";
+import { notifyInvalidSubmit } from "@/lib/forms/notifyInvalidSubmit";
 
 export interface TransactionModalProps {
   children?: React.ReactNode;
@@ -80,7 +82,9 @@ export function AddTransactionModal({
     isDeleting,
     accountsLoading,
     categoriesLoading,
-    goalsLoading,
+    goalsLoading, ordinaryRecovery,
+    canEditTags,
+    transactionTagsFailed,
   } = useTransactionForm({
     transaction,
     open: controlledOpen,
@@ -116,7 +120,9 @@ export function AddTransactionModal({
           </DialogHeader>
 
           <Form {...form}>
-            <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+            <form onSubmit={form.handleSubmit(onSubmit, notifyInvalidSubmit(TRANSACTION_FIELD_LABELS))} className="space-y-6">
+              <TransactionCreateRecovery recovery={ordinaryRecovery} busy={isSubmitting} />
+              <fieldset disabled={isSubmitting} className="space-y-6">
               <TransactionFormFields
                 form={form}
                 settings={settings}
@@ -132,6 +138,7 @@ export function AddTransactionModal({
                 }}
               />
 
+              <TransactionPrivacyField form={form} />
               <GoalLinkingSection
                 form={form}
                 isEditMode={isEditMode}
@@ -151,7 +158,9 @@ export function AddTransactionModal({
                 isTransferMode={isTransferMode}
               />
 
-              <TagsSection form={form} />
+              {canEditTags ? <TagsSection form={form} /> : <p role="status" className="text-sm text-muted-foreground">
+                {transactionTagsFailed ? "Tags could not be loaded. Existing tags will be kept." : "Loading tags. Existing tags will be kept."}
+              </p>}
 
               {/* Attachments */}
               {isEditMode && transaction ? (
@@ -213,7 +222,7 @@ export function AddTransactionModal({
                 </div>
               )}
 
-              <DialogFooter className="flex items-center gap-2">
+              </fieldset><DialogFooter className="flex items-center gap-2">
                 {isEditMode && (
                   <Button
                     type="button"
@@ -235,7 +244,7 @@ export function AddTransactionModal({
                 >
                   Cancel
                 </Button>
-                <Button
+                {!ordinaryRecovery.canRetryOriginal && <Button
                   type="submit"
                   disabled={isSubmitting}
                   className="bg-orange-500 hover:bg-orange-600"
@@ -243,8 +252,8 @@ export function AddTransactionModal({
                   {isSubmitting && (
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   )}
-                  {isEditMode ? "Save Changes" : "Add Transaction"}
-                </Button>
+                  {isEditMode ? "Save Changes" : ordinaryRecovery.pending ? "Retry entered details" : "Add Transaction"}
+                </Button>}
               </DialogFooter>
             </form>
           </Form>

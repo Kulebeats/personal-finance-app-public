@@ -30,7 +30,7 @@ const UPLOADS_ROOT = path.resolve(process.cwd(), "uploads");
 const PASSWORD = "TestPassword123!";
 
 const PNG_BUFFER = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVQImWNgYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==",
+  "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADklEQVQImWP4DwUMMAYAj4IP8cvlVgcAAAAASUVORK5CYII=",
   "base64",
 );
 
@@ -156,14 +156,17 @@ describe("Receipt upload stored-XSS regression", () => {
       expect(res.body.success).toBe(false);
       expect(res.body.error.code).toBe("VALIDATION_ERROR");
 
-      // The decoder's own message must reach the log, or the failure is
-      // undiagnosable once it has been turned into a generic 400.
+      // The decode failure is logged with its error attached. On this branch
+      // log redaction admits only the error's name/code, never its message
+      // (utils/log-redaction.ts safeError), so the decoder text must not leak.
       const decodeLog = warn.mock.calls
         .map(([line]) => String(line))
         .find((line) => line.includes("Receipt image could not be decoded"));
       expect(decodeLog).toBeDefined();
       const entry = JSON.parse(decodeLog ?? "{}");
-      expect(entry.error?.message).toMatch(/corrupt header/i);
+      expect(entry.error?.name).toEqual(expect.any(String));
+      expect(entry.error?.message).toBeUndefined();
+      expect(decodeLog).not.toMatch(/corrupt header/i);
     } finally {
       warn.mockRestore();
     }
@@ -201,7 +204,9 @@ describe("Receipt upload stored-XSS regression", () => {
     );
     expect(url).not.toMatch(/\.html$/);
 
-    const served = await request(app).get(url).set("Cookie", authCookie);
+    // Receipts are served only through their row (Rule 11), never by name.
+    await request(app).get(url).set("Cookie", authCookie).expect(403);
+    const served = await request(app).get(`/api/receipts/${receiptId}/ocr-image`).set("Cookie", authCookie);
     expect(served.status).toBe(200);
     expect(served.headers["content-type"]).toMatch(/^image\//);
     expect(served.headers["content-type"]).not.toMatch(/text\/html/);

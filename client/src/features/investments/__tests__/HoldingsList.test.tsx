@@ -1,6 +1,7 @@
 import { render, screen, fireEvent } from "@testing-library/react";
 import { HoldingsList } from "../components/HoldingsList";
 import { TestWrapper } from "@/test/test-utils";
+import type { Holding } from "@/hooks/useInvestments";
 
 // Mock child modal
 vi.mock("../components/RecordInvestmentTransactionModal", () => ({
@@ -9,11 +10,41 @@ vi.mock("../components/RecordInvestmentTransactionModal", () => ({
 
 describe("HoldingsList", () => {
   const mockFormatCurrency = (val: number, curr: string) => `${curr} ${val}`;
+  const datedHolding: Holding = {
+    id: "price-holding",
+    householdId: "household",
+    accountId: "account",
+    securityId: "security",
+    quantity: "100",
+    costBasis: "100.00",
+    costBasisZmw: "100.00",
+    acquiredDate: null,
+    acquisitionFxRate: null,
+    createdAt: "2000-01-01T00:00:00Z",
+    updatedAt: "2000-01-01T00:00:00Z",
+    currentValue: { amount: "314.15", currency: "ZMW" },
+    security: {
+      id: "security",
+      symbol: "LOCAL",
+      name: "Household-priced security",
+      type: "stock",
+      currency: "ZMW",
+      exchange: null,
+      isOffshore: false,
+      sector: null,
+      cusipIsin: null,
+      currentPrice: "3.1415",
+      lastPriceUpdate: "2000-01-01T00:00:00Z",
+      withholdingTaxRate: "0.00",
+      createdAt: "2000-01-01T00:00:00Z",
+      updatedAt: "2000-01-01T00:00:00Z",
+    },
+  };
   const mockHoldings = [
     {
       id: "1",
       quantity: "100",
-      currentValue: 1000,
+      currentValue: { amount: "1000.00", currency: "ZMW" },
       gainLossPercent: 10,
       security: {
         symbol: "AAPL",
@@ -25,7 +56,7 @@ describe("HoldingsList", () => {
     {
       id: "2",
       quantity: "50",
-      currentValue: 2000,
+      currentValue: { amount: "2000.00", currency: "ZMW" },
       gainLossPercent: 5,
       security: {
         symbol: "GOOGL",
@@ -51,6 +82,38 @@ describe("HoldingsList", () => {
     expect(screen.getByText("GOOGL")).toBeInTheDocument();
     expect(screen.getByText("ZMW 1000")).toBeInTheDocument();
     expect(screen.getByText("ZMW 2000")).toBeInTheDocument();
+  });
+
+  it("shows the selected household validity instead of a stale global price warning", () => {
+    const holding: Holding = {
+      ...datedHolding,
+      security: {
+        ...datedHolding.security!,
+        valuationPrice: {
+          source: "manual",
+          effectiveDate: "2026-01-01",
+          validThrough: "2099-12-31",
+          recordedAt: "2026-01-01T00:00:00Z",
+        },
+      },
+    };
+    render(
+      <TestWrapper>
+        <HoldingsList holdings={[holding]} displayCurrency="ZMW" formatCurrency={mockFormatCurrency} />
+      </TestWrapper>,
+    );
+    expect(screen.getByText("Household price, valid through 2099-12-31")).toBeInTheDocument();
+    expect(screen.queryByTitle(/^Price stale/)).not.toBeInTheDocument();
+  });
+
+  it("retains the stale warning for an old selected reference price", () => {
+    render(
+      <TestWrapper>
+        <HoldingsList holdings={[datedHolding]} displayCurrency="ZMW" formatCurrency={mockFormatCurrency} />
+      </TestWrapper>,
+    );
+    expect(screen.getByTitle(/^Price stale/)).toBeInTheDocument();
+    expect(screen.queryByText(/Household price, valid through/)).not.toBeInTheDocument();
   });
 
   it("sorts by value by default (descending)", () => {

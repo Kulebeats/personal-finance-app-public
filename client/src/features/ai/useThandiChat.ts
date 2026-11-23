@@ -60,6 +60,20 @@ export interface UseThandiChatResult {
 }
 
 let messageSeq = 0;
+/**
+ * R17: one idempotency key per logical message. A retry of the same failed
+ * message reuses it, so a request that completed server-side replays instead
+ * of being answered (and charged) twice.
+ */
+function newRequestKey(): string {
+  return crypto.randomUUID();
+}
+
+interface FailedSend {
+  text: string;
+  requestKey: string;
+}
+
 function nextMessageId(): string {
   messageSeq += 1;
   return `thandi-local-${messageSeq}`;
@@ -102,7 +116,7 @@ export function useThandiChat(): UseThandiChatResult {
   const conversationIdRef = useRef<string | undefined>(undefined);
   const sendingRef = useRef(false);
   const interactedRef = useRef(false);
-  const lastFailedRef = useRef<string | null>(null);
+  const lastFailedRef = useRef<FailedSend | null>(null);
 
   const setConversationId = useCallback((id: string | undefined): void => {
     conversationIdRef.current = id;
@@ -133,7 +147,7 @@ export function useThandiChat(): UseThandiChatResult {
   }, [restored, setConversationId]);
 
   const doSend = useCallback(
-    async (text: string, reuseExistingBubble: boolean) => {
+    async (text: string, reuseExistingBubble: boolean, requestKey: string) => {
       const trimmed = text.trim();
       if (!trimmed || sendingRef.current) return;
       sendingRef.current = true;
@@ -171,8 +185,10 @@ export function useThandiChat(): UseThandiChatResult {
         const response = await sendChatMessage({
           message: trimmed,
           conversationId: conversationIdRef.current,
+          clientRequestKey: requestKey,
         });
-        setConversationId(response.conversationId);
+        // No usable id (missing or empty): keep the current thread (R17 #255 r4).
+        if (response.conversationId) setConversationId(response.conversationId);
         setQuotaOverride(response.remainingQueries);
         lastFailedRef.current = null;
         setMessages((previous) => [
@@ -184,6 +200,7 @@ export function useThandiChat(): UseThandiChatResult {
             timestamp: new Date().toISOString(),
             toolsUsed: response.toolsUsed,
             provenance: response.provenance,
+            answerMode: response.answerMode,
           },
         ]);
       } catch (error) {
@@ -224,7 +241,7 @@ export function useThandiChat(): UseThandiChatResult {
         } else {
           // Provider outage / network failure: the user message stays in the
           // transcript and can be retried (spec state 5.6).
-          lastFailedRef.current = trimmed;
+          lastFailedRef.current = { text: trimmed, requestKey };
           setSendError({ kind: "outage", message: OUTAGE_MESSAGE });
         }
       } finally {
@@ -237,7 +254,7 @@ export function useThandiChat(): UseThandiChatResult {
 
   const send = useCallback(
     (text: string) => {
-      void doSend(text, false);
+      void doSend(text, false, newRequestKey());
     },
     [doSend],
   );
@@ -245,7 +262,7 @@ export function useThandiChat(): UseThandiChatResult {
   const retry = useCallback(() => {
     const failed = lastFailedRef.current;
     if (!failed) return;
-    void doSend(failed, true);
+    void doSend(failed.text, true, failed.requestKey);
   }, [doSend]);
 
   const newChat = useCallback(() => {

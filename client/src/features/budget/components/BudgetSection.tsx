@@ -7,10 +7,14 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useFormatters } from "@/contexts/SettingsContext";
+import { useBudgetMoneyDisplay } from "../budgetMoneyDisplay";
 import { BudgetGroupHeader } from "./BudgetGroupHeader";
 import { BudgetRow } from "./BudgetRow";
 import type { BudgetGroup, BudgetCategory, SelectedItem } from "../types";
+import { groupActual, groupBudgetLimit, isBudgetedCategory, remainingBudget, sumBudgetLimits } from "../budgetLimits";
+import { sumMoneyValues } from "@/lib/money";
+import { parseMoney } from "@/lib/utils";
+import { isUnbudgetedUnavailable, type UnbudgetedSection } from "@/hooks/useUnbudgetedSpend";
 
 interface BudgetSectionProps {
   title: string;
@@ -34,6 +38,9 @@ interface BudgetSectionProps {
   ) => void;
   showUnbudgeted: boolean;
   onToggleShowUnbudgeted: () => void;
+  /** This section's spending in categories no budget covers, from the server (N3); null = unavailable. */
+  unbudgetedSpent?: UnbudgetedSection;
+  currency?: string | null;
 }
 
 export function BudgetSection({
@@ -49,46 +56,41 @@ export function BudgetSection({
   onCommitItemBudget,
   showUnbudgeted,
   onToggleShowUnbudgeted,
+  unbudgetedSpent,
+  currency,
 }: BudgetSectionProps) {
-  const { formatCurrency } = useFormatters();
+  const { formatCurrency, formatLimit } = useBudgetMoneyDisplay(currency);
+  const { formatCurrency: formatUnbudgeted } = useBudgetMoneyDisplay(unbudgetedSpent?.currency ?? currency);
   const [expanded, setExpanded] = useState(true);
 
-  // Calculate totals
-  const totalBudget = groups.reduce(
-    (sum, group) =>
-      sum +
-      ((group.isFlexible || group.isGroupBudget) && group.budget !== undefined
-        ? group.budget
-        : group.items.reduce((gSum, item) => gSum + item.budget, 0)),
-    0
-  );
-  const totalActual = groups.reduce(
-    (sum, group) =>
-      sum + group.items.reduce((gSum, item) => gSum + item.actual, 0),
-    0
-  );
-  const totalRemaining = groups.reduce(
-    (sum, group) =>
-      sum +
-      ((group.isFlexible || group.isGroupBudget) && group.budget !== undefined
-        ? group.budget -
-          group.items.reduce((gSum, item) => gSum + item.actual, 0)
-        : group.items.reduce((gSum, item) => gSum + item.remaining, 0)),
-    0
-  );
+  const totalBudget = sumBudgetLimits(groups.map(groupBudgetLimit));
+  const hasWithheldLimit = groups.some(group => group.hasWithheldLimit);
+  // The total counts every category's spending: budget rows, then the unbudgeted line.
+  // When it is unavailable (missing exchange rate) the total is marked incomplete, never short by a silent 0.
+  const unbudgetedIncomplete = isUnbudgetedUnavailable(unbudgetedSpent);
+  const isIncomplete = currency === null || unbudgetedIncomplete || groups.some(group => group.actualIncomplete);
+  const unbudgetedActual = parseMoney(unbudgetedSpent);
+  const totalActual = sumMoneyValues([
+    ...groups.map(groupActual), unbudgetedActual,
+  ]).toNumber();
+  const isRemainingIncomplete = isIncomplete || hasWithheldLimit;
+  const totalRemaining = remainingBudget(totalBudget, isRemainingIncomplete ? null : totalActual);
 
   const isIncome = title.toLowerCase().includes("income");
+  const incompleteReason = unbudgetedIncomplete
+    ? `${title} total is incomplete: unbudgeted spending could not be converted because an exchange rate is missing`
+    : `${title} total is incomplete: some budget progress is unavailable`;
+  const actualLabel = isIncomplete && currency !== null ? `At least ${formatCurrency(totalActual)}` : formatCurrency(totalActual);
   const unbudgetedCount = groups.reduce((count, group) => {
-    if (group.isFlexible || group.isGroupBudget) return count;
-    return count + group.items.filter((item) => item.budget <= 0).length;
+    if (group.isFlexible) return count;
+    return count + group.items.filter(item => !isBudgetedCategory(item)).length;
   }, 0);
 
   const visibleGroups = groups.map((group) => {
-    if (showUnbudgeted || group.isFlexible || group.isGroupBudget) {
+    if (showUnbudgeted || group.isFlexible) {
       return group;
     }
-    const filteredItems = group.items.filter((item) => item.budget > 0);
-    return { ...group, items: filteredItems };
+    return { ...group, actual: groupActual(group), items: group.items.filter(isBudgetedCategory) };
   });
 
   return (
@@ -98,7 +100,7 @@ export function BudgetSection({
         className="grid grid-cols-12 gap-4 py-4 px-4 bg-muted/30 border-b border-border/50 hover:bg-muted/50 transition-colors cursor-pointer select-none group items-center"
         onClick={() => setExpanded(!expanded)}
       >
-        <div className="col-span-5 flex items-center gap-3">
+        <div className="col-span-5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
           {expanded ? (
             <ChevronDown className="w-5 h-5 text-muted-foreground" />
           ) : (
@@ -115,7 +117,7 @@ export function BudgetSection({
                 event.stopPropagation();
                 onToggleShowUnbudgeted();
               }}
-              className="text-xs font-semibold text-muted-foreground hover:text-foreground"
+              className="text-xs font-semibold text-muted-foreground hover:text-foreground max-md:min-h-11"
             >
               {showUnbudgeted ? "Hide" : "Show"} {unbudgetedCount} unbudgeted
             </button>
@@ -123,31 +125,34 @@ export function BudgetSection({
         </div>
 
         <div className="col-span-3 text-right pr-4 text-base font-bold text-foreground">
-          {formatCurrency(totalBudget)}
+          {formatLimit(totalBudget, hasWithheldLimit)}
         </div>
 
         <div
+          aria-label={isIncomplete ? `${actualLabel}. ${incompleteReason}` : undefined}
           className={cn(
             "col-span-2 text-right pr-8 text-base font-bold",
-            isIncome
-              ? totalActual >= totalBudget
+            isRemainingIncomplete
+              ? "text-muted-foreground"
+              : isIncome
+              ? totalBudget !== null && totalActual >= totalBudget
                 ? "text-emerald-600"
                 : "text-foreground"
-              : totalActual > totalBudget
+              : totalBudget !== null && totalActual > totalBudget
               ? "text-rose-600"
               : "text-foreground"
           )}
         >
-          {formatCurrency(totalActual)}
+          {actualLabel}
         </div>
 
         <div
           className={cn(
             "col-span-2 text-right text-base font-bold",
-            totalRemaining >= 0 ? "text-emerald-600" : "text-rose-600"
+            totalRemaining === null ? "text-muted-foreground" : totalRemaining >= 0 ? "text-emerald-600" : "text-rose-600"
           )}
         >
-          {formatCurrency(totalRemaining)}
+          {isRemainingIncomplete ? "Incomplete" : totalRemaining === null ? "Unbudgeted" : formatCurrency(totalRemaining)}
         </div>
       </div>
 
@@ -189,7 +194,6 @@ export function BudgetSection({
                           item={item}
                           group={group}
                           onSelectItem={onSelectItem}
-                          formatCurrency={formatCurrency}
                         />
                       ) : (
                         <BudgetRow
@@ -226,6 +230,30 @@ export function BudgetSection({
               </div>
             );
           })}
+          {unbudgetedIncomplete && (
+            <div
+              className="grid grid-cols-12 gap-4 py-3 px-4 border-b border-border/30 items-center text-sm"
+              aria-label={`Unbudgeted ${isIncome ? "income" : "spending"} unavailable: an exchange rate is missing, so the ${title} total is incomplete`}
+            >
+              <div className="col-span-5 pl-2 font-medium text-foreground">Unbudgeted</div>
+              <div className="col-span-3 text-right pr-4 text-muted-foreground">-</div>
+              <div className="col-span-2 text-right pr-8 font-medium text-muted-foreground">Unavailable</div>
+              <div className="col-span-2 text-right"></div>
+            </div>
+          )}
+          {!unbudgetedIncomplete && unbudgetedActual > 0 && (
+            <div
+              className="grid grid-cols-12 gap-4 py-3 px-4 border-b border-border/30 items-center text-sm"
+              aria-label={`Unbudgeted, ${formatUnbudgeted(unbudgetedActual)} ${isIncome ? "earned" : "spent"} in categories without a limit`}
+            >
+              <div className="col-span-5 pl-2 font-medium text-foreground">Unbudgeted</div>
+              <div className="col-span-3 text-right pr-4 text-muted-foreground">-</div>
+              <div className="col-span-2 text-right pr-8 font-medium text-foreground">
+                {formatUnbudgeted(unbudgetedActual)}
+              </div>
+              <div className="col-span-2 text-right"></div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -237,13 +265,12 @@ function FlexibleRow({
   item,
   group,
   onSelectItem,
-  formatCurrency,
 }: {
   item: BudgetCategory;
   group: BudgetGroup;
   onSelectItem?: (item: SelectedItem) => void;
-  formatCurrency: (val: number) => string;
 }) {
+  const { formatCurrency } = useBudgetMoneyDisplay(item.currency);
   return (
     <div
       className="grid grid-cols-12 gap-4 py-3 px-4 border-b border-border/30 hover:bg-muted/20 items-center group text-sm relative cursor-pointer"
@@ -264,7 +291,7 @@ function FlexibleRow({
       </div>
       <div className="col-span-3 text-right pr-4 text-muted-foreground">-</div>
       <div className="col-span-2 text-right pr-8 font-medium text-foreground">
-        {formatCurrency(item.actual)}
+        {item.actual === null ? item.coverage === "group" ? "Included in group" : "Unavailable" : formatCurrency(item.actual)}
       </div>
       <div className="col-span-2 text-right"></div>
     </div>

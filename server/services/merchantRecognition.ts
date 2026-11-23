@@ -1,5 +1,9 @@
 import { distance } from "fastest-levenshtein";
 import { merchantRepository, type Merchant } from "../repositories/MerchantRepository";
+import { eq } from "drizzle-orm";
+import { merchants } from "@shared/schema";
+import { withTransaction, type TransactionType } from "../utils/withTransaction";
+import { addMerchantAliasIfFree } from "../modules/merchants/merchants.name-guard";
 
 const NOISE_WORDS = new Set([
   "pos",
@@ -117,19 +121,25 @@ function getAliasCandidate(
 
 export async function ensureMerchantAlias(
   merchantId: string,
-  aliasName: string
+  aliasName: string,
+  tx?: TransactionType,
 ): Promise<void> {
   const trimmed = aliasName.trim();
   if (!trimmed || trimmed.length < MIN_ALIAS_LENGTH) return;
 
-  const existingAliases = await merchantRepository.getAliases(merchantId);
-  const alreadyExists = existingAliases.some(
-    (alias) => alias.aliasName.toLowerCase() === trimmed.toLowerCase()
-  );
-
-  if (!alreadyExists) {
-    await merchantRepository.addAlias(merchantId, trimmed);
-  }
+  // Names and aliases share one household namespace (merchants.name-guard):
+  // a learned alias another merchant already claims is skipped, not stolen.
+  const learn = async (writeTx: TransactionType): Promise<void> => {
+    const [merchant] = await writeTx
+      .select({ householdId: merchants.householdId })
+      .from(merchants)
+      .where(eq(merchants.id, merchantId))
+      .limit(1);
+    if (!merchant?.householdId) return;
+    await addMerchantAliasIfFree(writeTx, merchant.householdId, merchantId, trimmed);
+  };
+  if (tx) await learn(tx);
+  else await withTransaction(learn);
 }
 
 export async function resolveMerchantMatch(params: {

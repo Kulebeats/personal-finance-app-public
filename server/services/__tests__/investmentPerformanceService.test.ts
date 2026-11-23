@@ -1,58 +1,19 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { differenceInCalendarDays } from "date-fns";
+import { buildPerformanceSeries } from "../InvestmentPerformanceSeries";
 
-const mockDb = {
-  select: vi.fn(),
-};
-
-vi.mock("../../db", () => ({
-  db: mockDb,
-}));
-
-const createSelectQuery = (
-  result: any,
-  options: { orderBy?: boolean } = {}
-) => {
-  const query: any = {
-    from: vi.fn().mockReturnThis(),
-    where: options.orderBy ? vi.fn().mockReturnThis() : vi.fn().mockResolvedValue(result),
-    orderBy: options.orderBy ? vi.fn().mockResolvedValue(result) : vi.fn().mockReturnThis(),
-  };
-  return query;
-};
-
-describe("InvestmentPerformanceService", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("calculates time-weighted return index using cash flows", async () => {
-    const accountsQuery = createSelectQuery([{ id: "acc-1" }]);
-    const snapshotsQuery = createSelectQuery(
+describe("buildPerformanceSeries", () => {
+  it("calculates time-weighted return index using cash flows", () => {
+    const series = buildPerformanceSeries(
       [
         { date: "2024-01-01", balance: "1000" },
         { date: "2024-02-01", balance: "1300" },
         { date: "2024-03-01", balance: "1400" },
       ],
-      { orderBy: true }
-    );
-    const flowsQuery = createSelectQuery([
-      { date: "2024-01-15", type: "transfer_in", amount: "100", amountZmw: null },
-      { date: "2024-02-15", type: "transfer_out", amount: "50", amountZmw: null },
-    ]);
-
-    mockDb.select
-      .mockReturnValueOnce(accountsQuery)
-      .mockReturnValueOnce(snapshotsQuery)
-      .mockReturnValueOnce(flowsQuery);
-
-    const { investmentPerformanceService } = await import(
-      "../InvestmentPerformanceService"
-    );
-
-    const series = await investmentPerformanceService.gethistory(
-      "house-1",
-      "ALL"
+      [
+        { date: "2024-01-15", type: "transfer_in", amount: "100" },
+        { date: "2024-02-15", type: "transfer_out", amount: "50" },
+      ],
     );
 
     expect(series).toHaveLength(3);
@@ -87,5 +48,23 @@ describe("InvestmentPerformanceService", () => {
       expectedIndexAfterSecond - 100,
       2
     );
+  });
+
+  it("sums balances on the same date exactly and orders dates", () => {
+    const series = buildPerformanceSeries(
+      [
+        { date: "2024-01-02", balance: "0.20" },
+        { date: "2024-01-01", balance: "0.10" },
+        { date: "2024-01-01", balance: "0.20" },
+      ],
+      [],
+    );
+
+    expect(series.map(point => [point.date, point.value])).toEqual([["2024-01-01", 0.3], ["2024-01-02", 0.2]]);
+    expect(series[0]).toMatchObject({ twrIndex: 100, twrReturnPercent: 0 });
+  });
+
+  it("returns an empty series for no snapshots", () => {
+    expect(buildPerformanceSeries([], [])).toEqual([]);
   });
 });

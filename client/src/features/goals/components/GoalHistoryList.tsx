@@ -83,10 +83,13 @@ export function TransfersList({
       {transfers.map((transfer) => {
         const direction = transfer.fromGoalId === goalId ? "Sent" : "Received";
         const amount = parseAmount(transfer.amount);
+        // The server withholds the amount when either goal's progress is hidden from you.
         const signedAmount =
-          direction === "Sent"
-            ? `-${formatCurrency(amount)}`
-            : `+${formatCurrency(amount)}`;
+          transfer.amount === null
+            ? "Amount hidden"
+            : direction === "Sent"
+              ? `-${formatCurrency(amount)}`
+              : `+${formatCurrency(amount)}`;
         return (
           <div
             key={transfer.id}

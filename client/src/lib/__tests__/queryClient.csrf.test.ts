@@ -120,9 +120,7 @@ describe("apiRequest CSRF handling", () => {
       ),
     );
 
-    await expect(apiRequest("POST", "/api/things", { a: 1 })).rejects.toThrow(
-      "403",
-    );
+    await expect(apiRequest("POST", "/api/things", { a: 1 })).rejects.toMatchObject({ status: 403, code: "FORBIDDEN", message: "Forbidden" });
     expect(calls).toHaveLength(1);
   });
 });

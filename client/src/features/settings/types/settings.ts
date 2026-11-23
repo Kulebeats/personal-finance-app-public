@@ -47,7 +47,6 @@ export interface ProfileData {
     | "";
   investmentGoal?: "conservative" | "moderate" | "aggressive" | "";
   riskTolerance?: "low" | "medium" | "high" | "";
-  salaryRange?: string;
   birthdayHideYear: boolean;
   profilePicture?: string;
   bannerUrl?: string;
@@ -188,7 +187,7 @@ export interface RuleCondition {
 
 export interface SplitConfig {
   categoryId?: string;
-  amount?: number;
+  amount?: string; // decimal money string ("25.00"), never a float
   percentage?: number;
   note?: string;
   merchantName?: string;

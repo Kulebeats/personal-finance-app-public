@@ -1,11 +1,8 @@
 import { db } from "../db";
-import {
-  recurringInvestments,
-  recurringExecutionLog,
-  type InsertRecurringInvestment,
-} from "@shared/schema";
-import { eq, and } from "drizzle-orm";
-import { accountRepository } from "../repositories/AccountRepository";
+import { recurringExecutionLog } from "@shared/schema";
+import type { HouseholdContext } from "../middleware/householdGuard";
+import type { InvestmentSourceSession } from "../modules/investments/investmentTransactionAccess";
+import { createAuthorizedSipPlan, deactivateVisibleSipPlan, getVisibleSipPlans, reconfirmAuthorizedSipPlan } from "./investment/sipPlanAuthorization";
 import {
   getDuePlans,
   processDueInvestments,
@@ -26,69 +23,24 @@ import {
  * processDueInvestments.ts for the concurrency-safe implementations.
  */
 export class InvestmentAutomationService {
-  async getActivePlans(householdId: string) {
-    return await db
-      .select()
-      .from(recurringInvestments)
-      .where(
-        and(
-          eq(recurringInvestments.householdId, householdId),
-          eq(recurringInvestments.isActive, true)
-        )
-      );
+  async getActivePlans(caller: HouseholdContext, session: InvestmentSourceSession) {
+    return (await getVisibleSipPlans(caller, session)).filter(plan => plan.isActive);
   }
 
-  async getAllPlans(householdId: string) {
-    return await db
-      .select()
-      .from(recurringInvestments)
-      .where(eq(recurringInvestments.householdId, householdId));
+  async getAllPlans(caller: HouseholdContext, session: InvestmentSourceSession) {
+    return getVisibleSipPlans(caller, session);
   }
 
-  // FIX AUTH-INV-REC-002: Validate account ownership before creating plan
-  async createPlan(data: InsertRecurringInvestment, householdId: string) {
-    // Validate accountId belongs to household
-    if (data.accountId) {
-      const account = await accountRepository.findById(
-        data.accountId,
-        householdId
-      );
-      if (!account) {
-        throw new Error(
-          "Account not found or does not belong to this household"
-        );
-      }
-    }
-
-    const [plan] = await db
-      .insert(recurringInvestments)
-      .values(data)
-      .returning();
-    return plan;
+  async createPlan(data: unknown, caller: HouseholdContext, session: InvestmentSourceSession) {
+    return createAuthorizedSipPlan(data, caller, session);
   }
 
-  // FIX AUTH-INV-REC-001: Enforce household isolation when deactivating plan
-  async deactivatePlan(id: string, householdId: string) {
-    // Verify the plan belongs to this household
-    const [plan] = await db
-      .select()
-      .from(recurringInvestments)
-      .where(
-        and(
-          eq(recurringInvestments.id, id),
-          eq(recurringInvestments.householdId, householdId)
-        )
-      )
-      .limit(1);
+  async authorizePlan(id: string, data: unknown, caller: HouseholdContext, session: InvestmentSourceSession) {
+    return reconfirmAuthorizedSipPlan(id, data, caller, session);
+  }
 
-    if (!plan) {
-      throw new Error("Recurring plan not found or access denied");
-    }
-
-    await db
-      .update(recurringInvestments)
-      .set({ isActive: false })
-      .where(eq(recurringInvestments.id, id));
+  async deactivatePlan(id: string, caller: HouseholdContext, session: InvestmentSourceSession) {
+    return deactivateVisibleSipPlan(id, caller, session);
   }
 
   async logExecution(data: typeof recurringExecutionLog.$inferInsert) {

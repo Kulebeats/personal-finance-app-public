@@ -6,6 +6,8 @@
  * @module hooks/investments/types
  */
 
+import type { MoneyDto } from "@shared/money";
+
 export interface Security {
   id: string;
   symbol: string;
@@ -18,6 +20,12 @@ export interface Security {
   cusipIsin: string | null;
   currentPrice: string | null;
   lastPriceUpdate: string | null;
+  valuationPrice?: {
+    source: "manual";
+    effectiveDate: string;
+    validThrough: string;
+    recordedAt: string;
+  } | null;
   withholdingTaxRate: string;
   createdAt: string;
   updatedAt: string;
@@ -36,14 +44,14 @@ export interface Holding {
   createdAt: string;
   updatedAt: string;
   security?: Security;
-  currentValue?: number;
-  currentValueLocal?: number;
-  currentValueBase?: number;
-  costBasisBase?: number;
+  // Holdings list valuation, MoneyDto in the base currency; costBasis above
+  // stays the stored local-currency string.
+  currentValue?: MoneyDto;
+  costBasisBase?: MoneyDto | null;
   baseCurrency?: string;
   fxRateUsed?: number | null;
-  gainLoss?: number;
-  gainLossPercent?: number;
+  gainLoss?: MoneyDto | null;
+  gainLossPercent?: number | null;
 }
 
 export interface FxRate {
@@ -79,23 +87,35 @@ export interface InvestmentTransaction {
 
 export interface PortfolioSummary {
   baseCurrency?: string;
-  totalValue: number;
-  totalCostBasis: number;
-  totalGainLoss: number;
-  totalGainLossPercent: number;
+  totalValue: MoneyDto;
+  totalCostBasis: MoneyDto | null;
+  totalGainLoss: MoneyDto | null;
+  totalGainLossPercent: number | null;
   holdingsCount: number;
+  byType?: Record<string, MoneyDto>;
+  tbillsValue?: MoneyDto;
+  pensionValue?: MoneyDto;
+  totalIncludingAlternatives?: MoneyDto;
 }
+
+/**
+ * The unit of every AttributionResult amount (A-31): the server's FX base,
+ * BASE_CURRENCY in server/services/FXAttributionService.ts. `currency` on a
+ * result is the security's own currency, not the unit of its amounts.
+ */
+export const FX_ATTRIBUTION_CURRENCY = "ZMW";
 
 export interface AttributionResult {
   holdingId: string;
   securityName: string;
   symbol: string;
   currency: string;
-  currentValue: number;
-  costBasis: number;
-  totalGain: number;
-  assetReturn: number;
-  fxReturn: number;
+  // ZMW MoneyDto decimal strings (defect 10); total them with Decimal, never floats.
+  currentValue: MoneyDto;
+  costBasis: MoneyDto;
+  totalGain: MoneyDto;
+  assetReturn: MoneyDto;
+  fxReturn: MoneyDto;
   totalReturnPercent: number;
   assetReturnPercent: number;
   fxReturnPercent: number;
@@ -135,8 +155,12 @@ export interface RecurringInvestment {
   currency: string;
   nextExecutionDate: string;
   isActive: boolean;
-  createdAt: string;
-  updatedAt: string;
+  authorizationStatus: "authorization_recorded" | "authorization_required" | "inactive" | "pending_reconciliation";
+  authorizationRevision: number;
+  authorizationInitialExecutionDate: string | null;
+  permittedActions: Array<"authorize" | "deactivate">;
+  createdAt?: string | null;
+  updatedAt?: string | null;
   // Joined fields from related tables (optional)
   accountName?: string;
   securityName?: string;

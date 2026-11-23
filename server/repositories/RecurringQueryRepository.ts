@@ -190,32 +190,29 @@ export class RecurringQueryRepository {
   /**
    * Recurring summary metrics
    */
-  async getSummary(
-    householdId: string,
-    findByHousehold: (
-      householdId: string,
-    ) => Promise<RecurringTransaction[]>,
-    findUpcoming: (
-      householdId: string,
-      withinDays?: number,
-    ) => Promise<RecurringTransaction[]>,
-  ): Promise<{
-    totalMonthlyIncome: string;
-    totalMonthlyExpenses: string;
-    activeCount: number;
-    subscriptionCount: number;
-    upcomingCount: number;
-  }> {
-    const rules = await findByHousehold(householdId);
-
-    // Initialize with zero Money instances (using ZMW as default currency)
-    let monthlyIncome = Money.zero("ZMW");
-    let monthlyExpenses = Money.zero("ZMW");
+  /**
+   * Totals are in the household base currency and count only rules whose
+   * denomination is proven in it (FIN-05); every other active rule is counted
+   * in `excludedCount`, never summed as if it were the base currency.
+   */
+  summarize(
+    rules: readonly { rule: RecurringTransaction; upcoming: boolean; currency: string | null }[],
+    baseCurrency: string,
+  ) {
+    let monthlyIncome = Money.zero(baseCurrency);
+    let monthlyExpenses = Money.zero(baseCurrency);
     let subscriptionCount = 0;
+    let excludedCount = 0;
 
-    for (const rule of rules) {
-      // Create Money from rule.amount string
-      const ruleMoney = new Money(rule.amount, "ZMW");
+    let upcomingCount = 0;
+    for (const { rule, upcoming, currency } of rules) {
+      if (upcoming) upcomingCount++;
+      if (rule.isSubscription) subscriptionCount++;
+      if (currency !== baseCurrency) {
+        excludedCount++;
+        continue;
+      }
+      const ruleMoney = new Money(rule.amount, baseCurrency);
 
       const monthlyAmount = this.toMonthlyAmount(
         ruleMoney,
@@ -229,20 +226,17 @@ export class RecurringQueryRepository {
       } else if (rule.type === "expense") {
         monthlyExpenses = monthlyExpenses.add(monthlyAmount);
       }
-
-      if (rule.isSubscription) {
-        subscriptionCount++;
-      }
     }
 
-    const upcoming = await findUpcoming(householdId, 7);
-
     return {
+      currency: baseCurrency,
       totalMonthlyIncome: monthlyIncome.toString(),
       totalMonthlyExpenses: monthlyExpenses.toString(),
+      excludedCount,
+      complete: excludedCount === 0,
       activeCount: rules.length,
       subscriptionCount,
-      upcomingCount: upcoming.length,
+      upcomingCount,
     };
   }
 

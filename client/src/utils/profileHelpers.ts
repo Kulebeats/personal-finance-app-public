@@ -1,91 +1,3 @@
-import { UserProfile } from "@/hooks/use-settings";
-
-interface ProfileField {
-  name: string;
-  weight: number;
-  filled: boolean;
-}
-
-export function calculateProfileCompleteness(
-  profile: UserProfile | undefined
-): {
-  percentage: number;
-  missing: string[];
-  suggestions: string[];
-} {
-  if (!profile) {
-    return { percentage: 0, missing: [], suggestions: [] };
-  }
-
-  const fields: ProfileField[] = [
-    // Core identity (required)
-    { name: "fullName", weight: 10, filled: !!profile.fullName },
-    { name: "birthday", weight: 8, filled: !!profile.birthday },
-    {
-      name: "phoneNumber",
-      weight: 9,
-      filled: !!profile.phoneNumberMobile || !!profile.phoneNumber,
-    },
-    { name: "occupation", weight: 7, filled: !!profile.occupation },
-    { name: "city", weight: 6, filled: !!profile.address?.city },
-    { name: "timezone", weight: 5, filled: !!profile.timezone },
-    { name: "gender", weight: 3, filled: !!profile.gender },
-    { name: "salaryRange", weight: 6, filled: !!profile.salaryRangeEncrypted },
-
-    // Phase 2: Rich profile fields
-    { name: "profilePicture", weight: 8, filled: !!profile.profilePictureUrl },
-    { name: "bio", weight: 5, filled: !!profile.bio },
-    { name: "bannerPhoto", weight: 3, filled: !!profile.bannerUrl },
-    {
-      name: "socialLinks",
-      weight: 4,
-      filled: !!(
-        profile.socialLinks?.linkedin ||
-        profile.socialLinks?.twitter ||
-        profile.socialLinks?.github ||
-        profile.socialLinks?.website
-      ),
-    },
-  ];
-
-  const totalWeight = fields.reduce((sum, f) => sum + f.weight, 0);
-  const filledWeight = fields
-    .filter((f) => f.filled)
-    .reduce((sum, f) => sum + f.weight, 0);
-  const percentage = Math.round((filledWeight / totalWeight) * 100);
-
-  const missing = fields.filter((f) => !f.filled).map((f) => f.name);
-  const suggestions = generateSuggestions(missing);
-
-  return { percentage, missing, suggestions };
-}
-
-function generateSuggestions(missing: string[]): string[] {
-  const suggestionMap: Record<string, string> = {
-    occupation: "Add your occupation to get better financial insights",
-    salaryRange: "Add salary range for personalized budget recommendations",
-    phoneNumber: "Add your phone number to enable notifications",
-    city: "Add your city to see local financial trends",
-    birthday: "Add your birthday for age-based insights",
-    timezone: "Set your timezone for accurate time tracking",
-    profilePicture: "Add a profile picture to personalize your account",
-    bio: "Write a short bio to tell others about yourself",
-    bannerPhoto: "Add a cover photo to make your profile stand out",
-    socialLinks: "Connect your social profiles (LinkedIn, Twitter, etc.)",
-  };
-
-  return missing
-    .filter((field) => suggestionMap[field])
-    .slice(0, 2) // Show max 2 suggestions
-    .map((field) => suggestionMap[field]);
-}
-
-export function getProgressColor(percentage: number): string {
-  if (percentage < 50) return "bg-red-500";
-  if (percentage < 80) return "bg-yellow-500";
-  return "bg-green-500";
-}
-
 export function calculateAge(birthday: string | Date): number {
   const birthDate =
     typeof birthday === "string" ? new Date(birthday) : birthday;
@@ -117,11 +29,14 @@ export function formatPhonePreview(phone: string): string {
   return phone;
 }
 
+// After +260: mobile 95-98 or 75-77 (Zamtel, MTN, Airtel, Zed Mobile — the
+// same prefixes getZambianMobileProvider recognises), or a 21x landline.
+const ZAMBIAN_NATIONAL_NUMBER = /^(9[5-8]|7[5-7]|21)\d{7}$/;
+
 export function isValidZambianNumber(phone: string): boolean {
   const clean = phone.replace(/[^0-9]/g, "");
-  if (!clean.startsWith("260")) return false;
-  if (clean.length !== 12) return false;
-  return clean.startsWith("2609") || clean.startsWith("26021");
+  if (!clean.startsWith("260") || clean.length !== 12) return false;
+  return ZAMBIAN_NATIONAL_NUMBER.test(clean.slice(3));
 }
 
 export function getZambianMobileProvider(

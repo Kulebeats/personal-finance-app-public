@@ -12,9 +12,20 @@ import { goalRepository } from "../../repositories/GoalRepository";
 import { userRepository } from "../../repositories/UserRepository";
 import { NotFoundError } from "../../utils/errorHandler";
 import { buildGoalBalanceUpdate } from "../goalCalculations";
+import { householdToday } from "../householdCalendarToday";
+import {
+  assertHouseholdSecurityPriceAvailable,
+  householdPricedSecurityColumns,
+  householdSecurityPriceEvidence,
+  isHouseholdSecurityPriceUnavailable,
+} from "../investment/householdSecurityPriceRead";
+import { toViewerGoal, type GoalSourceVisibility, type ViewerGoal } from "./GoalViewerProgress";
 import type { TransactionType } from "../../utils/withTransaction";
+import { CalculationError } from "../../core/calculations/errors";
 
 type DbExecutor = typeof db | TransactionType;
+
+const isMissingFxRate = (error: unknown) => error instanceof CalculationError && error.code === "MISSING_FX_RATE";
 
 export class GoalBaseService {
   async getGoals(
@@ -81,7 +92,8 @@ export class GoalBaseService {
     }
 
     const holdingsTotal = await this.calculateHoldingsValue(goal);
-    const update = buildGoalBalanceUpdate(goal, holdingsTotal);
+    // NEW-15: the forecast counts from the household's calendar date.
+    const update = buildGoalBalanceUpdate(goal, holdingsTotal, await householdToday(db, goal.householdId));
 
     return {
       ...goal,
@@ -92,6 +104,28 @@ export class GoalBaseService {
       isCompleted: update.isCompleted,
       completedAt: update.completedAt,
     };
+  }
+
+  /**
+   * One goal as this viewer may see it, with its live progress (`valued`) when
+   * that is shown. A-04: a goal whose sources are hidden is never valued, so a
+   * hidden holding's price, rate or currency can neither reach the response nor
+   * fail it. A-30: a visible holdings goal with no usable price shows
+   * "unavailable" progress, never zero. NEW-15: so does one priced in a
+   * currency with no rate to the goal's, and neither gets a forecast number.
+   */
+  protected async valueGoalForViewer(
+    goal: Goal,
+    visibility: GoalSourceVisibility,
+  ): Promise<{ viewer: ViewerGoal<Goal>; valued: Goal | null }> {
+    if (!visibility.progressVisible) return { viewer: toViewerGoal(goal, visibility), valued: null };
+    try {
+      const valued = await this.applyInvestmentHoldingsProgress(goal);
+      return { viewer: toViewerGoal(valued, visibility), valued };
+    } catch (error) {
+      if (!isHouseholdSecurityPriceUnavailable(error) && !isMissingFxRate(error)) throw error;
+      return { viewer: toViewerGoal(goal, { ...visibility, progressVisible: false }), valued: null };
+    }
   }
 
   protected async resolveInvestmentGoalAccount(goal: Goal, tx?: TransactionType) {
@@ -129,7 +163,11 @@ export class GoalBaseService {
     }
 
     const results = await executor
-      .select({ holding: holdings, security: securities })
+      .select({
+        holding: holdings,
+        security: householdPricedSecurityColumns(goal.householdId),
+        priceEvidence: householdSecurityPriceEvidence(goal.householdId),
+      })
       .from(holdings)
       .innerJoin(securities, eq(holdings.securityId, securities.id))
       .where(
@@ -149,22 +187,28 @@ export class GoalBaseService {
           .filter((currency: string) => currency !== baseCurrency)
       )
     );
-    const fxRatesByCurrency = await getLatestFxRates(currencies, baseCurrency);
+    // A-30: the holdings screen's price-evidence check, before any rate is read.
+    for (const { holding, priceEvidence } of results) {
+      assertHouseholdSecurityPriceAvailable(priceEvidence, holding.quantity);
+    }
+    const fxRatesByCurrency = await getLatestFxRates(currencies, baseCurrency, goal.householdId);
 
     let totalValue = Money.zero(baseCurrency);
     for (const { holding, security } of results) {
       const currency = (security.currency || baseCurrency).toUpperCase();
-      const quantity = parseFloat(holding.quantity ?? "0"); // Quantity is share count, not currency
+      // After the check above, only a zero-share position can lack a price.
       const price = new Money(security.currentPrice ?? "0");
-      const localValue = price.multiply(quantity);
+      // Quantity is a share count, not money: it stays a decimal string into Decimal
+      // multiplication. A float keeps ~17 significant digits and loses cents (P2).
+      const localValue = price.multiply(holding.quantity ?? "0");
 
-      const fxRate =
-        currency === baseCurrency
-          ? 1
-          : fxRatesByCurrency.get(currency) ??
-            (holding.acquisitionFxRate
-              ? parseFloat(String(holding.acquisitionFxRate))
-              : 1);
+      // R12: the household's own rate, else the shared rate. A missing rate is
+      // a typed error, never 1 and never the stale acquisition rate (D11).
+      const fxRate = currency === baseCurrency ? 1 : fxRatesByCurrency.get(currency);
+      if (fxRate === undefined) {
+        throw new CalculationError("MISSING_FX_RATE", { from: currency, to: baseCurrency, householdId: goal.householdId },
+          `Exchange rate unavailable for ${currency} -> ${baseCurrency}`);
+      }
 
       totalValue = totalValue.add(localValue.multiply(fxRate));
     }

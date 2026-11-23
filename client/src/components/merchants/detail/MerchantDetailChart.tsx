@@ -4,8 +4,7 @@
 
 import { useMemo } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid } from "recharts";
-import { toMoneyNumber } from "@/lib/money";
-import { formatCurrency } from "@/lib/utils";
+import { formatCurrency, toMoneyNumber, type MoneyValue } from "@/lib/money";
 import {
   ChartContainer,
   ChartTooltip,
@@ -15,7 +14,7 @@ import {
 
 interface TrendPoint {
   period: string;
-  total: string | number;
+  total: MoneyValue | number;
 }
 
 interface MerchantDetailChartProps {
@@ -35,6 +34,11 @@ export function MerchantDetailChart({ trend }: MerchantDetailChartProps) {
       x: point.period,
       Spend: toMoneyNumber(point.total),
     }));
+  }, [trend]);
+  // Every point is in the household base currency; a bare number carries none.
+  const currency = useMemo(() => {
+    const total = trend?.find((point) => typeof point.total === "object" && point.total !== null)?.total;
+    return typeof total === "object" && total !== null ? total.currency ?? "" : "";
   }, [trend]);
 
   if (!rows.length) {
@@ -68,7 +72,7 @@ export function MerchantDetailChart({ trend }: MerchantDetailChartProps) {
         <ChartTooltip
           content={
             <ChartTooltipContent
-              formatter={(value) => formatCurrency(Number(value))}
+              formatter={(value) => formatCurrency(Number(value), currency)}
             />
           }
         />

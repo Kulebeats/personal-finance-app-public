@@ -17,6 +17,7 @@ import { HistoryPanel } from "./components/HistoryPanel";
 import { MessageList } from "./components/MessageList";
 import { QuotaMeter, QUOTA_METER_THRESHOLD } from "./components/QuotaMeter";
 import { SuggestedPrompts } from "./components/SuggestedPrompts";
+import { FollowUpChips } from "./components/FollowUpChips";
 
 export function AdviceChat() {
   const { data: consent, isLoading, error, refetch } = useAIConsent();
@@ -54,6 +55,9 @@ function ThandiChatPanel() {
 
   const showEmptyState =
     chat.messages.length === 0 && !chat.isRestoring && !chat.isSending;
+  // Follow-up chips belong to the latest exchange, and only once it is answered.
+  const latest = chat.messages.at(-1);
+  const lastAnswer = latest?.role === "assistant" ? latest : undefined;
   const relativeReset =
     chat.quotaResetTime !== null
       ? formatRelativeReset(chat.quotaResetTime)
@@ -116,6 +120,14 @@ function ThandiChatPanel() {
           </div>
         )}
         <MessageList messages={chat.messages} isSending={chat.isSending} />
+
+        {lastAnswer !== undefined && !chat.isSending && (
+          <FollowUpChips
+            tools={lastAnswer.provenance?.tools ?? lastAnswer.toolsUsed ?? []}
+            onSelect={chat.send}
+            disabled={chat.isQuotaExhausted}
+          />
+        )}
 
         {chat.sendError?.kind === "outage" && (
           <div className="flex justify-start">

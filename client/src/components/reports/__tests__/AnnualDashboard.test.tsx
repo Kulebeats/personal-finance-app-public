@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { AnnualDashboard } from "../AnnualDashboard";
 import * as hooks from "@/hooks/use-report-widget-preferences";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -9,6 +9,7 @@ vi.mock("@/hooks/use-report-widget-preferences", () => ({
   useReportWidgetPreferences: vi.fn(),
   useWidgetToggle: vi.fn(() => ({ toggleWidget: vi.fn() })),
   useWidgetOnboarding: vi.fn(() => ({ resetOnboarding: vi.fn() })),
+  useResetReportWidgetPreferences: vi.fn(() => ({ mutateAsync: vi.fn() })),
   useCustomCharts: vi.fn(() => ({
     customCharts: [],
     addCustomChart: vi.fn(),
@@ -99,6 +100,21 @@ const TestWrapper = ({ children }: { children: React.ReactNode }) => (
 describe("AnnualDashboard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("shows an actionable preference read failure and disables customization until the retry succeeds", () => {
+    const refetch = vi.fn();
+    vi.mocked(hooks.useReportWidgetPreferences).mockReturnValue({ data: undefined, isLoading: false, error: new Error("Preferences unavailable"), refetch } as unknown as ReturnType<typeof hooks.useReportWidgetPreferences>);
+    const view = render(<TestWrapper><AnnualDashboard /></TestWrapper>);
+    expect(screen.getByRole("alert")).toHaveTextContent("Preferences unavailable");
+    expect(screen.getByRole("button", { name: "Customize Layout" })).toBeDisabled();
+    expect(screen.queryByTestId("summary-widget")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry Loading Preferences" }));
+    expect(refetch).toHaveBeenCalledTimes(1);
+    vi.mocked(hooks.useReportWidgetPreferences).mockReturnValue({ data: { coreWidgets: {}, optionalWidgets: {}, customCharts: [] }, isLoading: false, error: null, refetch } as unknown as ReturnType<typeof hooks.useReportWidgetPreferences>);
+    view.rerender(<TestWrapper><AnnualDashboard /></TestWrapper>);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Customize Layout" })).toBeEnabled();
   });
 
   it("should render loading skeleton when loading", () => {

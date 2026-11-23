@@ -28,7 +28,7 @@ import {
 import { Calendar } from "@/components/ui/calendar";
 import { Textarea } from "@/components/ui/textarea";
 import { MerchantCombobox } from "@/components/merchants/MerchantCombobox";
-import { OwnerSelector } from "@/components/OwnerSelector";
+import { TransactionOwnerField } from "./TransactionOwnerField";
 import { AnimatedSegmentedControl } from "./AnimatedSegmentedControl";
 import { TransactionFormValues } from "./schema";
 import { cleanMerchantName } from "@/lib/transactionFormUtils";
@@ -456,22 +456,7 @@ export function TransactionFormFields({
         )}
       </div>
 
-      <FormField
-        control={form.control}
-        name="ownerUserId"
-        render={({ field }) => (
-          <FormItem>
-            <FormLabel>Owner</FormLabel>
-            <FormControl>
-              <OwnerSelector
-                value={field.value ?? null}
-                onChange={field.onChange}
-              />
-            </FormControl>
-            <FormMessage />
-          </FormItem>
-        )}
-      />
+      <TransactionOwnerField form={form} isEditMode={isEditMode} />
 
       <FormField
         control={form.control}

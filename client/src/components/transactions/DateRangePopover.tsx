@@ -1,6 +1,6 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { CalendarIcon, X } from "lucide-react";
-import { format, subDays, startOfMonth, endOfMonth, subMonths, startOfYear, endOfYear, subYears, differenceInDays } from "date-fns";
+import { format, subDays, startOfMonth, endOfMonth, subMonths, startOfYear, endOfYear, subYears } from "date-fns";
 
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
@@ -10,6 +10,8 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { calendarTodayAsLocalDate } from "@/lib/calendarZone";
+import { NONE_PICKED, useDraftRangeValidation, type PickedFields } from "./useDraftRangeValidation";
 
 export interface DateRange {
   startDate: Date | undefined;
@@ -30,44 +32,38 @@ interface Preset {
   getRange: () => DateRange;
 }
 
+// NEW-15: presets count from today in the calendar zone.
+const lastDays = (days: number): DateRange => ({ startDate: subDays(calendarTodayAsLocalDate(), days), endDate: calendarTodayAsLocalDate() });
+
 const presets: Preset[] = [
   {
     key: "last7",
     label: "Last 7 days",
-    getRange: () => ({
-      startDate: subDays(new Date(), 7),
-      endDate: new Date(),
-    }),
+    getRange: () => lastDays(7),
   },
   {
     key: "last14",
     label: "Last 14 days",
-    getRange: () => ({
-      startDate: subDays(new Date(), 14),
-      endDate: new Date(),
-    }),
+    getRange: () => lastDays(14),
   },
   {
     key: "last30",
     label: "Last 30 days",
-    getRange: () => ({
-      startDate: subDays(new Date(), 30),
-      endDate: new Date(),
-    }),
+    getRange: () => lastDays(30),
   },
   {
     key: "thisMonth",
     label: "This month",
     getRange: () => ({
-      startDate: startOfMonth(new Date()),
-      endDate: endOfMonth(new Date()),
+      startDate: startOfMonth(calendarTodayAsLocalDate()),
+      endDate: endOfMonth(calendarTodayAsLocalDate()),
     }),
   },
   {
     key: "lastMonth",
     label: "Last month",
     getRange: () => {
-      const lastMonth = subMonths(new Date(), 1);
+      const lastMonth = subMonths(calendarTodayAsLocalDate(), 1);
       return {
         startDate: startOfMonth(lastMonth),
         endDate: endOfMonth(lastMonth),
@@ -78,15 +74,15 @@ const presets: Preset[] = [
     key: "thisYear",
     label: "This year",
     getRange: () => ({
-      startDate: startOfYear(new Date()),
-      endDate: endOfYear(new Date()),
+      startDate: startOfYear(calendarTodayAsLocalDate()),
+      endDate: endOfYear(calendarTodayAsLocalDate()),
     }),
   },
   {
     key: "lastYear",
     label: "Last year",
     getRange: () => {
-      const lastYear = subYears(new Date(), 1);
+      const lastYear = subYears(calendarTodayAsLocalDate(), 1);
       return {
         startDate: startOfYear(lastYear),
         endDate: endOfYear(lastYear),
@@ -99,31 +95,19 @@ export function DateRangePopover({ value, onChange, className }: DateRangePopove
   const [open, setOpen] = useState(false);
   const [draftValue, setDraftValue] = useState<DateRange>(value);
   const [activeField, setActiveField] = useState<"start" | "end" | null>(null);
+  const [picked, setPicked] = useState<PickedFields>(NONE_PICKED);
 
   // Sync draft with external value when popover opens
   useEffect(() => {
     if (open) {
       setDraftValue(value);
       setActiveField(null);
+      setPicked(NONE_PICKED);
     }
   }, [open, value]);
 
-  // Validation
-  const validation = useMemo(() => {
-    const { startDate, endDate } = draftValue;
-    if (!startDate || !endDate) return { valid: true, error: null };
-
-    if (startDate > endDate) {
-      return { valid: false, error: "Start date must be before end date" };
-    }
-
-    const daysDiff = differenceInDays(endDate, startDate);
-    if (daysDiff > 730) {
-      return { valid: false, error: "Date range cannot exceed 730 days (2 years)" };
-    }
-
-    return { valid: true, error: null };
-  }, [draftValue]);
+  // Subscribes to the calendar zone: an open picker re-checks its cutoff and its picked days when it changes.
+  const validation = useDraftRangeValidation(draftValue, picked);
 
   const handleApply = () => {
     if (!validation.valid) return;
@@ -138,10 +122,12 @@ export function DateRangePopover({ value, onChange, className }: DateRangePopove
 
   const handleClear = () => {
     setDraftValue({ startDate: undefined, endDate: undefined });
+    setPicked(NONE_PICKED);
   };
 
   const handlePresetClick = (preset: Preset) => {
     setDraftValue(preset.getRange());
+    setPicked(NONE_PICKED);
   };
 
   const handleDateSelect = (date: Date | undefined) => {
@@ -150,6 +136,7 @@ export function DateRangePopover({ value, onChange, className }: DateRangePopove
     } else if (activeField === "end") {
       setDraftValue((prev) => ({ ...prev, endDate: date }));
     }
+    if (activeField) setPicked((prev) => ({ ...prev, [activeField]: true }));
     setActiveField(null);
   };
 
@@ -265,7 +252,9 @@ export function DateRangePopover({ value, onChange, className }: DateRangePopove
                 mode="single"
                 selected={activeField === "start" ? draftValue.startDate : draftValue.endDate}
                 onSelect={handleDateSelect}
-                disabled={(date) => date > new Date()}
+                // NEW-15: the picker passes local-midnight days; the cutoff is the
+                // calendar zone's today at local midnight, not the browser clock.
+                disabled={(date) => date > calendarTodayAsLocalDate()}
                 initialFocus
               />
             )}

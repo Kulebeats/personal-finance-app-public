@@ -56,7 +56,7 @@ export function LastUpdated({
         <button
           onClick={onRefresh}
           disabled={isRefreshing}
-          className="p-0.5 rounded hover:bg-muted transition-colors disabled:opacity-50"
+          className="p-0.5 rounded hover:bg-muted transition-colors disabled:opacity-50 max-md:inline-flex max-md:h-11 max-md:w-11 max-md:items-center max-md:justify-center"
           aria-label="Refresh data"
           type="button"
         >

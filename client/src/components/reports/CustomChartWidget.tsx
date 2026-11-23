@@ -21,11 +21,10 @@ import {
   ChartLegendContent,
   type ChartConfig,
 } from "@/components/ui/chart";
-import { useReportsCustom } from "@/hooks/use-reports";
-import { useCurrentYearRange } from "@/hooks/use-reports";
-import { CustomChartConfig } from "@shared/reports";
+import type { CustomChartConfig } from "@shared/reports";
+import { useCustomChartData } from "./useCustomChartData";
 import { WidgetCard, WidgetEmptyState } from "./shared/WidgetCard";
-import { formatCurrency } from "@/lib/utils";
+import { useHouseholdMoneyFormat } from "./shared/useHouseholdMoneyFormat";
 import { ChartTypeSwitcher, ChartType } from "./shared/ChartTypeSwitcher";
 import { ComboChart } from "./shared/ComboChart";
 import { StackedBarChart } from "./shared/StackedBarChart";
@@ -48,6 +47,9 @@ const CHART_COLORS = [
   "#84cc16", // lime
   "#ec4899", // pink
 ];
+const RATE_CHART_TYPES: ChartType[] = ["bar", "horizontal_bar", "line", "area", "pie"];
+const AMOUNT_CHART_TYPES: ChartType[] = [...RATE_CHART_TYPES, "combo", "stacked_bar"];
+const percent = new Intl.NumberFormat("en", { style: "percent", maximumFractionDigits: 2 });
 
 interface CustomChartWidgetProps {
   config: CustomChartConfig;
@@ -60,8 +62,7 @@ export default function CustomChartWidget({
   onEdit,
   onDelete,
 }: CustomChartWidgetProps) {
-  const { from, to } = useCurrentYearRange();
-  const [activeChartType, setActiveChartType] = useState<ChartType>(
+  const [selectedChartType, setActiveChartType] = useState<ChartType>(
     (config.chartType as ChartType) || "bar"
   );
 
@@ -72,32 +73,24 @@ export default function CustomChartWidget({
     }
   }, [config.chartType]);
 
-  const { data, isLoading, error } = useReportsCustom({
-    chartType: config.chartType, // Still fetch data based on original config logic if needed, but mostly data is same structure
-    primaryMetric: config.primaryMetric,
-    secondaryMetric: config.secondaryMetric,
-    groupBy: config.groupBy,
-    aggregation: config.aggregation,
-    from,
-    to,
-  });
-
-  const chartData = useMemo(() => {
-    if (!data?.data) return [];
-    return data.data;
-  }, [data]);
-
-  const isEmpty = !isLoading && (!chartData || chartData.length === 0);
+  const { query: { data, isLoading, error }, supportedMetric, groupBy, secondaryMetric } = useCustomChartData(config);
+  const isSavingsRate = config.primaryMetric === "savingsRate";
+  const allowedTypes = isSavingsRate ? RATE_CHART_TYPES : AMOUNT_CHART_TYPES;
+  const activeChartType = allowedTypes.includes(selectedChartType) ? selectedChartType : "line";
+  const formatCurrency = useHouseholdMoneyFormat();
+  const formatValue = (value: number) => isSavingsRate ? percent.format(value / 100) : formatCurrency(value);
+  const chartData = data?.data ?? [];
+  const isEmpty = !isLoading && chartData.length === 0;
 
   const renderChart = () => {
     if (activeChartType === "bar" || activeChartType === "horizontal_bar") {
-      const keys = config.secondaryMetric
+      const keys = secondaryMetric
         ? ["primary", "secondary"]
         : ["primary"];
       const isHorizontal = activeChartType === "horizontal_bar";
       const barConfig = keys.reduce((acc, key, index) => {
         acc[key] = {
-          label: key === "primary" ? config.primaryMetric : config.secondaryMetric,
+          label: key === "primary" ? config.primaryMetric : secondaryMetric,
           color: CHART_COLORS[index % CHART_COLORS.length],
         };
         return acc;
@@ -122,7 +115,7 @@ export default function CustomChartWidget({
                   type="number"
                   tickLine={false}
                   axisLine={false}
-                  tickFormatter={(value) => formatCurrency(Number(value))}
+                  tickFormatter={(value) => formatValue(Number(value))}
                 />
                 <YAxis
                   type="category"
@@ -144,14 +137,14 @@ export default function CustomChartWidget({
                 <YAxis
                   tickLine={false}
                   axisLine={false}
-                  tickFormatter={(value) => formatCurrency(Number(value))}
+                  tickFormatter={(value) => formatValue(Number(value))}
                 />
               </>
             )}
             <ChartTooltip
               content={
                 <ChartTooltipContent
-                  formatter={(value) => formatCurrency(Number(value))}
+                  formatter={(value) => formatValue(Number(value))}
                 />
               }
             />
@@ -178,9 +171,9 @@ export default function CustomChartWidget({
           data: chartData.map((d) => ({ x: d.label, y: d.primary })),
         },
       ];
-      if (config.secondaryMetric) {
+      if (secondaryMetric) {
         series.push({
-          id: config.secondaryMetric,
+          id: secondaryMetric,
           color: CHART_COLORS[1],
           data: chartData.map((d) => ({ x: d.label, y: d.secondary || 0 })),
         });
@@ -224,12 +217,12 @@ export default function CustomChartWidget({
               <YAxis
                 tickLine={false}
                 axisLine={false}
-                tickFormatter={(value) => formatCurrency(Number(value))}
+                tickFormatter={(value) => formatValue(Number(value))}
               />
               <ChartTooltip
                 content={
                   <ChartTooltipContent
-                    formatter={(value) => formatCurrency(Number(value))}
+                    formatter={(value) => formatValue(Number(value))}
                   />
                 }
               />
@@ -265,12 +258,12 @@ export default function CustomChartWidget({
               <YAxis
                 tickLine={false}
                 axisLine={false}
-                tickFormatter={(value) => formatCurrency(Number(value))}
+                tickFormatter={(value) => formatValue(Number(value))}
               />
               <ChartTooltip
                 content={
                   <ChartTooltipContent
-                    formatter={(value) => formatCurrency(Number(value))}
+                    formatter={(value) => formatValue(Number(value))}
                   />
                 }
               />
@@ -325,7 +318,7 @@ export default function CustomChartWidget({
               content={
                 <ChartTooltipContent
                   nameKey="id"
-                  formatter={(value) => formatCurrency(Number(value))}
+                  formatter={(value) => formatValue(Number(value))}
                 />
               }
             />
@@ -344,21 +337,21 @@ export default function CustomChartWidget({
         <ComboChart
           data={comboData}
           primaryKey={config.primaryMetric}
-          secondaryKey={config.secondaryMetric}
+          secondaryKey={secondaryMetric}
           showAverage={true}
         />
       );
     }
 
     if (activeChartType === "stacked_bar") {
-      const keys = config.secondaryMetric
-        ? [config.primaryMetric, config.secondaryMetric]
+      const keys = secondaryMetric
+        ? [config.primaryMetric, secondaryMetric]
         : [config.primaryMetric];
       const stackedData = chartData.map((d: ChartDatum) => ({
         label: d.label,
         [config.primaryMetric]: d.primary,
-        ...(config.secondaryMetric
-          ? { [config.secondaryMetric]: d.secondary || 0 }
+        ...(secondaryMetric
+          ? { [secondaryMetric]: d.secondary || 0 }
           : {}),
       }));
       return <StackedBarChart data={stackedData} keys={keys} />;
@@ -370,7 +363,7 @@ export default function CustomChartWidget({
   return (
     <WidgetCard
       title={config.name || "Custom Chart"}
-      description={`Analysis of ${config.primaryMetric}`}
+      description={config.groupBy && config.groupBy !== "none" && !groupBy ? "Saved grouping is unavailable. Showing a time series." : `Analysis of ${config.primaryMetric}`}
       isLoading={isLoading}
       error={error}
       onSettings={onEdit}
@@ -378,19 +371,13 @@ export default function CustomChartWidget({
         <ChartTypeSwitcher
           value={activeChartType}
           onChange={setActiveChartType}
-          allowedTypes={[
-            "bar",
-            "horizontal_bar",
-            "line",
-            "area",
-            "pie",
-            "combo",
-            "stacked_bar",
-          ]}
+          allowedTypes={allowedTypes}
         />
       }
     >
-      {isEmpty ? (
+      {!supportedMetric ? (
+        <WidgetEmptyState title="Metric unavailable" description="Edit this chart to select an available metric." />
+      ) : isEmpty ? (
         <WidgetEmptyState
           title="No data for this chart"
           description="Try adjusting metrics, groupings, or the date range"

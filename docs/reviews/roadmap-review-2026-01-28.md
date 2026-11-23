@@ -1,7 +1,7 @@
 # Roadmap Review Report
 **Date:** 2026-01-28
 **Reviewer:** Claude Code
-**Document:** /mnt/c/Users/kuwan/personal-finance-app/docs/reviews/roadmap.md
+**Document:** /mnt/c/Users/USER/personal-finance-app/docs/reviews/roadmap.md
 
 ---
 

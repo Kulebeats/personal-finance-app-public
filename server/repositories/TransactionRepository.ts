@@ -12,13 +12,19 @@
  * @module repositories/TransactionRepository
  */
 
-import { eq, and, inArray, isNull, sql } from "drizzle-orm";
+import { eq, and, inArray, isNull, sql, getTableColumns } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { lockCouponPostingAccount } from "../services/grz/couponPaymentAccess";
+import { assertPrincipalCashDelete } from "../services/grz/principalCashGuard";
+import { couponCashDescriptionFields, identifiedCouponCashForAudit, GRZ_COUPON_CASH_DESCRIPTION } from "../services/grz/couponCashDescription";
 import { db } from "../db";
 import {
   transactions,
   accounts,
   transactionSplits,
+  transactionCreateOwnerIntents,
   type Transaction,
+  type TransactionSplit,
   type InsertTransaction,
   type Account,
 } from "@shared/schema";
@@ -26,12 +32,27 @@ import {
   withTransaction,
   type TransactionType,
 } from "../utils/withTransaction";
+import { withRecurringParentForCreate } from "../services/recurring/withWritableRecurringRule";
 import { Money } from "../core/money";
 import { goalAccountAssignmentService } from "../services/GoalAccountAssignmentService";
+import { reverseDeletedSourceLinks } from "../services/goal/GoalLinkSourceSync";
 import { logger } from "../utils/logger";
 import { TransactionRepositoryDelegates } from "./TransactionRepository.delegates";
 import { NotFoundError, ValidationError } from "../utils/errorHandler";
 import { businessAuditService } from "../services/BusinessAuditService";
+import { lockTransactionCreateGrant, prepareTransactionCreate, type TransactionCreateOptions } from "./TransactionCreateBoundary";
+
+import { nextTransactionVersion, writeTransactionUpdate, type TransactionUpdateOptions } from "./TransactionUpdateWriter";
+import { applyTransactionSplitUpdate, type TransactionUpdateData } from "./TransactionSplitUpdate";
+
+import { tagWriteRepository } from "./TagWriteRepository";
+import { buildPostingReceipt, resolvePostingEffect } from "./TransactionPostingEffect";
+import { outboxEventService, EventTypes } from "../core/events";
+
+import { visibleTransactionPredicate } from "../core/authz/transaction-visibility";
+
+export type { TransactionUpdateData } from "./TransactionSplitUpdate";
+export type { TransactionCreateOptions } from "./TransactionCreateBoundary";
 
 // Re-export from split modules for backwards compatibility
 export {
@@ -49,22 +70,17 @@ export {
 
 // Extended transaction type with denormalized names
 export interface TransactionWithNames extends Transaction {
+  summaryRate?: string | null;
+  splits?: Pick<TransactionSplit, "id" | "amount" | "categoryId" | "merchantId" | "notes" | "displayOrder">[];
   merchantName?: string | null;
   merchantLogoUrl?: string | null;
   categoryName?: string | null;
   accountName?: string | null;
 }
 
-export interface TransactionCreateOptions {
-  audit?: {
-    userId: string | null;
-    householdId: string;
-    ipAddress?: string;
-    metadata?: Record<string, unknown>;
-  };
-}
-
 export interface TransactionDeleteOptions {
+  actor?: { householdId: string; userId: string };
+  publishDeletedEvent?: boolean;
   /**
    * Rule 9: when provided, a DELETE audit row is written INSIDE the same
    * transaction as the soft-delete + balance reversal, so a caller that
@@ -132,7 +148,7 @@ export class TransactionRepository extends TransactionRepositoryDelegates {
       [accountId],
       householdId,
     );
-    return lockedAccounts.get(accountId)!;
+    return lockedAccounts.get(accountId.toLowerCase())!;
   }
 
   private async lockAccountsForBalanceMutation(
@@ -219,7 +235,13 @@ export class TransactionRepository extends TransactionRepositoryDelegates {
     id: string,
     householdId: string,
     userId: string,
+    projectCashDescription = false,
   ): Promise<Transaction | undefined> {
+    if (projectCashDescription) {
+      const [row] = await db.select({ ...getTableColumns(transactions), ...couponCashDescriptionFields() }).from(transactions)
+        .where(and(eq(transactions.id, id), visibleTransactionPredicate({ householdId, userId, role: "member" }))).limit(1);
+      return row;
+    }
     const txn = await this.findById(id, householdId);
     if (!txn) return undefined;
 
@@ -285,33 +307,53 @@ export class TransactionRepository extends TransactionRepositoryDelegates {
     // parent lump with NOT EXISTS(transaction_splits) guards and count the
     // split rows instead, so explicit hide/exclude flags keep their meaning.
     const { splits, ...txnData } = data;
-    const lockedAccount = await this.lockAccountForBalanceMutation(
-      tx,
-      txnData.accountId,
-      txnData.householdId,
-    );
+    if (String(txnData.type) === "asset_settlement") throw new ValidationError("Use the confirmed principal settlement workflow");
+    if (txnData.type === "transfer" || txnData.transferTransactionId || txnData.transferAccountId || txnData.isTransferIn) {
+      throw new ValidationError("Use the paired transfer create workflow");
+    }
+    let applyInitialTags: ((id: string) => Promise<unknown>) | undefined;
+    if (options?.initialImportTagNames?.length) {
+      if (txnData.source !== "csv_import" || !options.createActor || options.createActor.householdId !== txnData.householdId) {
+        throw new ValidationError("Initial statement tags require an authorized account import");
+      }
+      applyInitialTags = await tagWriteRepository.prepareImport(tx, txnData.householdId, options.createActor.userId, options.initialImportTagNames);
+    }
+    const createActor = await lockTransactionCreateGrant(tx, txnData.householdId, options);
+    const coupon = options?.couponPaymentId && await lockCouponPostingAccount(tx, createActor, options.couponPaymentId, txnData);
+    if (coupon && !options?.audit) throw new ValidationError("Coupon posting requires its original audit");
+    if (coupon) {
+      txnData.notes = coupon.notes;
+      if (coupon.genericDescription) { txnData.name = GRZ_COUPON_CASH_DESCRIPTION; txnData.originalName = null; txnData.merchantId = null; }
+    }
+    const lockedAccount = coupon ? coupon.account : await this.lockAccountForBalanceMutation(tx, txnData.accountId, txnData.householdId);
+    await prepareTransactionCreate(tx, lockedAccount, txnData,
+      coupon && coupon.genericDescription ? { ...options, merchantAlias: undefined, requestedMerchantId: undefined } : options, createActor);
+    const receipt = buildPostingReceipt(lockedAccount, txnData, options?.postingMode);
+    const delta = new Money(receipt.postedBalanceDelta, receipt.currency);
 
-    // FIX DATA-ACCOUNT-001: Calculate balance delta using Money (no .toNumber())
-    // Keep Money object through calculation to preserve precision
-    const amount = new Money(txnData.amount, txnData.currency ?? undefined);
-    const delta = this.calculateBalanceDelta(
-      txnData.type,
-      amount,
-      txnData.isTransferIn ?? false,
-      txnData.isBalanceAdjustmentIncrease ?? true,
-    );
+    const intent = options?.originalOwnerIntent;
+    if (txnData.idempotencyKey && intent) {
+      txnData.id ??= randomUUID();
+      await tx.insert(transactionCreateOwnerIntents).values({
+        transactionId: txnData.id, householdId: txnData.householdId, idempotencyKey: txnData.idempotencyKey,
+        actorUserId: intent.actorUserId, ownerSelected: intent.selectedOwnerId !== undefined,
+        selectedOwnerId: intent.selectedOwnerId ?? null,
+        operation: intent.operation ?? "ordinary",
+        requestDigest: intent.requestDigest,
+      });
+    }
+    const txnResult = await tx.insert(transactions).values({ ...txnData, ...receipt }).returning();
 
+    // Claim the key before checking spendable funds. A replay can arrive after
+    // its own first debit has spent the balance. New overdrafts still roll back.
     this.assertAssetAccountCanApplyDelta(lockedAccount, delta);
-
-    const txnResult = await tx.insert(transactions).values(txnData).returning();
-
     const txn = txnResult[0];
 
     if (options?.audit) {
       await businessAuditService.logCreate({
         tx,
         userId: options.audit.userId,
-        householdId: options.audit.householdId,
+          householdId: txn.isPrivate || lockedAccount.isPrivate || (coupon && coupon.privateAudit) ? null : options.audit.householdId,
         entityId: txn.id,
         entityType: "transaction",
         newValue: {
@@ -321,9 +363,14 @@ export class TransactionRepository extends TransactionRepositoryDelegates {
           date: txn.date,
           type: txn.type,
           source: txn.source,
+          postedBalanceDelta: txn.postedBalanceDelta,
+          postedAccountIsAsset: txn.postedAccountIsAsset,
+          postingMode: txn.postingMode,
+          isPrivate: txn.isPrivate,
+          ownerUserId: txn.ownerUserId,
         },
         ipAddress: options.audit.ipAddress,
-        metadata: options.audit.metadata,
+        metadata: coupon ? { ...options.audit.metadata, grzCoupon: coupon.receipt } : options.audit.metadata,
       });
     }
 
@@ -340,8 +387,17 @@ export class TransactionRepository extends TransactionRepositoryDelegates {
       );
     }
 
+    if (applyInitialTags) await applyInitialTags(txn.id);
+    if (options?.publishCreatedEvent) {
+      await outboxEventService.publish({
+        eventType: EventTypes.TRANSACTION_CREATED, aggregateType: "transaction",
+        aggregateId: txn.id, householdId: txn.householdId,
+        payload: { id: txn.id, type: txn.type, amount: txn.amount, accountId: txn.accountId },
+      }, tx);
+    }
+
     // Update account balance using string delta to avoid floating-point drift
-    const accountResult = await tx
+    const accountResult = delta.isZero() ? [lockedAccount] : await tx
       .update(accounts)
       .set({
         balance: sql`${accounts.balance} + ${delta.toString()}::numeric`,
@@ -370,10 +426,10 @@ export class TransactionRepository extends TransactionRepositoryDelegates {
     },
     options?: TransactionCreateOptions,
   ): Promise<{ transaction: Transaction; account: Account }> {
-    const result = await withTransaction((tx) =>
-      this.createWithTx(tx, data, options),
-    );
+    const result = await withRecurringParentForCreate(data, options?.recurringActor, tx =>
+      this.createWithTx(tx, data, options), options?.accountImportTransaction);
 
+    if (result.transaction.postingMode === "history_only") return result;
     try {
       await goalAccountAssignmentService.syncGoalsForAccount(
         data.accountId,
@@ -410,143 +466,21 @@ export class TransactionRepository extends TransactionRepositoryDelegates {
   async update(
     id: string,
     householdId: string,
-    data: Partial<Transaction>,
+    data: TransactionUpdateData,
     expectedUpdatedAt?: Date,
     externalTx?: TransactionType,
+    options?: TransactionUpdateOptions,
   ): Promise<{ transaction?: Transaction; conflict: boolean }> {
     const accountsToSyncAfterCommit = new Set<string>();
 
-    const operation = async (tx: TransactionType) => {
-      const baseConditions = [
-        eq(transactions.id, id),
-        eq(transactions.householdId, householdId),
-        isNull(transactions.deletedAt),
-      ];
-
-      const [lockedExisting] = await tx
-        .select()
-        .from(transactions)
-        .where(and(...baseConditions))
-        .limit(1)
-        .for("update");
-
-      if (!lockedExisting) {
-        return { transaction: undefined, conflict: false };
-      }
-
-      const targetAccountId = data.accountId ?? lockedExisting.accountId;
-      const balanceMayChange =
-        data.amount !== undefined ||
-        data.type !== undefined ||
-        data.isTransferIn !== undefined ||
-        data.isBalanceAdjustmentIncrease !== undefined ||
-        data.accountId !== undefined ||
-        data.currency !== undefined;
-
-      const lockedAccounts = balanceMayChange
-        ? await this.lockAccountsForBalanceMutation(
-            tx,
-            [lockedExisting.accountId, targetAccountId],
-            householdId,
-          )
-        : new Map<string, Account>();
-
-      const conditions = [...baseConditions];
-
-      // Optimistic concurrency check
-      if (expectedUpdatedAt) {
-        conditions.push(eq(transactions.updatedAt, expectedUpdatedAt));
-      }
-
-      const result = await tx
-        .update(transactions)
-        .set({ ...data, updatedAt: new Date() })
-        .where(and(...conditions))
-        .returning();
-
-      if (result.length === 0 && expectedUpdatedAt) {
-        return { transaction: undefined, conflict: true };
-      }
-
-      if (result.length === 0) {
-        return { transaction: undefined, conflict: false };
-      }
-
-      const updated = result[0];
-
-      // FIX DATA-ACCOUNT-001: Recalculate balance if amount or type changed - use Money (no .toNumber())
-      if (balanceMayChange) {
-        const oldAmount = new Money(
-          lockedExisting.amount,
-          lockedExisting.currency ?? undefined,
-        );
-        const newAmount = new Money(
-          updated.amount,
-          updated.currency ?? undefined,
-        );
-
-        const oldDelta = this.calculateBalanceDelta(
-          lockedExisting.type,
-          oldAmount,
-          lockedExisting.isTransferIn ?? false,
-          lockedExisting.isBalanceAdjustmentIncrease ?? true,
-        );
-
-        const newDelta = this.calculateBalanceDelta(
-          updated.type,
-          newAmount,
-          updated.isTransferIn ?? false,
-          updated.isBalanceAdjustmentIncrease ?? true,
-        );
-
-        const netDelta = newDelta.subtract(oldDelta);
-
-        const balanceDeltas = new Map<string, Money>();
-        const addDelta = (accountId: string, delta: Money) => {
-          const current =
-            balanceDeltas.get(accountId) ?? Money.zero(delta.currency);
-          balanceDeltas.set(accountId, current.add(delta));
-        };
-
-        if (lockedExisting.accountId === updated.accountId) {
-          addDelta(updated.accountId, netDelta);
-        } else {
-          addDelta(lockedExisting.accountId, oldDelta.negated());
-          addDelta(updated.accountId, newDelta);
-        }
-
-        for (const [accountId, delta] of balanceDeltas.entries()) {
-          if (delta.isZero()) {
-            continue;
-          }
-
-          const lockedAccount = lockedAccounts.get(accountId);
-          if (!lockedAccount) {
-            throw new NotFoundError("Account not found");
-          }
-
-          this.assertAssetAccountCanApplyDelta(lockedAccount, delta);
-        }
-
-        for (const [accountId, delta] of balanceDeltas.entries()) {
-          if (delta.isZero()) {
-            continue;
-          }
-
-          await tx
-            .update(accounts)
-            .set({
-              balance: sql`${accounts.balance} + ${delta.toString()}::numeric`,
-              updatedAt: new Date(),
-            })
-            .where(eq(accounts.id, accountId));
-          accountsToSyncAfterCommit.add(accountId);
-        }
-      }
-
-      return { transaction: updated, conflict: false };
-    };
-
+    const operation = (tx: TransactionType) => writeTransactionUpdate(
+      tx, id, householdId, data, expectedUpdatedAt, {
+        callerOwnsTransaction: externalTx !== undefined,
+        lockAccounts: this.lockAccountsForBalanceMutation.bind(this),
+        assertDelta: this.assertAssetAccountCanApplyDelta.bind(this),
+        accountsToSyncAfterCommit,
+      }, options,
+    );
     const result = externalTx
       ? await operation(externalTx)
       : await withTransaction(operation);
@@ -587,6 +521,7 @@ export class TransactionRepository extends TransactionRepositoryDelegates {
     let accountToSyncAfterCommit: string | undefined;
 
     const result = await withTransaction(async (tx) => {
+      const actor = options?.actor ? await lockTransactionCreateGrant(tx, householdId, { createActor: options.actor }) : undefined;
       const baseConditions = [
         eq(transactions.id, id),
         eq(transactions.householdId, householdId),
@@ -603,11 +538,24 @@ export class TransactionRepository extends TransactionRepositoryDelegates {
       if (!lockedExisting) return false;
 
       // Same lock order as update(): transaction row first, then account.
-      await this.lockAccountForBalanceMutation(
+      const account = await this.lockAccountForBalanceMutation(
         tx,
         lockedExisting.accountId,
         householdId,
       );
+
+      if (actor) {
+        const [visible] = await tx.select({ id: transactions.id }).from(transactions).where(and(
+          eq(transactions.id, id), visibleTransactionPredicate(actor),
+        )).limit(1);
+        if (!visible) throw new NotFoundError("Transaction not found");
+      }
+      await assertPrincipalCashDelete(tx, householdId, [lockedExisting]);
+      if (lockedExisting.type === "transfer" || lockedExisting.transferTransactionId || lockedExisting.transferAccountId || lockedExisting.isTransferIn) {
+        throw new ValidationError("Use the paired transfer delete workflow");
+      }
+      const { delta } = await resolvePostingEffect(tx, account, lockedExisting);
+      this.assertAssetAccountCanApplyDelta(account, delta.negated());
 
       // Mark as deleted
       const deleteResult = await tx
@@ -622,40 +570,37 @@ export class TransactionRepository extends TransactionRepositoryDelegates {
       // reversal below — a bypassing caller (bulk delete, future callers)
       // still gets an audit row because it lives here, not in the controller.
       if (options?.audit) {
+        const privateCouponAudit = await identifiedCouponCashForAudit(tx, id);
         await businessAuditService.logDelete({
           tx,
           userId: options.audit.userId,
-          householdId,
+          householdId: lockedExisting.isPrivate || account.isPrivate || privateCouponAudit ? null : householdId,
           entityId: id,
           entityType: "transaction",
-          oldValue: options.audit.oldValue,
+          oldValue: actor ? { amount: lockedExisting.amount, categoryId: lockedExisting.categoryId, description: lockedExisting.name,
+            date: lockedExisting.date, accountId: lockedExisting.accountId } : options.audit.oldValue,
           ipAddress: options.audit.ipAddress,
           metadata: options.audit.metadata,
         });
       }
 
-      // FIX DATA-ACCOUNT-001: Reverse balance impact using Money (no .toNumber())
-      const amount = new Money(
-        lockedExisting.amount,
-        lockedExisting.currency ?? undefined,
-      );
-      const delta = this.calculateBalanceDelta(
-        lockedExisting.type,
-        amount,
-        lockedExisting.isTransferIn ?? false,
-        lockedExisting.isBalanceAdjustmentIncrease ?? true,
-      );
+      // R10.3: a deleted source takes back exactly what it gave each linked goal.
+      await reverseDeletedSourceLinks(tx, lockedExisting, {
+        userId: options?.audit?.userId ?? options?.actor?.userId ?? null, ipAddress: options?.audit?.ipAddress,
+        householdId: lockedExisting.isPrivate || account.isPrivate ? null : householdId, viewer: actor,
+      });
 
-      // Reverse the delta using string to avoid floating-point drift
-      await tx
-        .update(accounts)
-        .set({
-          balance: sql`${accounts.balance} - ${delta.toString()}::numeric`,
-          updatedAt: new Date(),
-        })
-        .where(eq(accounts.id, lockedExisting.accountId));
+      if (options?.publishDeletedEvent) {
+        await outboxEventService.publish({ eventType: EventTypes.TRANSACTION_DELETED,
+          aggregateType: "transaction", aggregateId: id, householdId, payload: { id } }, tx);
+      }
 
-      accountToSyncAfterCommit = lockedExisting.accountId;
+      if (!delta.isZero()) {
+        await tx.update(accounts).set({
+          balance: sql`${accounts.balance} - ${delta.toString()}::numeric`, updatedAt: new Date(),
+        }).where(eq(accounts.id, lockedExisting.accountId));
+        accountToSyncAfterCommit = lockedExisting.accountId;
+      }
       return true;
     });
 
@@ -706,7 +651,8 @@ export class TransactionRepository extends TransactionRepositoryDelegates {
             isNull(transactions.deletedAt),
           ),
         )
-        .limit(1);
+        .limit(1)
+        .for("update");
 
       if (!txn) {
         throw new Error(
@@ -714,23 +660,21 @@ export class TransactionRepository extends TransactionRepositoryDelegates {
         );
       }
 
-      // Delete existing splits (if any) to replace with new splits
-      await tx
-        .delete(transactionSplits)
-        .where(eq(transactionSplits.transactionId, transactionId));
-
-      // Insert new splits
       if (splits.length > 0) {
-        await tx.insert(transactionSplits).values(
-          splits.map((s, index) => ({
-            transactionId,
-            amount: s.amount,
-            categoryId: s.categoryId || null,
-            merchantId: s.merchantId || null,
-            notes: s.notes || null,
-            displayOrder: s.displayOrder ?? index,
-          })),
-        );
+        const account = await this.lockAccountForBalanceMutation(tx, txn.accountId, householdId);
+        if (!txn.currency || account.currency !== txn.currency) {
+          throw new ValidationError("Split currency must match the locked account denomination", [
+            { field: "currency", message: "Reconcile the source denomination before replacing splits" },
+          ]);
+        }
+      }
+      const replacement = await applyTransactionSplitUpdate(tx, txn, { splits }, { allowEmpty: true });
+      if (replacement.changed || (replacement.parentCategoryId !== undefined && replacement.parentCategoryId !== txn.categoryId)) {
+        await tx.update(transactions).set({
+          ...(replacement.parentCategoryId !== undefined ? { categoryId: replacement.parentCategoryId } : {}),
+          updatedAt: nextTransactionVersion(txn.updatedAt),
+        })
+          .where(eq(transactions.id, transactionId));
       }
     };
 

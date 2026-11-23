@@ -33,8 +33,9 @@ interface RecurringEditModalProps {
   onFormChange: (updates: Partial<RecurringEditForm>) => void;
   onSave: () => void;
   isSaving: boolean;
-  /** Currency code for display (e.g., "USD", "ZMW") */
+  /** Legacy DTO compatibility only; verifiedCurrency controls the denomination display. */
   currency?: string;
+  verifiedCurrency?: "ZMW" | null;
 }
 
 export function RecurringEditModal({
@@ -44,7 +45,7 @@ export function RecurringEditModal({
   onFormChange,
   onSave,
   isSaving,
-  currency,
+  verifiedCurrency,
 }: RecurringEditModalProps) {
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
@@ -71,20 +72,31 @@ export function RecurringEditModal({
           <div className="space-y-2">
             <Label htmlFor="edit-recurring-amount">Amount</Label>
             <div className="flex items-center gap-2">
-              {currency && (
+              {(form.confirmDenomination || verifiedCurrency) ? (
                 <span className="text-sm text-muted-foreground font-medium">
-                  {currency}
+                  ZMW
                 </span>
-              )}
+              ) : <span className="text-sm text-muted-foreground">Currency unconfirmed</span>}
               <Input
                 id="edit-recurring-amount"
                 type="number"
                 step="0.01"
                 value={form.amount}
+                disabled={!form.confirmDenomination && !verifiedCurrency}
                 onChange={(e) => onFormChange({ amount: e.target.value })}
                 className="flex-1"
               />
             </div>
+          </div>
+
+          <div className="space-y-2">
+            <label className="flex items-start gap-2" htmlFor="confirm-recurring-denomination">
+              <input id="confirm-recurring-denomination" type="checkbox" checked={form.confirmDenomination ?? false}
+                onChange={event => onFormChange({ confirmDenomination: event.target.checked, amount: "" })} />
+              <span>Confirm a newly entered amount in ZMW</span>
+            </label>
+            <p className="text-xs text-muted-foreground">Older rules may have an unknown currency. Select this and enter the intended ZMW amount to enable processing. This does not convert the old amount.</p>
+            {form.confirmDenomination && !form.expectedDefinition && <p className="text-xs text-muted-foreground">Reload recurring rules before confirming this amount.</p>}
           </div>
 
           {/* Frequency */}
@@ -190,7 +202,7 @@ export function RecurringEditModal({
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button onClick={onSave} disabled={isSaving}>
+          <Button onClick={onSave} disabled={isSaving || (form.confirmDenomination === true && (!form.amount || !form.expectedDefinition))}>
             {isSaving ? "Saving..." : "Save Changes"}
           </Button>
         </DialogFooter>

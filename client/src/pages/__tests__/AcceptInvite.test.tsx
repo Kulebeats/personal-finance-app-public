@@ -20,12 +20,12 @@ const INVITE_PATH = `/invite/${INVITE_CODE}`;
 
 const mockFetch = vi.fn();
 
+// A real Response: apiCall reads error bodies through response.clone().
 const jsonResponse = (data: unknown, status = 200): Response =>
-  ({
-    ok: status >= 200 && status < 300,
+  new Response(JSON.stringify(data), {
     status,
-    json: vi.fn().mockResolvedValue(data),
-  }) as unknown as Response;
+    headers: { "Content-Type": "application/json" },
+  });
 
 const signedInProfile = {
   success: true,
@@ -166,6 +166,31 @@ describe("AcceptInvite page", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/this invitation has expired/i);
+    expect(history[history.length - 1]).toBe(INVITE_PATH);
+  });
+
+  it("says the invitation is for a different email when the signed-in address is not the recipient", async () => {
+    const user = userEvent.setup();
+    stubProfile(jsonResponse(signedInProfile));
+    const { history } = renderInvitePage();
+    const message = "This invitation was sent to a different email address. Sign in with that address to accept it.";
+
+    mockFetch.mockImplementation((input: RequestInfo | URL) => {
+      if (String(input).includes("/api/settings/profile")) {
+        return Promise.resolve(jsonResponse(signedInProfile));
+      }
+      return Promise.resolve(
+        jsonResponse({ success: false, error: { code: "INVITE_RECIPIENT_MISMATCH", message } }, 409),
+      );
+    });
+
+    await user.click(
+      await screen.findByRole("button", { name: /accept invitation/i }),
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("This invitation is for a different email");
+    expect(alert).toHaveTextContent(message);
     expect(history[history.length - 1]).toBe(INVITE_PATH);
   });
 });

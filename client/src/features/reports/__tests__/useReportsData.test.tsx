@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useReportsData } from "../hooks/useReportsData";
+import { useReportsCashflow, useReportsSpendingBreakdown } from "@/hooks/use-reports";
 
 const money = (value: number, currency: string = "USD") => ({
   amount: value.toFixed(2),
@@ -152,10 +153,10 @@ describe("useReportsData", () => {
       { wrapper }
     );
 
-    expect(result.current.totals.income).toEqual(money(10500));
-    expect(result.current.totals.expenses).toEqual(money(6200));
-    expect(result.current.totals.savings).toEqual(money(4300));
-    expect(result.current.totals.savingsRate).toBe(41);
+    expect(result.current.totals?.income).toEqual(money(10500));
+    expect(result.current.totals?.expenses).toEqual(money(6200));
+    expect(result.current.totals?.savings).toEqual(money(4300));
+    expect(result.current.totals?.savingsRate).toBe(41);
   });
 
   it("should return currency from data", () => {
@@ -171,6 +172,31 @@ describe("useReportsData", () => {
     );
 
     expect(result.current.currency).toBe("USD");
+  });
+
+  it("knows no currency and no totals while the reports load, and guesses none", () => {
+    const cashflow = vi.mocked(useReportsCashflow), spending = vi.mocked(useReportsSpendingBreakdown);
+    const cashflowImpl = cashflow.getMockImplementation(), spendingImpl = spending.getMockImplementation();
+    cashflow.mockImplementation(() => ({ data: undefined, isLoading: true }) as unknown as ReturnType<typeof useReportsCashflow>);
+    spending.mockImplementation(() => ({ data: undefined, isLoading: true }) as unknown as ReturnType<typeof useReportsSpendingBreakdown>);
+    try {
+      const { result } = renderHook(
+        () =>
+          useReportsData({
+            activeTab: "income",
+            dateRange: { from: "2026-01-01", to: "2026-12-31" },
+            spendingGroupBy: "categoryGroup",
+            showExportHistory: false,
+          }),
+        { wrapper }
+      );
+
+      expect(result.current.currency).toBeNull();
+      expect(result.current.totals).toBeNull();
+    } finally {
+      if (cashflowImpl) cashflow.mockImplementation(cashflowImpl);
+      if (spendingImpl) spending.mockImplementation(spendingImpl);
+    }
   });
 
   it("should transform net worth data for line chart", () => {

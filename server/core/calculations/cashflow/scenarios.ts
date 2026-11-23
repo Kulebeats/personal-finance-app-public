@@ -363,7 +363,7 @@ export function generateScenarioSummary(
 
   // Use Money comparison methods instead of .toNumber() for threshold checks
   const savingsDiff = impact.totalSavingsDiff;
-  const isPositive = savingsDiff.isPositive();
+  const isPositive = savingsDiff.isPositiveOrZero();
 
   let recommendation: string;
   if (savingsDiff.gt(1000)) {

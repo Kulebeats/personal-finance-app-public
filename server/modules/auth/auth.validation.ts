@@ -5,6 +5,7 @@
  */
 
 import { z } from "zod";
+import { passwordPolicySchema } from "./auth.password-policy";
 
 /**
  * Login validation schema
@@ -25,17 +26,9 @@ export const loginSchema = z.object({
 /**
  * Registration-grade password policy.
  *
- * Single source of truth shared by registration and password reset so the
- * two flows can never drift apart (R1).
+ * Compatibility export of the policy shared by registration, reset and change.
  */
-export const registrationPasswordSchema = z
-  .string()
-  .min(8, "Password must be at least 8 characters")
-  .max(128, "Password too long")
-  .regex(
-    /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/,
-    "Password must contain at least one lowercase letter, one uppercase letter, and one number",
-  );
+export const registrationPasswordSchema = passwordPolicySchema;
 
 /**
  * Registration validation schema
@@ -118,13 +111,7 @@ export const backupCodeSchema = z.object({
 export const changePasswordSchema = z
   .object({
     currentPassword: z.string().min(1, "Current password is required"),
-    newPassword: z
-      .string()
-      .min(8, "New password must be at least 8 characters")
-      .regex(
-        /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/,
-        "Password must contain at least one lowercase letter, one uppercase letter, and one number",
-      ),
+    newPassword: passwordPolicySchema,
     confirmPassword: z.string(),
   })
   .refine((data) => data.newPassword === data.confirmPassword, {

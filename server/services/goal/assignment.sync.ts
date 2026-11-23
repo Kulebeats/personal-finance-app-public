@@ -20,7 +20,9 @@ import {
   calculatePercentComplete,
 } from "../goalCalculations";
 import { Money } from "../../core/money";
+import { householdToday } from "../householdCalendarToday";
 import { calculateAssignmentBalance, hasBalanceUpdate } from "./assignment.calculations";
+import { isHouseholdSecurityPriceUnavailable } from "../investment/householdSecurityPriceRead";
 
 /**
  * Sync all goals linked to an account (triggered by account balance changes)
@@ -58,140 +60,91 @@ export async function syncGoalsForAccount(
   );
 
   for (const goalId of goalIds) {
-    await recalculateGoalBalance(goalId, trigger, accountId);
+    await syncGoal(goalId, trigger, { kind: "linked", accountId });
   }
 
   await recalculateDebtGoalsForAccount(accountId, trigger);
 }
 
-/**
- * Recalculate a single goal's balance from its assignments
- */
-export async function recalculateGoalBalance(
-  goalId: string,
-  trigger: string,
-  accountId?: string
-) {
-  const [goal] = await db.select().from(goals).where(eq(goals.id, goalId));
+type SyncSource =
+  | { kind: "assignments"; accountId?: string }
+  | { kind: "linked" | "debt"; accountId: string };
 
-  if (!goal) return;
+async function syncGoal(goalId: string, trigger: string, source: SyncSource) {
+  const result = await db.transaction(async (tx) => {
+    // Compare with the last committed goal before reading its current balance sources.
+    const [goal] = await tx.select().from(goals).where(eq(goals.id, goalId)).for("update");
+    if (!goal) return;
 
-  const previousBalanceMoney = new Money(goal.currentAmount);
-  const newBalanceMoney = await calculateAssignmentBalance(goalId);
-  const previousBalance = previousBalanceMoney.toNumber();
-  const newBalance = newBalanceMoney.toNumber();
-
-  const update = buildGoalBalanceUpdate(goal, newBalance);
-  if (!hasBalanceUpdate(goal, update)) {
-    return goal;
-  }
-
-  const [updatedGoal] = await db
-    .update(goals)
-    .set({
-      currentAmount: update.currentAmount,
-      status: update.status,
-      monthlyProjection: update.monthlyProjection,
-      projectedCompletionDate: update.projectedCompletionDate,
-      isCompleted: update.isCompleted,
-      completedAt: update.completedAt,
-      updatedAt: new Date(),
-    })
-    .where(eq(goals.id, goalId))
-    .returning();
-
-  await goalActivityLogService.log({
-    goalId,
-    activityType: "balance_synced",
-    amount: null,
-    previousBalance,
-    newBalance,
-    metadata: { trigger, accountId: accountId ?? null },
-    tx: undefined,
-  });
-
-  const percentBefore = calculatePercentComplete(goal, previousBalance);
-  const percentAfter = calculatePercentComplete(goal, newBalance);
-  notificationService
-    .triggerGoalMilestone(
-      goal.householdId,
-      updatedGoal.id,
-      updatedGoal.name,
-      percentBefore,
-      percentAfter
-    )
-    .catch(() => undefined);
-
-  return updatedGoal;
-}
-
-/**
- * Recalculate debt goals when their linked account balance changes
- */
-export async function recalculateDebtGoalsForAccount(
-  accountId: string,
-  trigger: string
-): Promise<void> {
-  const [account] = await db
-    .select({ balance: accounts.balance })
-    .from(accounts)
-    .where(eq(accounts.id, accountId))
-    .limit(1);
-
-  if (!account) return;
-
-  const debtGoals = await db
-    .select()
-    .from(goals)
-    .where(eq(goals.debtAccountId, accountId));
-
-  if (!debtGoals.length) return;
-
-  const newBalanceMoney = new Money(account.balance).abs();
-  const newBalance = newBalanceMoney.toNumber();
-
-  for (const goal of debtGoals) {
-    const previousBalance = new Money(goal.currentAmount).toNumber();
-    const update = buildGoalBalanceUpdate(goal, newBalance);
-
-    if (!hasBalanceUpdate(goal, update)) {
-      continue;
+    let balance: Money;
+    if (source.kind === "debt") {
+      if (goal.debtAccountId !== source.accountId) return;
+      const [account] = await tx
+        .select({ balance: accounts.balance })
+        .from(accounts)
+        .where(and(eq(accounts.id, source.accountId), eq(accounts.householdId, goal.householdId)));
+      if (!account) return;
+      balance = new Money(account.balance).abs();
+    } else {
+      // A link found before the lock may have been removed by an assignment edit.
+      const usesLinkedHoldings = goal.linkedAccountId === source.accountId && goal.progressSource === "holdings";
+      if (source.kind === "linked" && !usesLinkedHoldings) {
+        const [assignment] = await tx
+          .select({ id: goalAccountAssignments.id })
+          .from(goalAccountAssignments)
+          .where(and(
+            eq(goalAccountAssignments.goalId, goalId),
+            eq(goalAccountAssignments.accountId, source.accountId),
+            eq(goalAccountAssignments.assignmentType, "full_balance"),
+            eq(goalAccountAssignments.autoUpdate, true)
+          ));
+        if (!assignment) return;
+      }
+      const valued = await calculateAssignmentBalance(goalId, tx).catch((error: unknown) => {
+        if (isHouseholdSecurityPriceUnavailable(error)) return null;
+        throw error;
+      });
+      // A-30: an unpriced holding leaves the stored progress as it was; a zero is never stored for it.
+      if (valued === null) return { goal };
+      balance = valued;
     }
 
-    const [updatedGoal] = await db
-      .update(goals)
-      .set({
-        currentAmount: update.currentAmount,
-        status: update.status,
-        monthlyProjection: update.monthlyProjection,
-        projectedCompletionDate: update.projectedCompletionDate,
-        isCompleted: update.isCompleted,
-        completedAt: update.completedAt,
-        updatedAt: new Date(),
-      })
-      .where(eq(goals.id, goal.id))
-      .returning();
+    // NEW-15: the saved forecast counts from the household's calendar date.
+    const update = buildGoalBalanceUpdate(goal, balance, await householdToday(tx, goal.householdId));
+    if (!hasBalanceUpdate(goal, update)) return { goal };
 
+    const previousBalance = new Money(goal.currentAmount).toNumber();
+    const newBalance = balance.toNumber();
+    const [updatedGoal] = await tx.update(goals).set({ ...update, updatedAt: new Date() })
+      .where(eq(goals.id, goalId)).returning();
     await goalActivityLogService.log({
-      goalId: goal.id,
-      activityType: "balance_synced",
-      amount: null,
-      previousBalance,
-      newBalance,
-      metadata: { trigger, accountId },
-      tx: undefined,
+      goalId, activityType: "balance_synced", previousBalance, newBalance,
+      metadata: { trigger, accountId: source.accountId ?? null }, tx,
     });
+    return {
+      goal: updatedGoal,
+      milestone: {
+        before: calculatePercentComplete(goal, previousBalance),
+        after: calculatePercentComplete(goal, newBalance),
+      },
+    };
+  });
 
-    const percentBefore = calculatePercentComplete(goal, previousBalance);
-    const percentAfter = calculatePercentComplete(goal, newBalance);
-    notificationService
-      .triggerGoalMilestone(
-        goal.householdId,
-        updatedGoal.id,
-        updatedGoal.name,
-        percentBefore,
-        percentAfter
-      )
+  if (result?.milestone) {
+    const { goal, milestone } = result;
+    notificationService.triggerGoalMilestone(goal.householdId, goal.id, goal.name, milestone.before, milestone.after)
       .catch(() => undefined);
+  }
+  return result?.goal;
+}
+
+export function recalculateGoalBalance(goalId: string, trigger: string, accountId?: string) {
+  return syncGoal(goalId, trigger, { kind: "assignments", accountId });
+}
+
+export async function recalculateDebtGoalsForAccount(accountId: string, trigger: string): Promise<void> {
+  const debtGoals = await db.select({ id: goals.id }).from(goals).where(eq(goals.debtAccountId, accountId));
+  for (const goal of debtGoals) {
+    await syncGoal(goal.id, trigger, { kind: "debt", accountId });
   }
 }

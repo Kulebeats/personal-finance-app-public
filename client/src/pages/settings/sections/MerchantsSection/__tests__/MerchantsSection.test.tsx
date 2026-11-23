@@ -92,7 +92,6 @@ const createMockState = (overrides = {}) => ({
     mergePreviewLogoSource: null,
     bulkSelection: {},
     bulkMergeTarget: "",
-    deleteConfirmText: "",
     deleteAcknowledged: false,
   },
   derived: {
@@ -141,7 +140,6 @@ const createMockState = (overrides = {}) => ({
     setMergePreviewLogoSource: vi.fn(),
     setBulkSelection: vi.fn(),
     setBulkMergeTarget: vi.fn(),
-    setDeleteConfirmText: vi.fn(),
     setDeleteAcknowledged: vi.fn(),
     openCreate: vi.fn(),
     openEdit: vi.fn(),

@@ -12,8 +12,7 @@ import {
   useCurrentYearRange,
 } from "@/hooks/use-reports";
 import { useCategories } from "@/hooks/use-settings";
-import { formatCurrency } from "@/lib/utils";
-import { toMoneyNumber } from "@/lib/money";
+import { formatCurrency, toMoneyNumber } from "@/lib/money";
 import { WidgetCard, ChartType } from "./shared/WidgetCard";
 import {
   ChartContainer,
@@ -213,7 +212,7 @@ export function SubcategoryBreakdownWidget({
                 content={
                   <ChartTooltipContent
                     nameKey="id"
-                    formatter={(value) => formatCurrency(Number(value))}
+                    formatter={(value) => formatCurrency(Number(value), breakdownData?.range.currency ?? "")}
                   />
                 }
               />
@@ -232,7 +231,7 @@ export function SubcategoryBreakdownWidget({
                     <span className="font-medium">{item.label}</span>
                   </div>
                   <div className="flex items-center gap-2 font-mono">
-                    <span>{formatCurrency(toMoneyNumber(item.value))}</span>
+                    <span>{formatCurrency(item.value)}</span>
                     <span className="text-muted-foreground">
                       ({item.percent.toFixed(1)}%)
                     </span>

@@ -34,8 +34,10 @@ export function BudgetPageHeader({
   isMobile,
 }: BudgetPageHeaderProps) {
   return (
-    <div className="flex items-center justify-between mb-8">
-      <div className="flex items-center gap-6">
+    // Both rows wrap on a phone, and every control there is at least 44 px
+    // (`max-md:min-h-11`), so the header never pushes the page sideways (UX-02).
+    <div className="flex flex-wrap items-center justify-between gap-3 mb-8">
+      <div className="flex flex-wrap items-center gap-3 md:gap-6">
         <h1 className="text-2xl font-bold text-foreground tracking-tight">
           {headerLabel}
         </h1>
@@ -43,7 +45,7 @@ export function BudgetPageHeader({
           <button
             onClick={() => setViewMode("budget")}
             className={cn(
-              "px-4 py-1 rounded-md text-sm font-medium transition-all",
+              "px-4 py-1 max-md:min-h-11 rounded-md text-sm font-medium transition-all",
               viewMode === "budget"
                 ? "bg-background dark:bg-card text-foreground shadow-sm"
                 : "text-muted-foreground hover:text-foreground"
@@ -55,7 +57,7 @@ export function BudgetPageHeader({
             <button
               onClick={() => setViewMode("forecast")}
               className={cn(
-                "px-4 py-1 rounded-md text-sm font-medium transition-all",
+                "px-4 py-1 max-md:min-h-11 rounded-md text-sm font-medium transition-all",
                 viewMode === "forecast"
                   ? "bg-background dark:bg-card text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
@@ -66,26 +68,26 @@ export function BudgetPageHeader({
           )}
         </div>
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center bg-card dark:bg-card border border-border rounded-md shadow-sm">
           <button
             onClick={() => onShiftMonth(-1)}
-            className="p-2 hover:bg-muted/50 border-r border-border"
+            className="p-2 max-md:h-11 max-md:w-11 inline-flex items-center justify-center hover:bg-muted/50 border-r border-border"
             aria-label="Previous month"
           >
-            <ArrowLeft className="w-4 h-4" />
+            <ArrowLeft className="w-4 h-4" aria-hidden="true" />
           </button>
           <button
             onClick={() => onShiftMonth(1)}
-            className="p-2 hover:bg-muted/50"
+            className="p-2 max-md:h-11 max-md:w-11 inline-flex items-center justify-center hover:bg-muted/50"
             aria-label="Next month"
           >
-            <ArrowRight className="w-4 h-4" />
+            <ArrowRight className="w-4 h-4" aria-hidden="true" />
           </button>
         </div>
         <button
           onClick={onResetToToday}
-          className="px-4 py-2 bg-card dark:bg-card border border-border rounded-md text-sm font-medium"
+          className="px-4 py-2 max-md:min-h-11 bg-card dark:bg-card border border-border rounded-md text-sm font-medium"
         >
           Today
         </button>
@@ -93,7 +95,7 @@ export function BudgetPageHeader({
           <button
             onClick={() => setTimeframe("monthly")}
             className={cn(
-              "px-3 py-1 rounded-md text-xs font-semibold uppercase transition-all",
+              "px-3 py-1 max-md:min-h-11 rounded-md text-xs font-semibold uppercase transition-all",
               timeframe === "monthly"
                 ? "bg-background dark:bg-card shadow-sm"
                 : "text-muted-foreground"
@@ -104,7 +106,7 @@ export function BudgetPageHeader({
           <button
             onClick={() => setTimeframe("yearly")}
             className={cn(
-              "px-3 py-1 rounded-md text-xs font-semibold uppercase transition-all",
+              "px-3 py-1 max-md:min-h-11 rounded-md text-xs font-semibold uppercase transition-all",
               timeframe === "yearly"
                 ? "bg-background dark:bg-card shadow-sm"
                 : "text-muted-foreground"
@@ -115,9 +117,10 @@ export function BudgetPageHeader({
         </div>
         <button
           onClick={onOpenSettings}
-          className="px-4 py-2 bg-card dark:bg-card border border-border rounded-md text-sm font-medium flex items-center gap-2"
+          data-budget-settings-opener
+          className="px-4 py-2 max-md:min-h-11 bg-card dark:bg-card border border-border rounded-md text-sm font-medium flex items-center gap-2"
         >
-          <Settings className="w-4 h-4" /> Settings
+          <Settings className="w-4 h-4" aria-hidden="true" /> Settings
         </button>
       </div>
     </div>

@@ -9,18 +9,17 @@
 import { Router, Request, Response } from "express";
 import { db } from "../db";
 import { userSessions, userLoginHistory } from "@shared/schema";
-import { eq, and, ne, desc } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import { requireAuth } from "../auth";
 import { requireStepUp } from "../middleware/requireStepUp";
 import { logger } from "../utils/logger";
-import { generalLimiter } from "../middleware/rateLimit";
 import { businessAuditService } from "../services/BusinessAuditService";
 import { randomUUID } from "crypto";
+import { withTransaction } from "../utils/withTransaction";
+import { revokeSelectedSession, revokeUserSessions } from "../services/session-revocation";
 
 const router = Router();
 
-// SEC-RATE-008: Apply rate limiting and authentication to session routes
-router.use(generalLimiter);
 router.use(requireAuth);
 
 // GET /sessions - Get active sessions
@@ -66,23 +65,24 @@ router.delete("/:id", requireStepUp("SETTINGS"), async (req: Request, res: Respo
     const userId = req.session.userId!;
     const sessionId = req.params.id;
 
-    await db
-      .delete(userSessions)
-      .where(
-        and(eq(userSessions.id, sessionId), eq(userSessions.userId, userId))
-      );
-
-    // DPA: session revocation is a security-relevant event — audit it.
-    await businessAuditService.log({
-      householdId: null, // user-level security event (auditLogs.householdId is a UUID FK; sentinel strings silently fail to insert)
-      userId,
-      action: "REVOKE_SESSION",
-      entityType: "session",
-      entityId: sessionId,
-      details: { sessionId },
-      ipAddress: businessAuditService.getIpAddress(req),
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
+      return res.status(400).json({ success: false, error: { message: "Invalid session id" } });
+    }
+    const found = await withTransaction(async (tx) => {
+      if (!await revokeSelectedSession(tx, userId, sessionId)) return false;
+      await businessAuditService.log({
+        tx,
+        householdId: null,
+        userId,
+        action: "REVOKE_SESSION",
+        entityType: "session",
+        entityId: sessionId,
+        details: { sessionId },
+        ipAddress: businessAuditService.getIpAddress(req),
+      });
+      return true;
     });
-
+    if (!found) return res.status(404).json({ success: false, error: { message: "Session not found" } });
     res.json({ success: true, message: "Session revoked" });
   } catch (error) {
     logger.error(
@@ -106,25 +106,19 @@ router.delete("/", requireStepUp("SETTINGS"), async (req: Request, res: Response
     // FIX AUTH-SESS-003: Use req.sessionID (matches session record storage) instead of passport.user
     const currentSessionToken = req.sessionID;
 
-    // Delete all sessions except current one
-    await db.delete(userSessions).where(
-      and(
-        eq(userSessions.userId, userId),
-        ne(userSessions.sessionToken, currentSessionToken)
-      )
-    );
-
-    // DPA: bulk session revocation is a security-relevant event — audit it.
-    await businessAuditService.log({
-      householdId: null, // user-level security event (auditLogs.householdId is a UUID FK; sentinel strings silently fail to insert)
-      userId,
-      action: "REVOKE_ALL_SESSIONS",
-      entityType: "session",
-      entityId: userId,
-      details: { action: "revoke_all_except_current" },
-      ipAddress: businessAuditService.getIpAddress(req),
+    await withTransaction(async (tx) => {
+      await revokeUserSessions(tx, userId, { exceptSessionId: currentSessionToken });
+      await businessAuditService.log({
+        tx,
+        householdId: null,
+        userId,
+        action: "REVOKE_ALL_SESSIONS",
+        entityType: "session",
+        entityId: userId,
+        details: { action: "revoke_all_except_current" },
+        ipAddress: businessAuditService.getIpAddress(req),
+      });
     });
-
     res.json({ success: true, message: "All other sessions revoked" });
   } catch (error) {
     logger.error(

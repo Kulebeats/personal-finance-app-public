@@ -65,6 +65,7 @@ import {
   useDeleteBudget,
   useMoveBudgetAmount,
 } from "../useBudgets";
+import { useUnavailableBudgets } from "../useUnavailableBudgets";
 
 describe("useBudgets Hook", () => {
   beforeEach(() => {
@@ -176,6 +177,26 @@ describe("useBudgetProgress Hook", () => {
     });
 
     expect(result.current.data?.[0].percentUsed).toBe(50);
+  });
+
+  // C3-10: a budget in another currency is listed apart from the rows.
+  it("keeps the budgets the server reported unavailable for the same month", async () => {
+    const hidden = { id: "budget-usd", name: "Travel", categoryId: "cat-travel", categoryGroupId: null, currency: "USD",
+      reason: { code: "BUDGET_CURRENCY_MISMATCH", message: "This budget's limit is in USD." } };
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ success: true, data: [], meta: { unavailableBudgets: [hidden, { id: 7 }] } }),
+    });
+
+    const { result } = renderHook(() => ({
+      progress: useBudgetProgress(2026, 2),
+      unavailable: useUnavailableBudgets(2026, 2),
+      otherMonth: useUnavailableBudgets(2026, 3),
+    }), { wrapper: createWrapper() });
+
+    await waitFor(() => expect(result.current.unavailable).toEqual([hidden]));
+    expect(result.current.progress.data).toEqual([]);
+    expect(result.current.otherMonth).toEqual([]);
   });
 
   it("should call correct endpoint with year and month", async () => {

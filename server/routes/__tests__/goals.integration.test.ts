@@ -16,8 +16,11 @@ const {
 } = vi.hoisted(() => ({
   mockGoalService: {
     getGoals: vi.fn(),
+    getGoalsForViewer: vi.fn(),
     getSummary: vi.fn(),
     getGoalWithProgress: vi.fn(),
+    // #235 M1: write responses re-read the redacted goal.
+    getViewerGoal: vi.fn(async (id: string): Promise<Record<string, unknown>> => ({ id, currency: "ZMW", targetAmount: "1000.00", currentAmount: null, progressAvailability: "unavailable" })),
     getGoalById: vi.fn(),
     getProjection: vi.fn(),
     getContributions: vi.fn(),
@@ -35,6 +38,7 @@ const {
     getAvailableFunds: vi.fn(),
     getAssignmentsForHousehold: vi.fn(),
     getAssignments: vi.fn(),
+    getVisibleAssignments: vi.fn(),
     assignAccount: vi.fn(),
     updateAssignment: vi.fn(),
     removeAssignment: vi.fn(),
@@ -89,6 +93,16 @@ vi.mock("../../services/BusinessAuditService", () => ({
   businessAuditService: mockBusinessAuditService,
 }));
 
+// The controllers show each goal as the member may see it; these goals are
+// all visible, so the viewer mapping passes them through.
+vi.mock("../../services/goal/GoalViewerProgress", () => ({
+  toViewerGoals: vi.fn(async (_actor: unknown, goalList: unknown[]) => goalList),
+  toViewerGoal: vi.fn((goal: unknown) => goal),
+  readGoalSourceVisibility: vi.fn(async (_actor: unknown, ids: string[]) => new Map(ids.map((id) => [
+    id, { progressVisible: true, linkedAccountVisible: true, debtAccountVisible: true },
+  ]))),
+}));
+
 vi.mock("../../repositories/HouseholdRepository", () => ({
   householdRepository: mockHouseholdRepository,
 }));
@@ -130,7 +144,7 @@ describe("Goals Integration", () => {
 
   describe("GET /api/goals", () => {
     it("should list goals with money mapping", async () => {
-      mockGoalService.getGoals.mockResolvedValue([
+      mockGoalService.getGoalsForViewer.mockResolvedValue([
         {
           id: "goal-1",
           name: "Emergency Fund",
@@ -152,8 +166,8 @@ describe("Goals Integration", () => {
         amount: "500.00",
         currency: "ZMW",
       });
-      expect(mockGoalService.getGoals).toHaveBeenCalledWith(
-        "house-123",
+      expect(mockGoalService.getGoalsForViewer).toHaveBeenCalledWith(
+        { householdId: "house-123", userId: "user-123", role: "owner" },
         expect.any(Object)
       );
     });
@@ -193,7 +207,7 @@ describe("Goals Integration", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(mockGoalService.getSummary).toHaveBeenCalledWith("house-123");
+      expect(mockGoalService.getSummary).toHaveBeenCalledWith({ householdId: "house-123", userId: "user-123", role: "owner" });
     });
   });
 
@@ -219,8 +233,7 @@ describe("Goals Integration", () => {
       });
       expect(mockGoalService.getGoalWithProgress).toHaveBeenCalledWith(
         goalId,
-        "house-123",
-        "user-123"
+        { householdId: "house-123", userId: "user-123", role: "owner" }
       );
     });
   });
@@ -240,8 +253,7 @@ describe("Goals Integration", () => {
       expect(res.body.success).toBe(true);
       expect(mockGoalService.getProjection).toHaveBeenCalledWith(
         goalId,
-        "house-123",
-        "user-123"
+        { householdId: "house-123", userId: "user-123", role: "owner" }
       );
     });
   });
@@ -260,7 +272,7 @@ describe("Goals Integration", () => {
       expect(res.body.success).toBe(true);
       expect(mockGoalService.getContributions).toHaveBeenCalledWith(
         goalId,
-        "house-123"
+        { householdId: "house-123", userId: "user-123", role: "owner" }
       );
     });
   });
@@ -295,20 +307,18 @@ describe("Goals Integration", () => {
           currency: "ZMW",
         }),
         "house-123",
-        "user-123"
+        "user-123",
+        // A-70: the creating member, so the goal's account is checked against their custody.
+        expect.objectContaining({ householdId: "house-123", userId: "user-123" }),
+        // FIN-13: the service writes the CREATE row inside the goal's transaction.
+        { ipAddress: "127.0.0.1" },
       );
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "goal",
-          entityId: "goal-1",
-          householdId: "house-123",
-        })
-      );
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
   });
 
   describe("POST /api/goals/:id/contribute", () => {
-    it("should add a contribution and log audit update", async () => {
+    it("should add a contribution, passing the audit context to the service", async () => {
       mockGoalService.addContribution.mockResolvedValue({
         goal: {
           id: goalId,
@@ -338,20 +348,15 @@ describe("Goals Integration", () => {
         "house-123",
         "user-123",
         "20.00",
-        expect.objectContaining({ date: "2026-01-20" })
+        expect.objectContaining({ date: "2026-01-20", currency: "ZMW", confirmOverfund: false })
       );
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "goal",
-          entityId: goalId,
-          metadata: { operation: "addContribution" },
-        })
-      );
+      // R10.3: the audit row is written inside the service's transaction.
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
   });
 
   describe("PUT /api/goals/:id", () => {
-    it("should update a goal and log audit event", async () => {
+    it("passes the goal update and audit context to the writer", async () => {
       mockGoalService.getGoalById.mockResolvedValue({
         id: "goal-1",
         name: "Emergency Fund",
@@ -388,19 +393,16 @@ describe("Goals Integration", () => {
           currency: "ZMW",
         }),
         "house-123",
-        "user-123"
+        "user-123",
+        expect.objectContaining({ householdId: "house-123", userId: "user-123" }),
+        { ipAddress: "127.0.0.1" },
       );
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "goal",
-          entityId: "goal-1",
-        })
-      );
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
   });
 
   describe("POST /api/goals/:id/complete", () => {
-    it("should complete a goal and log audit update", async () => {
+    it("should complete a goal, passing the audit context to the service", async () => {
       mockGoalService.completeGoal.mockResolvedValue({
         id: goalId,
         name: "Emergency Fund",
@@ -417,15 +419,12 @@ describe("Goals Integration", () => {
       expect(mockGoalService.completeGoal).toHaveBeenCalledWith(
         goalId,
         "house-123",
-        "user-123"
+        "user-123",
+        expect.objectContaining({ householdId: "house-123", userId: "user-123" }),
+        expect.objectContaining({ ipAddress: expect.anything() }),
       );
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "goal",
-          entityId: goalId,
-          metadata: { operation: "completeGoal" },
-        })
-      );
+      // The audit row is written by the service in the completion's transaction.
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
   });
 
@@ -446,15 +445,11 @@ describe("Goals Integration", () => {
         goalId,
         "house-123",
         "user-123",
-        true
+        true,
+        // FIN-13: the service writes the UPDATE row inside the archive's transaction.
+        { ipAddress: "127.0.0.1" },
       );
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "goal",
-          entityId: goalId,
-          metadata: { operation: "archiveGoal" },
-        })
-      );
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
   });
 
@@ -475,15 +470,11 @@ describe("Goals Integration", () => {
         goalId,
         "house-123",
         "user-123",
-        false
+        false,
+        // FIN-13: the service writes the UPDATE row inside the unarchive's transaction.
+        { ipAddress: "127.0.0.1" },
       );
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "goal",
-          entityId: goalId,
-          metadata: { operation: "unarchiveGoal" },
-        })
-      );
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
   });
 
@@ -501,16 +492,13 @@ describe("Goals Integration", () => {
       const res = await request(app).delete(`/api/goals/${goalId}`);
 
       expect(res.status).toBe(200);
+      // FIN-13: the service locks, deletes and writes the DELETE row in one transaction.
       expect(mockGoalService.deleteGoal).toHaveBeenCalledWith(
         goalId,
-        "house-123"
+        "house-123",
+        { userId: "user-123", ipAddress: "127.0.0.1" },
       );
-      expect(mockBusinessAuditService.logDelete).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "goal",
-          entityId: goalId,
-        })
-      );
+      expect(mockBusinessAuditService.logDelete).not.toHaveBeenCalled();
     });
   });
 
@@ -559,7 +547,7 @@ describe("Goals Integration", () => {
     });
 
     it("should list assignments for a goal", async () => {
-      mockGoalAccountAssignmentService.getAssignments.mockResolvedValue([
+      mockGoalAccountAssignmentService.getVisibleAssignments.mockResolvedValue([
         {
           id: "assign-1",
           accountId,
@@ -573,10 +561,9 @@ describe("Goals Integration", () => {
       const res = await request(app).get(`/api/goals/${goalId}/assignments`);
 
       expect(res.status).toBe(200);
-      expect(mockGoalAccountAssignmentService.getAssignments).toHaveBeenCalledWith(
+      expect(mockGoalAccountAssignmentService.getVisibleAssignments).toHaveBeenCalledWith(
         goalId,
-        "house-123",
-        "user-123"
+        { householdId: "house-123", userId: "user-123", role: "owner" }
       );
     });
 
@@ -613,15 +600,11 @@ describe("Goals Integration", () => {
         expect.objectContaining({
           accountId,
           assignmentType: "full_balance",
-        })
+        }),
+        // FIN-13: the service writes the UPDATE row inside the assignment's transaction.
+        { ipAddress: "127.0.0.1" },
       );
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "goal",
-          entityId: goalId,
-          metadata: { operation: "assignAccount" },
-        })
-      );
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
 
     it("should update an assignment and log audit update", async () => {
@@ -666,15 +649,11 @@ describe("Goals Integration", () => {
         "user-123",
         expect.objectContaining({
           assignmentType: "partial_balance",
-        })
+        }),
+        // FIN-13: the service writes the UPDATE row inside the update's transaction.
+        { ipAddress: "127.0.0.1" },
       );
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "goal",
-          entityId: goalId,
-          metadata: { operation: "updateAssignment", accountId },
-        })
-      );
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
 
     it("should remove an assignment and log audit update", async () => {
@@ -700,22 +679,19 @@ describe("Goals Integration", () => {
         goalId,
         accountId,
         "house-123",
-        "user-123"
+        "user-123",
+        // FIN-13: the service writes the UPDATE row inside the removal's transaction.
+        { ipAddress: "127.0.0.1" },
       );
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "goal",
-          entityId: goalId,
-          metadata: { operation: "removeAssignment", accountId },
-        })
-      );
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
   });
 
   describe("Transfers", () => {
     it("should list household transfers with money mapping", async () => {
       mockGoalTransferService.getTransfers.mockResolvedValue([
-        { id: "transfer-1", amount: "25.00" },
+        { id: "transfer-1", amount: "25.00", amountVisible: true },
+        { id: "transfer-2", amount: "30.00", amountVisible: false },
       ]);
 
       const res = await request(app).get("/api/goals/transfers");
@@ -725,11 +701,14 @@ describe("Goals Integration", () => {
         amount: "25.00",
         currency: "ZMW",
       });
+      // A transfer touching a goal whose progress the caller cannot see keeps no amount.
+      expect(res.body.data[1].amount).toBeNull();
+      expect(res.body.data[1]).not.toHaveProperty("amountVisible");
     });
 
     it("should list goal transfers with money mapping", async () => {
       mockGoalTransferService.getTransfersForGoal.mockResolvedValue([
-        { id: "transfer-1", amount: "15.00" },
+        { id: "transfer-1", amount: "15.00", amountVisible: true },
       ]);
       mockGoalService.getGoalById.mockResolvedValue({
         id: goalId,
@@ -745,11 +724,12 @@ describe("Goals Integration", () => {
       });
     });
 
-    it("should create a transfer and log audit create", async () => {
+    it("should create a transfer, leaving its audit row to the service transaction (A-23)", async () => {
       mockGoalTransferService.transfer.mockResolvedValue({
         transfer: { id: "transfer-1", amount: "10.00" },
         fromGoal: { id: fromGoalId, currency: "ZMW" },
         toGoal: { id: toGoalId, currency: "ZMW" },
+        visibility: new Map(),
       });
 
       const res = await request(app)
@@ -766,12 +746,12 @@ describe("Goals Integration", () => {
         amount: "10.00",
         currency: "ZMW",
       });
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "goal_transfer",
-          entityId: "transfer-1",
-        })
+      expect(mockGoalTransferService.transfer).toHaveBeenCalledWith(
+        expect.any(String), expect.any(String),
+        expect.objectContaining({ amount: { amount: "10.00", currency: "ZMW" } }),
+        expect.anything(), "127.0.0.1",
       );
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
   });
 
@@ -802,10 +782,14 @@ describe("Goals Integration", () => {
       });
       expect(
         mockTransactionGoalLinkService.getLinkedTransactions
-      ).toHaveBeenCalledWith(goalId, "house-123");
+      ).toHaveBeenCalledWith(goalId, {
+        householdId: "house-123",
+        userId: "user-123",
+        role: "owner",
+      });
     });
 
-    it("should link a transaction and log audit event", async () => {
+    it("should link a transaction, passing the audit context to the service", async () => {
       mockTransactionGoalLinkService.linkTransaction.mockResolvedValue({
         link: { id: "link-1", amount: "10.00" },
         goal: {
@@ -829,16 +813,13 @@ describe("Goals Integration", () => {
         amount: "10.00",
         currency: "ZMW",
       });
-      expect(mockBusinessAuditService.log).toHaveBeenCalledWith(
-        expect.objectContaining({
-          action: "LINK",
-          entityType: "goal",
-          entityId: goalId,
-        })
+      expect(mockTransactionGoalLinkService.linkTransaction).toHaveBeenCalledWith(
+        goalId, "house-123", "user-123", expect.objectContaining({ transactionId: txId }),
+        undefined, expect.objectContaining({ userId: "user-123" }),
       );
     });
 
-    it("should unlink a transaction and log audit event", async () => {
+    it("should unlink a transaction, passing the audit context to the service", async () => {
       mockTransactionGoalLinkService.unlinkTransaction.mockResolvedValue(
         undefined
       );
@@ -851,15 +832,8 @@ describe("Goals Integration", () => {
       expect(mockTransactionGoalLinkService.unlinkTransaction).toHaveBeenCalledWith(
         goalId,
         txId,
-        "house-123",
-        "user-123"
-      );
-      expect(mockBusinessAuditService.log).toHaveBeenCalledWith(
-        expect.objectContaining({
-          action: "UNLINK",
-          entityType: "goal",
-          entityId: goalId,
-        })
+        { householdId: "house-123", userId: "user-123", role: "owner" },
+        expect.objectContaining({ userId: "user-123" }),
       );
     });
   });
@@ -884,7 +858,7 @@ describe("Goals Integration", () => {
       expect(res.body.success).toBe(true);
       expect(mockGoalService.calculatePayoff).toHaveBeenCalledWith(
         goalId,
-        "house-123",
+        { householdId: "house-123", userId: "user-123", role: "owner" },
         expect.objectContaining({ monthlyPayment: 100, oneTimePayment: 10 })
       );
     });
@@ -937,7 +911,7 @@ describe("Goals Integration", () => {
       expect(res.body.success).toBe(true);
       expect(mockGoalService.getPayoffScenarios).toHaveBeenCalledWith(
         goalId,
-        "house-123"
+        { householdId: "house-123", userId: "user-123", role: "owner" }
       );
     });
   });
@@ -980,6 +954,7 @@ describe("Goals Integration", () => {
       expect(res.status).toBe(200);
       expect(mockGoalActivityLogService.getActivity).toHaveBeenCalledWith(
         goalId,
+        { householdId: "house-123", userId: "user-123", role: "owner" },
         { limit: 5, offset: 0 }
       );
     });

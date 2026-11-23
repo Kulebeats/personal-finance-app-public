@@ -6,14 +6,15 @@
  * @module hooks/investments/usePortfolio
  */
 
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "../../lib/queryClient";
-import { useToast } from "@/hooks/use-toast";
 import { investmentKeys } from "./keys";
 import type { PortfolioSummary, AttributionResult } from "./types";
+import { valuationQueryPolicy } from "./valuationQueryPolicy";
 
 export function usePortfolioSummary(baseCurrency?: string) {
   return useQuery({
+    ...valuationQueryPolicy,
     queryKey: investmentKeys.portfolioSummary(baseCurrency),
     queryFn: async () => {
       const params = new URLSearchParams();
@@ -25,7 +26,8 @@ export function usePortfolioSummary(baseCurrency?: string) {
       const response = await apiRequest("GET", url);
       return response.json();
     },
-    select: (data) => data.data as PortfolioSummary,
+    select: (data: { data: PortfolioSummary; meta?: { baseCurrency?: string } }) =>
+      ({ ...data.data, baseCurrency: data.meta?.baseCurrency ?? data.data.baseCurrency }),
   });
 }
 
@@ -59,9 +61,24 @@ export function useInvestmentPerformance(timeframe: string = "1M") {
   });
 }
 
-export function useTaxSummary(year: number) {
+/** The household's current calendar year (NEW-22): the tax report's default
+ * and latest year, so it never follows the browser's clock or zone. */
+export function useTaxYear() {
   return useQuery({
-    queryKey: investmentKeys.taxSummary(year),
+    queryKey: investmentKeys.taxYear(),
+    queryFn: async () => {
+      const response = await apiRequest("GET", "/api/investments/tax/year");
+      const body = await response.json() as { year?: unknown };
+      if (typeof body.year !== "number" || !Number.isInteger(body.year)) throw new Error("Tax year unavailable");
+      return body.year;
+    },
+  });
+}
+
+export function useTaxSummary(year: number | undefined) {
+  return useQuery({
+    queryKey: investmentKeys.taxSummary(year ?? 0),
+    enabled: year !== undefined,
     queryFn: async () => {
       const response = await apiRequest(
         "GET",
@@ -79,35 +96,6 @@ export function useTaxSummary(year: number) {
         netIncome: string;
         currency: string;
       }>;
-    },
-  });
-}
-
-export function useRefreshMarketData() {
-  const queryClient = useQueryClient();
-  const { toast } = useToast();
-
-  return useMutation({
-    mutationFn: async () => {
-      const response = await apiRequest(
-        "POST",
-        "/api/investments/market/refresh"
-      );
-      return response.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: investmentKeys.all });
-      toast({
-        title: "Market Data Refreshed",
-        description: "Latest security prices and FX rates have been updated.",
-      });
-    },
-    onError: (error: Error) => {
-      toast({
-        title: "Refresh Failed",
-        description: error.message || "Failed to update market data",
-        variant: "destructive",
-      });
     },
   });
 }

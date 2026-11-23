@@ -7,6 +7,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import express, { Request, Response, NextFunction } from "express";
 import request from "supertest";
+import { NotFoundError } from "../../../core/errors";
+import { Money } from "../../../core/money";
 import {
   createSecuritySchema,
   updateSecurityPriceSchema,
@@ -16,6 +18,8 @@ import {
   createHoldingSchema,
   createInvestmentTransactionSchema,
 } from "../investments.validation";
+
+const openingDeclaration = { operationId: "77777777-7777-4777-8777-777777777777", expectedCurrency: "ZMW" };
 
 describe("Investment Validation Schemas", () => {
   describe("createSecuritySchema", () => {
@@ -55,7 +59,7 @@ describe("Investment Validation Schemas", () => {
       expect(result.success).toBe(false);
     });
 
-    it("accepts optional fields", () => {
+    it("accepts optional instrument metadata", () => {
       const input = {
         symbol: "TEST",
         name: "Test Security",
@@ -64,7 +68,6 @@ describe("Investment Validation Schemas", () => {
         exchange: "luse",
         sector: "Financial",
         isOffshore: true,
-        currentPrice: "100.50",
       };
 
       const result = createSecuritySchema.safeParse(input);
@@ -72,6 +75,25 @@ describe("Investment Validation Schemas", () => {
       if (result.success) {
         expect(result.data.isOffshore).toBe(true);
         expect(result.data.sector).toBe("Financial");
+      }
+    });
+
+    it.each([
+      { label: "string", currentPrice: "100.50" },
+      { label: "number", currentPrice: 100.5 },
+      { label: "null", currentPrice: null },
+    ])("rejects a $label current price during metadata creation", ({ currentPrice }) => {
+      const result = createSecuritySchema.safeParse({
+        symbol: "TEST",
+        name: "Test Security",
+        type: "stock",
+        currentPrice,
+      });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues).toEqual(expect.arrayContaining([
+          expect.objectContaining({ path: ["currentPrice"] }),
+        ]));
       }
     });
 
@@ -111,55 +133,91 @@ describe("Investment Validation Schemas", () => {
   });
 
   describe("updateSecurityPriceSchema", () => {
-    it("validates valid price update", () => {
-      const input = {
-        price: "150.00",
-        date: "2026-01-21",
-      };
-
-      const result = updateSecurityPriceSchema.safeParse(input);
-      expect(result.success).toBe(true);
+    const window = { date: "2026-01-21", validThrough: "2026-01-31" };
+    it.each(["0001-01-01", "2024-02-29", "9999-12-31"])("preserves the supplied effective date %s", date => {
+      expect(updateSecurityPriceSchema.parse({ price: "150.00", date, validThrough: date })).toEqual({ price: "150.00", date, validThrough: date });
     });
 
-    it("accepts price without date", () => {
-      const input = {
-        price: "150.00",
-      };
-
-      const result = updateSecurityPriceSchema.safeParse(input);
-      expect(result.success).toBe(true);
+    it.each([
+      { price: "150.00", validThrough: "2026-01-31" },
+      { price: "150.00", date: "2026-01-21" },
+    ])("requires both explicit dates in %j", input => {
+      expect(updateSecurityPriceSchema.safeParse(input).success).toBe(false);
     });
 
-    it("rejects invalid date format", () => {
-      const input = {
-        price: "150.00",
-        date: "01-21-2026", // Wrong format
-      };
+    it.each(["0000-01-01", "2026-04-31", "2026-01-20"])(
+      "rejects an invalid or earlier end date %s",
+      validThrough => {
+        expect(updateSecurityPriceSchema.safeParse({ ...window, validThrough, price: "1.00" }).success).toBe(false);
+      },
+    );
 
-      const result = updateSecurityPriceSchema.safeParse(input);
-      expect(result.success).toBe(false);
+    it.each(["01-21-2026", "0000-01-01", "2025-02-29", "2026-04-31", "2026-01-21\n"])(
+      "rejects an invalid effective date %j",
+      date => {
+        const result = updateSecurityPriceSchema.safeParse({ price: "150.00", date, validThrough: "9999-12-31" });
+        expect(result).toMatchObject({
+          success: false,
+          error: { issues: expect.arrayContaining([expect.objectContaining({ path: ["date"] })]) },
+        });
+      },
+    );
+
+    it.each(["99999999999.9999", "0.0001", "12.3400"])(
+      "keeps the exact representable string price %s",
+      price => {
+        expect(updateSecurityPriceSchema.parse({ ...window, price }).price).toBe(price);
+      },
+    );
+
+    it.each([
+      { price: "1.23000", expected: "1.23" },
+      { price: "1e-4", expected: "0.0001" },
+      { price: "999999999999999e-4", expected: "99999999999.9999" },
+    ])("converts $price to an exact storage decimal", ({ price, expected }) => {
+      expect(updateSecurityPriceSchema.parse({ ...window, price }).price).toBe(expected);
     });
 
-    it("accepts numeric price", () => {
-      const input = {
-        price: 150.00,
-      };
+    it.each([
+      { price: 150, expected: "150" },
+      { price: 0.0001, expected: "0.0001" },
+      { price: 99999999999.9999, expected: "99999999999.9999" },
+    ])("converts the numeric price $price to its decimal string", ({ price, expected }) => {
+      expect(updateSecurityPriceSchema.parse({ ...window, price }).price).toBe(expected);
+    });
 
-      const result = updateSecurityPriceSchema.safeParse(input);
-      expect(result.success).toBe(true);
-      if (result.success) {
-        // Price should be converted to string
-        expect(result.data.price).toBe("150");
-      }
+    it.each([
+      "100000000000", "-100000000000", "99999999999.99995", "0.00001", "12.34567",
+      "", " 1.25", "1.25\n", "1,25", "0x10", "1_000", "NaN", "Infinity", "-Infinity",
+      "1e11", "1e-5", "1e-99999999999999999999", "1e+", 100000000000, 0.00001, 0.1 + 0.2,
+    ])("rejects unsupported price %j", price => {
+      const result = updateSecurityPriceSchema.safeParse({ ...window, price });
+      expect(result).toMatchObject({ success: false, error: { issues: [{ path: ["price"] }] } });
+    });
+
+    it.each(["0", "0.0000", "-0", "-0.0001", "-1e-4", "-99999999999.9999", 0, -0, -12.3456])(
+      "rejects the non-positive manual price %j", price => {
+        const result = updateSecurityPriceSchema.safeParse({ ...window, price });
+        expect(result).toMatchObject({ success: false, error: { issues: [{ path: ["price"],
+          message: "Security price must be greater than zero" }] } });
+      },
+    );
+
+    it.each([NaN, Infinity, -Infinity])("rejects nonfinite number %s", price => {
+      const result = updateSecurityPriceSchema.safeParse({ ...window, price });
+      expect(result).toMatchObject({ success: false, error: { issues: [{ path: ["price"] }] } });
     });
   });
 
   describe("createFxRateSchema", () => {
+    const window = { date: "2026-01-21", validThrough: "2026-01-31" };
+
     it("validates valid FX rate input", () => {
       const input = {
         fromCurrency: "USD",
         toCurrency: "ZMW",
         rate: "27.50",
+        ...window,
       };
 
       const result = createFxRateSchema.safeParse(input);
@@ -171,6 +229,7 @@ describe("Investment Validation Schemas", () => {
         fromCurrency: "US", // Too short
         toCurrency: "ZMW",
         rate: "27.50",
+        ...window,
       };
 
       const result = createFxRateSchema.safeParse(input);
@@ -182,37 +241,33 @@ describe("Investment Validation Schemas", () => {
         fromCurrency: "USDD", // Too long
         toCurrency: "ZMW",
         rate: "27.50",
+        ...window,
       };
 
       const result = createFxRateSchema.safeParse(input);
       expect(result.success).toBe(false);
     });
 
-    it("accepts optional date and source", () => {
-      const input = {
-        fromCurrency: "EUR",
-        toCurrency: "ZMW",
-        rate: "29.50",
-        date: "2026-01-21",
-        source: "bank",
-      };
-
-      const result = createFxRateSchema.safeParse(input);
-      expect(result.success).toBe(true);
+    it("refuses a caller-chosen source label (R12: a household rate is always manual)", () => {
+      const result = createFxRateSchema.safeParse({
+        fromCurrency: "EUR", toCurrency: "ZMW", rate: "29.50", ...window, source: "bank",
+      });
+      expect(result.success).toBe(false);
     });
 
-    it("defaults source to manual", () => {
-      const input = {
-        fromCurrency: "USD",
-        toCurrency: "ZMW",
-        rate: "27.50",
-      };
+    it("requires both validity dates, in order", () => {
+      const base = { fromCurrency: "USD", toCurrency: "ZMW", rate: "27.50" };
+      expect(createFxRateSchema.safeParse(base).success).toBe(false);
+      expect(createFxRateSchema.safeParse({ ...base, date: "2026-01-21" }).success).toBe(false);
+      expect(createFxRateSchema.safeParse({ ...base, date: "2026-01-21", validThrough: "2026-01-20" }).success).toBe(false);
+    });
 
-      const result = createFxRateSchema.safeParse(input);
-      expect(result.success).toBe(true);
-      if (result.success) {
-        expect(result.data.source).toBe("manual");
-      }
+    it.each(["0", "0.00", "-1", "1.123456789", "abc", "100000000000"])("refuses the rate %s", rate => {
+      expect(createFxRateSchema.safeParse({ fromCurrency: "USD", toCurrency: "ZMW", rate, ...window }).success).toBe(false);
+    });
+
+    it("refuses a pair of the same currency", () => {
+      expect(createFxRateSchema.safeParse({ fromCurrency: "ZMW", toCurrency: "ZMW", rate: "1", ...window }).success).toBe(false);
     });
   });
 
@@ -284,7 +339,7 @@ describe("Investment Validation Schemas", () => {
         acquiredDate: "2025-02-30", // Invalid date
       };
 
-      const result = createHoldingSchema.safeParse(input);
+      const result = createHoldingSchema.safeParse({ ...openingDeclaration, ...input });
       expect(result.success).toBe(false);
       if (!result.success) {
         expect(result.error.errors[0].message).toContain("date does not exist");
@@ -300,7 +355,7 @@ describe("Investment Validation Schemas", () => {
         acquiredDate: "2025-13-01", // Invalid month
       };
 
-      const result = createHoldingSchema.safeParse(input);
+      const result = createHoldingSchema.safeParse({ ...openingDeclaration, ...input });
       expect(result.success).toBe(false);
     });
 
@@ -313,7 +368,7 @@ describe("Investment Validation Schemas", () => {
         acquiredDate: "2025-02-28",
       };
 
-      const result = createHoldingSchema.safeParse(input);
+      const result = createHoldingSchema.safeParse({ ...openingDeclaration, ...input });
       expect(result.success).toBe(true);
     });
 
@@ -326,7 +381,7 @@ describe("Investment Validation Schemas", () => {
         acquiredDate: "2024-02-29", // 2024 is a leap year
       };
 
-      const result = createHoldingSchema.safeParse(input);
+      const result = createHoldingSchema.safeParse({ ...openingDeclaration, ...input });
       expect(result.success).toBe(true);
     });
 
@@ -339,7 +394,7 @@ describe("Investment Validation Schemas", () => {
         acquiredDate: "2025-02-29", // 2025 is NOT a leap year
       };
 
-      const result = createHoldingSchema.safeParse(input);
+      const result = createHoldingSchema.safeParse({ ...openingDeclaration, ...input });
       expect(result.success).toBe(false);
     });
   });
@@ -403,7 +458,7 @@ describe("Investment Validation Schemas", () => {
       expect(result.success).toBe(false);
     });
 
-    it("defaults currency to ZMW", () => {
+    it("leaves omitted currency unresolved until the writer reads the investment source", () => {
       const input = {
         accountId: "11111111-1111-1111-1111-111111111111",
         type: "fee", // H2 FIX: Use fee type which doesn't require holdingId/quantity/price
@@ -414,7 +469,7 @@ describe("Investment Validation Schemas", () => {
       const result = createInvestmentTransactionSchema.safeParse(input);
       expect(result.success).toBe(true);
       if (result.success) {
-        expect(result.data.currency).toBe("ZMW");
+        expect(result.data.currency).toBeUndefined();
       }
     });
 
@@ -498,6 +553,7 @@ const TEST_ACCOUNT_ID = "33333333-3333-3333-3333-333333333333";
 const TEST_SECURITY_ID = "44444444-4444-4444-4444-444444444444";
 const TEST_HOLDING_ID = "55555555-5555-5555-5555-555555555555";
 const TEST_TRANSACTION_ID = "66666666-6666-6666-6666-666666666666";
+const TEST_SESSION_ID = "synthetic-investments-http-session";
 
 // Hoist mocks before imports
 const mockInvestmentService = vi.hoisted(() => ({
@@ -507,6 +563,7 @@ const mockInvestmentService = vi.hoisted(() => ({
   createSecurity: vi.fn(),
   updateSecurityPrice: vi.fn(),
   getHoldings: vi.fn(),
+  getVisibleHoldingById: vi.fn(),
   getHoldingById: vi.fn(),
   createHolding: vi.fn(),
   updateHolding: vi.fn(),
@@ -523,6 +580,12 @@ const mockPortfolioValuationService = vi.hoisted(() => ({
   getTBillsValue: vi.fn(),
   getPensionValue: vi.fn(),
 }));
+
+// Controller transport tests isolate the read boundary; the signed real-DB
+// custody suite verifies its actual authority and captured-source behavior.
+const mockPortfolioRead = vi.hoisted(() => vi.fn(async (
+  _caller: unknown, _session: unknown, calculate: (context: undefined) => Promise<unknown>, _includeAlternatives = true,
+) => calculate(undefined)));
 
 const mockPerformanceService = vi.hoisted(() => ({
   gethistory: vi.fn(),
@@ -547,6 +610,8 @@ vi.mock("../investments.service", () => ({
 vi.mock("../../../services/PortfolioValuationService", () => ({
   portfolioValuationService: mockPortfolioValuationService,
 }));
+
+vi.mock("../investmentPortfolioRead", () => ({ valueVisiblePortfolio: mockPortfolioRead }));
 
 vi.mock("../../../services/InvestmentPerformanceService", () => ({
   investmentPerformanceService: mockPerformanceService,
@@ -576,14 +641,15 @@ vi.mock("../../../middleware/validateEntity", () => ({
 
 import { investmentsController } from "../investments.controller";
 
-function createTestApp() {
+function createTestApp(signed = true) {
   const app = express();
   app.use(express.json());
 
   // Mock auth middleware
   app.use((req, _res, next) => {
-    req.user = { id: TEST_USER_ID, email: "test@example.com" } as unknown as import("@shared/schema").User;
-    req.session = { userId: TEST_USER_ID } as any;
+    req.user = { id: TEST_USER_ID, email: "test@example.com", securityGeneration: 0 } as unknown as import("@shared/schema").User;
+    req.session = { userId: signed ? TEST_USER_ID : undefined, securityGeneration: 0 } as any;
+    req.sessionID = TEST_SESSION_ID;
     req.householdContext = {
       householdId: TEST_HOUSEHOLD_ID,
       userId: TEST_USER_ID,
@@ -674,7 +740,11 @@ describe("Investments HTTP API Integration Tests", () => {
 
       expect(response.body.success).toBe(true);
       expect(response.body.data).toHaveLength(2);
-      expect(mockInvestmentService.listSecurities).toHaveBeenCalled();
+      expect(mockInvestmentService.listSecurities).toHaveBeenCalledWith(
+        {},
+        { householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID, role: "owner" },
+        { snapshot: expect.objectContaining({ id: TEST_USER_ID }), sessionId: TEST_SESSION_ID, generation: 0 },
+      );
     });
 
     it("filters by type when provided", async () => {
@@ -686,7 +756,9 @@ describe("Investments HTTP API Integration Tests", () => {
         .expect(200);
 
       expect(mockInvestmentService.listSecurities).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "bond" })
+        expect.objectContaining({ type: "bond" }),
+        { householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID, role: "owner" },
+        { snapshot: expect.objectContaining({ id: TEST_USER_ID }), sessionId: TEST_SESSION_ID, generation: 0 },
       );
     });
   });
@@ -710,6 +782,11 @@ describe("Investments HTTP API Integration Tests", () => {
 
       expect(response.body.success).toBe(true);
       expect(response.body.data.symbol).toBe("AAPL");
+      expect(mockInvestmentService.getSecurityById).toHaveBeenCalledWith(
+        TEST_SECURITY_ID,
+        { householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID, role: "owner" },
+        { snapshot: expect.objectContaining({ id: TEST_USER_ID }), sessionId: TEST_SESSION_ID, generation: 0 },
+      );
     });
 
     it("returns 404 when security not found", async () => {
@@ -747,7 +824,20 @@ describe("Investments HTTP API Integration Tests", () => {
 
       expect(response.body.success).toBe(true);
       expect(response.body.data.symbol).toBe("ZESCO");
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalled();
+      expect(mockInvestmentService.createSecurity).toHaveBeenCalledWith(
+        { symbol: "ZESCO", name: "Zesco Ltd", type: "stock", currency: "ZMW", isOffshore: false },
+        { householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID, role: "owner" },
+        expect.any(String),
+        { snapshot: { id: TEST_USER_ID, email: "test@example.com", securityGeneration: 0 }, sessionId: TEST_SESSION_ID, generation: 0 },
+      );
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
+    });
+
+    it("requires the admitted request to carry the authenticated session before dispatching a write", async () => {
+      mockInvestmentService.createSecurity.mockResolvedValue({ id: TEST_SECURITY_ID, symbol: "SYN" });
+      await request(createTestApp(false)).post("/api/investments/securities")
+        .send({ symbol: "SYN", name: "Synthetic instrument", type: "stock", currency: "ZMW" }).expect(401);
+      expect(mockInvestmentService.createSecurity).not.toHaveBeenCalled();
     });
 
     it("returns 400 for invalid input", async () => {
@@ -761,34 +851,66 @@ describe("Investments HTTP API Integration Tests", () => {
   });
 
   describe("PUT /api/investments/securities/:id/price", () => {
-    it("updates security price successfully", async () => {
-      mockInvestmentService.getSecurityById.mockResolvedValue({
-        id: TEST_SECURITY_ID,
-        currentPrice: "100.00",
-      });
+    it("passes the chosen price window and signed identity to the household writer", async () => {
       mockInvestmentService.updateSecurityPrice.mockResolvedValue({
-        id: TEST_SECURITY_ID,
-        currentPrice: "155.00",
+        id: "override-id",
+        securityId: TEST_SECURITY_ID,
+        symbol: "SYNTHETIC",
+        price: "155.00",
+        effectiveDate: "2026-01-21",
+        validThrough: "2026-01-31",
       });
 
       const response = await request(app)
         .put(`/api/investments/securities/${TEST_SECURITY_ID}/price`)
-        .send({ price: "155.00" })
+        .send({ price: "155.00", date: "2026-01-21", validThrough: "2026-01-31" })
         .expect(200);
 
       expect(response.body.success).toBe(true);
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalled();
+      expect(mockInvestmentService.updateSecurityPrice).toHaveBeenCalledWith(
+        TEST_SECURITY_ID,
+        { price: "155.00", date: "2026-01-21", validThrough: "2026-01-31" },
+        { householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID, role: "owner" },
+        expect.any(String),
+        {
+          snapshot: expect.objectContaining({ id: TEST_USER_ID, securityGeneration: 0 }),
+          sessionId: TEST_SESSION_ID,
+          generation: 0,
+        },
+      );
+      expect(mockInvestmentService.getSecurityById).not.toHaveBeenCalled();
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
 
     it("returns 404 when security not found", async () => {
-      mockInvestmentService.getSecurityById.mockResolvedValue(null);
+      mockInvestmentService.updateSecurityPrice.mockRejectedValueOnce(new NotFoundError("Security not found"));
 
       const response = await request(app)
-        .put("/api/investments/securities/nonexistent/price")
-        .send({ price: "100.00" })
+        .put(`/api/investments/securities/${TEST_SECURITY_ID}/price`)
+        .send({ price: "100.00", date: "2026-01-21", validThrough: "2026-01-31" })
         .expect(404);
 
       expect(response.body.success).toBe(false);
+    });
+
+    it("rejects malformed identifiers before calling the writer", async () => {
+      await request(app)
+        .put("/api/investments/securities/nonexistent/price")
+        .send({ price: "100.00", date: "2026-01-21", validThrough: "2026-01-31" })
+        .expect(400);
+      expect(mockInvestmentService.updateSecurityPrice).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { price: "100.00", date: "2026-01-21" },
+      { price: "100.00", validThrough: "2026-01-31" },
+      { price: "100.00", date: "2026-01-21", validThrough: "2026-01-20" },
+    ])("rejects an incomplete or reversed price window %j", async input => {
+      await request(app)
+        .put(`/api/investments/securities/${TEST_SECURITY_ID}/price`)
+        .send(input)
+        .expect(400);
+      expect(mockInvestmentService.updateSecurityPrice).not.toHaveBeenCalled();
     });
   });
 
@@ -803,7 +925,7 @@ describe("Investments HTTP API Integration Tests", () => {
           accountId: TEST_ACCOUNT_ID,
           securityId: TEST_SECURITY_ID,
           quantity: "100",
-          currentValue: 15000,
+          currentValue: { amount: "15000.00", currency: "ZMW" },
         },
       ];
 
@@ -816,9 +938,10 @@ describe("Investments HTTP API Integration Tests", () => {
       expect(response.body.success).toBe(true);
       expect(response.body.data).toHaveLength(1);
       expect(mockInvestmentService.getHoldings).toHaveBeenCalledWith(
-        TEST_HOUSEHOLD_ID,
+        { householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID, role: "owner" },
         expect.any(Object),
-        "ZMW"
+        "ZMW",
+        { snapshot: expect.objectContaining({ id: TEST_USER_ID }), sessionId: TEST_SESSION_ID, generation: 0 },
       );
     });
   });
@@ -832,7 +955,7 @@ describe("Investments HTTP API Integration Tests", () => {
         security: { symbol: "AAPL", name: "Apple Inc" },
       };
 
-      mockInvestmentService.getHoldingById.mockResolvedValue(mockHolding);
+      mockInvestmentService.getVisibleHoldingById.mockResolvedValue(mockHolding);
 
       const response = await request(app)
         .get(`/api/investments/holdings/${TEST_HOLDING_ID}`)
@@ -840,10 +963,15 @@ describe("Investments HTTP API Integration Tests", () => {
 
       expect(response.body.success).toBe(true);
       expect(response.body.data.id).toBe(TEST_HOLDING_ID);
+      expect(mockInvestmentService.getVisibleHoldingById).toHaveBeenCalledWith(
+        TEST_HOLDING_ID,
+        { householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID, role: "owner" },
+        { snapshot: expect.objectContaining({ id: TEST_USER_ID }), sessionId: TEST_SESSION_ID, generation: 0 },
+      );
     });
 
     it("returns 404 when holding not found", async () => {
-      mockInvestmentService.getHoldingById.mockResolvedValue(null);
+      mockInvestmentService.getVisibleHoldingById.mockResolvedValue(null);
 
       const response = await request(app)
         .get("/api/investments/holdings/nonexistent")
@@ -869,6 +997,7 @@ describe("Investments HTTP API Integration Tests", () => {
       const response = await request(app)
         .post("/api/investments/holdings")
         .send({
+          ...openingDeclaration,
           accountId: TEST_ACCOUNT_ID,
           securityId: TEST_SECURITY_ID,
           quantity: "100",
@@ -879,7 +1008,12 @@ describe("Investments HTTP API Integration Tests", () => {
 
       expect(response.body.success).toBe(true);
       expect(response.body.data.id).toBe(TEST_HOLDING_ID);
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalled();
+      expect(mockInvestmentService.createHolding).toHaveBeenCalledWith(
+        expect.objectContaining({ accountId: TEST_ACCOUNT_ID, securityId: TEST_SECURITY_ID, acquiredDate: "2026-01-15" }),
+        expect.objectContaining({ householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID, role: "owner" }),
+        "127.0.0.1",
+        { snapshot: expect.objectContaining({ id: TEST_USER_ID, securityGeneration: 0 }), sessionId: TEST_SESSION_ID, generation: 0 },
+      );
     });
 
     it("returns 400 for invalid input", async () => {
@@ -893,7 +1027,7 @@ describe("Investments HTTP API Integration Tests", () => {
   });
 
   describe("PUT /api/investments/holdings/:id", () => {
-    it("updates holding successfully", async () => {
+    it("delegates the holding edit admission result with current actor and session", async () => {
       mockInvestmentService.getHoldingById.mockResolvedValue({
         id: TEST_HOLDING_ID,
         quantity: "100",
@@ -911,11 +1045,14 @@ describe("Investments HTTP API Integration Tests", () => {
         .expect(200);
 
       expect(response.body.success).toBe(true);
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalled();
+      expect(mockInvestmentService.updateHolding).toHaveBeenCalledWith(TEST_HOLDING_ID,
+        { quantity: "150", costBasis: "7500.00" }, { householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID, role: "owner" }, "127.0.0.1",
+        { snapshot: expect.objectContaining({ id: TEST_USER_ID, securityGeneration: 0 }), sessionId: TEST_SESSION_ID, generation: 0 });
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
 
     it("returns 404 when holding not found", async () => {
-      mockInvestmentService.getHoldingById.mockResolvedValue(null);
+      mockInvestmentService.updateHolding.mockRejectedValueOnce(new NotFoundError("Holding"));
 
       const response = await request(app)
         .put("/api/investments/holdings/nonexistent")
@@ -923,33 +1060,39 @@ describe("Investments HTTP API Integration Tests", () => {
         .expect(404);
 
       expect(response.body.success).toBe(false);
+      expect(mockInvestmentService.updateHolding).toHaveBeenCalledOnce();
+      expect(mockInvestmentService.getHoldingById).not.toHaveBeenCalled();
     });
   });
 
   describe("DELETE /api/investments/holdings/:id", () => {
-    it("deletes holding successfully", async () => {
-      mockInvestmentService.getHoldingById.mockResolvedValue({
-        id: TEST_HOLDING_ID,
-        accountId: TEST_ACCOUNT_ID,
-        quantity: "100",
-      });
+    it("delegates an authorized shell deletion to the atomic service", async () => {
       mockInvestmentService.deleteHolding.mockResolvedValue(true);
 
       const response = await request(app)
         .delete(`/api/investments/holdings/${TEST_HOLDING_ID}`)
         .expect(204);
 
-      expect(mockBusinessAuditService.logDelete).toHaveBeenCalled();
+      expect(mockInvestmentService.deleteHolding).toHaveBeenCalledWith(
+        TEST_HOLDING_ID,
+        expect.objectContaining({ householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID }),
+        "127.0.0.1",
+        { snapshot: expect.objectContaining({ id: TEST_USER_ID, securityGeneration: 0 }), sessionId: TEST_SESSION_ID, generation: 0 },
+      );
+      expect(mockInvestmentService.getHoldingById).not.toHaveBeenCalled();
+      expect(mockBusinessAuditService.logDelete).not.toHaveBeenCalled();
     });
 
     it("returns 404 when holding not found", async () => {
-      mockInvestmentService.getHoldingById.mockResolvedValue(null);
+      mockInvestmentService.deleteHolding.mockRejectedValueOnce(new NotFoundError("Holding"));
 
       const response = await request(app)
         .delete("/api/investments/holdings/nonexistent")
         .expect(404);
 
       expect(response.body.success).toBe(false);
+      expect(mockInvestmentService.deleteHolding).toHaveBeenCalledOnce();
+      expect(mockInvestmentService.getHoldingById).not.toHaveBeenCalled();
     });
   });
 
@@ -958,28 +1101,36 @@ describe("Investments HTTP API Integration Tests", () => {
   // ===========================================================================
   describe("GET /api/investments/portfolio", () => {
     it("returns portfolio summary", async () => {
+      // The valuation service returns Money; the response carries MoneyDto (NEW-35 class).
       mockPortfolioValuationService.getHouseholdInvestmentValue.mockResolvedValue({
-        totalValue: 50000,
-        byType: { stock: 40000, bond: 10000 },
+        totalValue: Money.from("50000"), totalCostBasis: Money.from("45000"), totalGainLoss: Money.from("5000"),
+        totalGainLossPercent: 11.11, holdingsCount: 2,
+        byType: { stock: Money.from("40000"), bond: Money.from("10000") },
       });
-      mockPortfolioValuationService.getTBillsValue.mockResolvedValue(5000);
-      mockPortfolioValuationService.getPensionValue.mockResolvedValue(15000);
+      mockPortfolioValuationService.getTBillsValue.mockResolvedValue(Money.from("5000"));
+      mockPortfolioValuationService.getPensionValue.mockResolvedValue(Money.from("15000"));
 
       const response = await request(app)
         .get("/api/investments/portfolio")
         .expect(200);
 
       expect(response.body.success).toBe(true);
-      expect(response.body.data.totalValue).toBe(50000);
-      expect(response.body.data.totalIncludingAlternatives).toBe(70000);
+      expect(response.body.data.totalValue).toEqual({ amount: "50000.00", currency: "ZMW" });
+      expect(response.body.data.byType).toEqual({ stock: { amount: "40000.00", currency: "ZMW" }, bond: { amount: "10000.00", currency: "ZMW" } });
+      expect(response.body.data.totalIncludingAlternatives).toEqual({ amount: "70000.00", currency: "ZMW" });
+      expect(mockPortfolioRead).toHaveBeenCalledWith(
+        { householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID, role: "owner" },
+        { snapshot: expect.objectContaining({ id: TEST_USER_ID, securityGeneration: 0 }), sessionId: TEST_SESSION_ID, generation: 0 },
+        expect.any(Function),
+      );
     });
   });
 
   describe("GET /api/investments/portfolio/allocation", () => {
     it("returns allocation breakdown", async () => {
       mockPortfolioValuationService.getHouseholdInvestmentValue.mockResolvedValue({
-        totalValue: 100000,
-        byType: { stock: 60000, bond: 30000, etf: 10000 },
+        totalValue: Money.from("100000"),
+        byType: { stock: Money.from("60000"), bond: Money.from("30000"), etf: Money.from("10000") },
       });
 
       const response = await request(app)
@@ -988,6 +1139,18 @@ describe("Investments HTTP API Integration Tests", () => {
 
       expect(response.body.success).toBe(true);
       expect(response.body.data).toHaveLength(3);
+      expect(response.body.data).toEqual(expect.arrayContaining([
+        { category: "stock", value: { amount: "60000.00", currency: "ZMW" }, percentage: 60 },
+        { category: "etf", value: { amount: "10000.00", currency: "ZMW" }, percentage: 10 },
+      ]));
+      expect(response.body.meta).toMatchObject({ totalValue: { amount: "100000.00", currency: "ZMW" } });
+      expect(mockPortfolioRead).toHaveBeenCalledWith(
+        { householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID, role: "owner" },
+        { snapshot: expect.objectContaining({ id: TEST_USER_ID }), sessionId: TEST_SESSION_ID, generation: 0 },
+        expect.any(Function), false,
+      );
+      expect(mockPortfolioValuationService.getTBillsValue).not.toHaveBeenCalled();
+      expect(mockPortfolioValuationService.getPensionValue).not.toHaveBeenCalled();
     });
   });
 
@@ -1055,7 +1218,13 @@ describe("Investments HTTP API Integration Tests", () => {
 
       expect(response.body.success).toBe(true);
       expect(response.body.data.type).toBe("buy");
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalled();
+      expect(mockInvestmentService.createTransaction).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "buy", amount: "5000.00" }),
+        { householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID, role: "owner" }, "127.0.0.1",
+      );
+      // The real service owns its atomic financial CREATE proof. The route
+      // cannot append a second household-wide private investment audit.
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
 
     it("returns 400 for invalid transaction type", async () => {
@@ -1105,18 +1274,20 @@ describe("Investments HTTP API Integration Tests", () => {
 
       mockInvestmentService.createFxRate.mockResolvedValue(newRate);
 
+      const body = { fromCurrency: "EUR", toCurrency: "ZMW", rate: "29.50", date: "2026-01-21", validThrough: "2026-01-31" };
       const response = await request(app)
         .post("/api/investments/fx-rates")
-        .send({
-          fromCurrency: "EUR",
-          toCurrency: "ZMW",
-          rate: "29.50",
-        })
+        .send(body)
         .expect(201);
 
       expect(response.body.success).toBe(true);
       expect(response.body.data.fromCurrency).toBe("EUR");
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalled();
+      // The household writer audits inside its own transaction (real-DB proof in
+      // completion-r12.household-fx-rates); the controller passes the caller through.
+      const [input, caller, , session] = mockInvestmentService.createFxRate.mock.calls[0];
+      expect(input).toEqual(body);
+      expect(caller).toEqual({ householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID, role: "owner" });
+      expect(session).toEqual({ snapshot: expect.objectContaining({ id: TEST_USER_ID }), sessionId: TEST_SESSION_ID, generation: 0 });
     });
 
     it("returns 400 for invalid currency code", async () => {
@@ -1126,10 +1297,13 @@ describe("Investments HTTP API Integration Tests", () => {
           fromCurrency: "INVALID", // Too long
           toCurrency: "ZMW",
           rate: "27.50",
+          date: "2026-01-21",
+          validThrough: "2026-01-31",
         })
         .expect(400);
 
       expect(response.body.success).toBe(false);
+      expect(mockInvestmentService.createFxRate).not.toHaveBeenCalled();
     });
   });
 
@@ -1156,7 +1330,7 @@ describe("Investments HTTP API Integration Tests", () => {
   // Audit Logging Tests
   // ===========================================================================
   describe("Audit Logging", () => {
-    it("logs create action for new holding", async () => {
+    it("delegates opening with the actor and IP for atomic financial audit", async () => {
       mockInvestmentService.createHolding.mockResolvedValue({
         id: TEST_HOLDING_ID,
         accountId: TEST_ACCOUNT_ID,
@@ -1169,6 +1343,7 @@ describe("Investments HTTP API Integration Tests", () => {
       await request(app)
         .post("/api/investments/holdings")
         .send({
+          ...openingDeclaration,
           accountId: TEST_ACCOUNT_ID,
           securityId: TEST_SECURITY_ID,
           quantity: "100",
@@ -1177,36 +1352,25 @@ describe("Investments HTTP API Integration Tests", () => {
         })
         .expect(201);
 
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          householdId: TEST_HOUSEHOLD_ID,
-          entityType: "holding",
-          entityId: TEST_HOLDING_ID,
-        })
+      expect(mockInvestmentService.createHolding).toHaveBeenCalledWith(
+        expect.objectContaining({ quantity: "100", costBasis: "5000.00", acquiredDate: "2026-01-15" }),
+        { householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID, role: "owner" },
+        "127.0.0.1",
+        { snapshot: expect.objectContaining({ id: TEST_USER_ID, securityGeneration: 0 }), sessionId: TEST_SESSION_ID, generation: 0 },
       );
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
 
-    it("logs delete action for holding", async () => {
-      mockInvestmentService.getHoldingById.mockResolvedValue({
-        id: TEST_HOLDING_ID,
-        accountId: TEST_ACCOUNT_ID,
-        securityId: TEST_SECURITY_ID,
-        quantity: "100",
-        costBasis: "5000.00",
-      });
+    it("leaves the atomic delete audit to the actor-bound service", async () => {
       mockInvestmentService.deleteHolding.mockResolvedValue(true);
 
       await request(app)
         .delete(`/api/investments/holdings/${TEST_HOLDING_ID}`)
         .expect(204);
 
-      expect(mockBusinessAuditService.logDelete).toHaveBeenCalledWith(
-        expect.objectContaining({
-          householdId: TEST_HOUSEHOLD_ID,
-          entityType: "holding",
-          entityId: TEST_HOLDING_ID,
-        })
-      );
+      expect(mockInvestmentService.deleteHolding).toHaveBeenCalledOnce();
+      expect(mockInvestmentService.getHoldingById).not.toHaveBeenCalled();
+      expect(mockBusinessAuditService.logDelete).not.toHaveBeenCalled();
     });
   });
 });

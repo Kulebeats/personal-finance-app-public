@@ -14,6 +14,7 @@ import {
   validateMaxNodes,
 } from "../modules/reports/reports.validation";
 import type {
+  CustomChartQueryConfig,
   ReportsCashflowResponse,
   ReportsSpendingBreakdownResponse,
   ReportsNetWorthResponse,
@@ -370,7 +371,9 @@ export class AnalyticsService {
     return analyticsCache.getOrCompute(
       "goalsProgress",
       householdId,
-      { ...query, userId },
+      // Retire reports with the old payoff percentage, units and monthly requirement.
+      // Keep the viewer in the key and use the existing endpoint invalidation.
+      { ...query, userId, shape: "viewer-paydown-progress" },
       () =>
         analyticsReportRepository.getGoalsProgress(householdId, {
           ...query,
@@ -439,14 +442,7 @@ export class AnalyticsService {
     householdId: string,
     userId: string,
     body: {
-      config: {
-        name: string;
-        chartType: string;
-        primaryMetric: string;
-        secondaryMetric?: string;
-        groupBy?: string;
-        aggregation?: string;
-      };
+      config: CustomChartQueryConfig;
       from: string;
       to: string;
       scope?: string;

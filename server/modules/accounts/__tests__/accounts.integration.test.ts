@@ -29,6 +29,10 @@ const {
     archiveAccount: vi.fn(),
     unarchiveAccount: vi.fn(),
     updateAccountSettings: vi.fn(),
+    // NEW-32: the write and its one audit row commit in the service.
+    updateAccountAudited: vi.fn(),
+    deleteAccountAudited: vi.fn(),
+    updateAccountSettingsAudited: vi.fn(),
     getBalanceHistory: vi.fn(),
     exportBalanceHistory: vi.fn(),
     importBalanceHistory: vi.fn(),
@@ -292,13 +296,10 @@ describe("Accounts Integration Tests", () => {
       expect(res.body.success).toBe(true);
       expect(res.body.data.name).toBe("New Account");
       expect(mockAccountService.createAccount).toHaveBeenCalled();
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "account",
-          entityId: "acc-new",
-          householdId: "house-123",
-        })
-      );
+      // The service owns the mandatory account/audit transaction. The HTTP
+      // layer forwards request provenance and must not insert a second audit.
+      expect(mockAccountService.createAccount).toHaveBeenCalledWith(expect.any(Object), "house-123", "user-123", { ipAddress: expect.any(String) });
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
 
     it("should validate required name field", async () => {
@@ -383,7 +384,7 @@ describe("Accounts Integration Tests", () => {
       const updatedAccount = { ...existingAccount, name: "Updated Name" };
 
       mockAccountService.getAccountById.mockResolvedValue(existingAccount);
-      mockAccountService.updateAccount.mockResolvedValue(updatedAccount);
+      mockAccountService.updateAccountAudited.mockResolvedValue(updatedAccount);
 
       const res = await request(app)
         .put("/api/accounts/acc-1")
@@ -392,12 +393,9 @@ describe("Accounts Integration Tests", () => {
 
       expect(res.body.success).toBe(true);
       expect(res.body.data.name).toBe("Updated Name");
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "account",
-          entityId: "acc-1",
-        })
-      );
+      expect(mockAccountService.updateAccountAudited).toHaveBeenCalledWith("acc-1",
+        expect.objectContaining({ name: "Updated Name" }), "house-123", "user-123", undefined, "127.0.0.1");
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
 
     it("should allow partial updates", async () => {
@@ -411,7 +409,7 @@ describe("Accounts Integration Tests", () => {
       const updatedAccount = { ...existingAccount, institution: "Test Bank" };
 
       mockAccountService.getAccountById.mockResolvedValue(existingAccount);
-      mockAccountService.updateAccount.mockResolvedValue(updatedAccount);
+      mockAccountService.updateAccountAudited.mockResolvedValue(updatedAccount);
 
       const res = await request(app)
         .put("/api/accounts/acc-1")
@@ -435,19 +433,15 @@ describe("Accounts Integration Tests", () => {
       };
 
       mockAccountService.getAccountById.mockResolvedValue(existingAccount);
-      mockAccountService.deleteAccount.mockResolvedValue(undefined);
+      mockAccountService.deleteAccountAudited.mockResolvedValue(undefined);
 
       const res = await request(app)
         .delete("/api/accounts/acc-1")
         .expect(200);
 
       expect(res.body.success).toBe(true);
-      expect(mockBusinessAuditService.logDelete).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "account",
-          entityId: "acc-1",
-        })
-      );
+      expect(mockAccountService.deleteAccountAudited).toHaveBeenCalledWith("acc-1", "house-123", "user-123", "127.0.0.1");
+      expect(mockBusinessAuditService.logDelete).not.toHaveBeenCalled();
     });
   });
 
@@ -482,7 +476,10 @@ describe("Accounts Integration Tests", () => {
         .expect(200);
 
       expect(res.body.success).toBe(true);
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalled();
+      // The ledger row's audit is written by the service in its transaction.
+      expect(mockAccountService.adjustBalance).toHaveBeenCalledWith("acc-1", "500.00", true,
+        "house-123", "user-123", "Monthly deposit", "127.0.0.1");
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
 
     it("should decrease account balance", async () => {
@@ -555,11 +552,8 @@ describe("Accounts Integration Tests", () => {
 
       expect(res.body.success).toBe(true);
       expect(res.body.data.isArchived).toBe(true);
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          metadata: { operation: "archive" },
-        })
-      );
+      expect(mockAccountService.archiveAccount).toHaveBeenCalledWith("acc-1", "house-123", "user-123", "127.0.0.1");
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
   });
 
@@ -581,11 +575,8 @@ describe("Accounts Integration Tests", () => {
 
       expect(res.body.success).toBe(true);
       expect(res.body.data.isArchived).toBe(false);
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          metadata: { operation: "unarchive" },
-        })
-      );
+      expect(mockAccountService.unarchiveAccount).toHaveBeenCalledWith("acc-1", "house-123", "user-123", "127.0.0.1");
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
   });
 
@@ -804,7 +795,7 @@ describe("Accounts Integration Tests", () => {
       };
 
       mockAccountService.getAccountById.mockResolvedValue(existingAccount);
-      mockAccountService.updateAccountSettings.mockResolvedValue(updatedAccount);
+      mockAccountService.updateAccountSettingsAudited.mockResolvedValue(updatedAccount);
 
       const res = await request(app)
         .patch("/api/accounts/acc-1/settings")
@@ -816,11 +807,9 @@ describe("Accounts Integration Tests", () => {
 
       expect(res.body.success).toBe(true);
       expect(res.body.data.isHidden).toBe(true);
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          metadata: { operation: "updateSettings" },
-        })
-      );
+      expect(mockAccountService.updateAccountSettingsAudited).toHaveBeenCalledWith("acc-1",
+        { isHidden: true, excludeFromNetWorth: true }, "house-123", "user-123", "127.0.0.1");
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
 
     it("should allow partial settings update", async () => {
@@ -833,7 +822,7 @@ describe("Accounts Integration Tests", () => {
       const updatedAccount = { ...existingAccount, hideTransactions: true };
 
       mockAccountService.getAccountById.mockResolvedValue(existingAccount);
-      mockAccountService.updateAccountSettings.mockResolvedValue(updatedAccount);
+      mockAccountService.updateAccountSettingsAudited.mockResolvedValue(updatedAccount);
 
       const res = await request(app)
         .patch("/api/accounts/acc-1/settings")
@@ -851,7 +840,7 @@ describe("Accounts Integration Tests", () => {
   // =========================================================================
 
   describe("Audit Logging", () => {
-    it("should create exactly one audit entry per account creation", async () => {
+    it("delegates account creation auditing once to the transactional service", async () => {
       const mockAccount = {
         id: "acc-audit",
         name: "Audit Test",
@@ -869,24 +858,26 @@ describe("Accounts Integration Tests", () => {
         })
         .expect(201);
 
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalledTimes(1);
+      expect(mockAccountService.createAccount).toHaveBeenCalledTimes(1);
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
 
-    it("should create exactly one audit entry per account update", async () => {
+    it("delegates account update auditing once to the transactional service", async () => {
       const existingAccount = { id: "acc-1", name: "Original", type: "checking", currency: "ZMW" };
       const updatedAccount = { ...existingAccount, name: "Updated" };
       mockAccountService.getAccountById.mockResolvedValue(existingAccount);
-      mockAccountService.updateAccount.mockResolvedValue(updatedAccount);
+      mockAccountService.updateAccountAudited.mockResolvedValue(updatedAccount);
 
       await request(app)
         .put("/api/accounts/acc-1")
         .send({ name: "Updated" })
         .expect(200);
 
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledTimes(1);
+      expect(mockAccountService.updateAccountAudited).toHaveBeenCalledTimes(1);
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
 
-    it("should create audit entry for account deletion", async () => {
+    it("delegates account deletion auditing once to the transactional service", async () => {
       const existingAccount = {
         id: "acc-1",
         name: "Delete Me",
@@ -896,13 +887,14 @@ describe("Accounts Integration Tests", () => {
         isArchived: false,
       };
       mockAccountService.getAccountById.mockResolvedValue(existingAccount);
-      mockAccountService.deleteAccount.mockResolvedValue(undefined);
+      mockAccountService.deleteAccountAudited.mockResolvedValue(undefined);
 
       await request(app)
         .delete("/api/accounts/acc-1")
         .expect(200);
 
-      expect(mockBusinessAuditService.logDelete).toHaveBeenCalledTimes(1);
+      expect(mockAccountService.deleteAccountAudited).toHaveBeenCalledTimes(1);
+      expect(mockBusinessAuditService.logDelete).not.toHaveBeenCalled();
     });
   });
 
@@ -1015,7 +1007,7 @@ describe("Accounts Integration Tests", () => {
       const existingAccount = { id: "acc-1", name: "Test", notes: null, type: "checking", currency: "ZMW" };
       const updatedAccount = { ...existingAccount, notes: "Notes with unicode: " };
       mockAccountService.getAccountById.mockResolvedValue(existingAccount);
-      mockAccountService.updateAccount.mockResolvedValue(updatedAccount);
+      mockAccountService.updateAccountAudited.mockResolvedValue(updatedAccount);
 
       const res = await request(app)
         .put("/api/accounts/acc-1")

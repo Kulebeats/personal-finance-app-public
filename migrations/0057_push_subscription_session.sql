@@ -1,0 +1,2 @@
+ALTER TABLE "user_push_subscriptions" ADD COLUMN "session_id_hash" varchar(64);--> statement-breakpoint
+CREATE INDEX "idx_user_push_subscriptions_user_session" ON "user_push_subscriptions" USING btree ("user_id","session_id_hash");

@@ -4,12 +4,10 @@
 
 import { Router } from "express";
 import { requireAuth } from "../../middleware/auth";
-import { generalLimiter } from "../../middleware/rateLimit";
 import { householdController } from "./household.controller";
 
 const router = Router();
 router.use(requireAuth);
-router.use(generalLimiter);
 
 // General settings
 router.get("/general", householdController.getGeneral);

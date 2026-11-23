@@ -3,11 +3,9 @@ import { ErrorBoundary } from "@/features/settings/components/ErrorBoundary";
 import { LoadingSection } from "@/features/settings/components/LoadingSection";
 import { SettingsCard } from "@/features/settings/components/SettingsCard";
 import { useHouseholdMembers, useProfile } from "@/hooks/use-settings";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Shield, Users } from "lucide-react";
+import { SharedViewsCard } from "@/features/settings/saved-views/SharedViewsCard";
 import { AddMemberDialog } from "./components/AddMemberDialog";
+import { LeaveHouseholdButton } from "./components/LeaveHouseholdButton";
 import { MemberList } from "./components/MemberList";
 import { RolePermissions } from "./components/RolePermissions";
 
@@ -56,6 +54,7 @@ export default function MembersSection() {
             canManageRoles && (
               <div className="flex items-center gap-2">
                 <AddMemberDialog
+                  canInviteAdmin={currentUserRole === "owner"}
                   open={addMemberDialogOpen}
                   onOpenChange={setAddMemberDialogOpen}
                 />
@@ -68,57 +67,14 @@ export default function MembersSection() {
         >
           <MemberList members={members} currentUserId={profile?.id} />
 
+          <div className="mt-4 flex justify-end">
+            <LeaveHouseholdButton currentUserRole={currentUserRole} />
+          </div>
+
           <RolePermissions />
 
-          <div className="mt-6 grid gap-4 md:grid-cols-2">
-            <Card className="border-border shadow-sm">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-base font-semibold">
-                  Shared Views
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-start gap-3">
-                  <div className="p-2 rounded-full bg-blue-100 text-blue-600">
-                    <Shield className="w-5 h-5" />
-                  </div>
-                  <div className="space-y-2">
-                    <p className="text-sm text-muted-foreground">
-                      Control what your partner or advisor can see by hiding
-                      specific accounts or categories.
-                    </p>
-                    <Button variant="link" className="px-0">
-                      Configure shared views →
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card className="border-border shadow-sm">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-base font-semibold">
-                  Your Plan
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="flex items-center justify-between border-b border-border/40 pb-3">
-                  <div>
-                    <div className="text-sm font-medium">Household Premium</div>
-                    <div className="text-xs text-muted-foreground">
-                      Includes 2 members
-                    </div>
-                  </div>
-                  <Badge variant="outline" className="text-xs">
-                    Active
-                  </Badge>
-                </div>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Users className="w-4 h-4" />
-                  <span>Unlimited collaborators included</span>
-                </div>
-              </CardContent>
-            </Card>
+          <div className="mt-6">
+            <SharedViewsCard canManage={canManageRoles} />
           </div>
         </SettingsCard>
       </Suspense>

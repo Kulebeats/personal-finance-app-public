@@ -11,7 +11,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React from "react";
 
 // Mock the hooks and APIs
-vi.mock("@/hooks/useTransactions", () => ({
+vi.mock("@/hooks/useTransactions", async importOriginal => ({
+  useTransactionSummary: (await importOriginal<typeof import("@/hooks/useTransactions")>()).useTransactionSummary,
   useInfiniteTransactions: vi.fn(() => ({
     data: {
       pages: [
@@ -235,14 +236,14 @@ describe("Transactions Page Integration", () => {
     it("should calculate income from transactions", async () => {
       render(<Transactions />, { wrapper: createWrapper() });
       await waitFor(() => {
-        expect(screen.getByText("Income: 3000")).toBeInTheDocument();
+        expect(screen.getByText("Income: 3000.00")).toBeInTheDocument();
       });
     });
 
     it("should calculate expenses from transactions", async () => {
       render(<Transactions />, { wrapper: createWrapper() });
       await waitFor(() => {
-        expect(screen.getByText("Expenses: 155")).toBeInTheDocument();
+        expect(screen.getByText("Expenses: 155.00")).toBeInTheDocument();
       });
     });
 

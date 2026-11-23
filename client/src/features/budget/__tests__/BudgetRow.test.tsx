@@ -2,6 +2,7 @@
  * BudgetRow Unit Tests
  */
 
+import { useState } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { BudgetRow } from "../components/BudgetRow";
@@ -151,5 +152,30 @@ describe("BudgetRow", () => {
     fireEvent.keyDown(budgetInput, { key: "Enter" });
 
     expect(onCommitBudget).toHaveBeenCalledWith("cat-1", 500);
+  });
+
+  // C3-10: clearing the input sends nothing, so the screen must not keep
+  // showing "Unbudgeted" while the server still holds the old limit.
+  it("restores the saved budget when the input is cleared and left, and sends nothing", () => {
+    const onCommitBudget = vi.fn();
+    function Harness() {
+      const [item, setItem] = useState(createMockItem());
+      return (
+        <BudgetRow
+          item={item}
+          onUpdate={(_id, field, value) => setItem(current => ({ ...current, [field]: value }))}
+          onCommitBudget={onCommitBudget}
+        />
+      );
+    }
+    render(<Harness />);
+    const budgetInput = screen.getByLabelText("Budget amount for Groceries");
+    fireEvent.focus(budgetInput);
+    fireEvent.change(budgetInput, { target: { value: "" } });
+    expect(budgetInput).toHaveValue("");
+    fireEvent.blur(budgetInput);
+
+    expect(budgetInput).toHaveValue("500");
+    expect(onCommitBudget).not.toHaveBeenCalled();
   });
 });

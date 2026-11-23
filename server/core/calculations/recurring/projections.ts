@@ -8,9 +8,9 @@ import { Money, toMoney } from "../types";
 import { RecurringRuleInfo } from "./types";
 import { calculateNextDate } from "./dates";
 
-export interface ProjectedOccurrence {
+export interface ProjectedOccurrence<A = Money> {
   date: string;
-  amount: Money;
+  amount: A;
   ruleId?: string;
 }
 
@@ -22,15 +22,16 @@ export interface ProjectedOccurrence {
  * @param startDate - Projection start date (default: today or rule.nextDueDate)
  * @returns List of projected occurrences
  */
-export function projectOccurrences(
-  rule: RecurringRuleInfo,
+export function projectOccurrences<A = Money>(
+  rule: RecurringRuleInfo<A>,
   endDate: string,
   startDate?: string
-): ProjectedOccurrence[] {
-  const occurrences: ProjectedOccurrence[] = [];
+): ProjectedOccurrence<A>[] {
+  const occurrences: ProjectedOccurrence<A>[] = [];
 
   if (!rule.nextDueDate) return occurrences;
-  if (rule.endDate && rule.endDate < (startDate || rule.nextDueDate))
+  // R14: the end date is inclusive; the first occurrence must not fall after it either.
+  if (rule.endDate && (rule.endDate < (startDate || rule.nextDueDate) || rule.nextDueDate > rule.endDate))
     return occurrences;
 
   let currentLinkDate =

@@ -1,6 +1,8 @@
 import nodemailer, { type Transporter } from "nodemailer";
 import { randomBytes } from "crypto";
 import { logger } from "../utils/logger";
+import { buildPublicAuthLink } from "../core/public-auth-link";
+import { escapeHtml } from "./notification/escape";
 
 /**
  * Email Service
@@ -24,6 +26,29 @@ interface SendEmailOptions {
   subject: string;
   html: string;
   text?: string;
+  /** Journaled callers need an unknown outcome when SMTP acceptance cannot be proven. */
+  throwOnUnknownDelivery?: boolean;
+}
+
+/** Nodemailer's CONN error can come from the socket after the message was sent. */
+function definitelyNotAccepted(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const { code, command, message, response, syscall, timeoutType, responseCode } = error as {
+    message?: string; response?: string;
+    code?: string; command?: string; syscall?: string; timeoutType?: string; responseCode?: number;
+  };
+  if (code === "EDNS" || code === "EAUTH" || syscall === "connect") return true;
+  if (code === "ETIMEDOUT" && ["CONNECT_TIMEOUT", "GREETING_TIMEOUT", "UPGRADE_TIMEOUT"].includes(timeoutType ?? "")) {
+    return true;
+  }
+  if (command === "EHLO" || command === "HELO" || command === "STARTTLS") return true;
+  if (command === "MAIL FROM" || command === "RCPT TO") return true;
+  const rejected = typeof responseCode === "number" && responseCode >= 400 && responseCode < 600;
+  // Nodemailer also uses EPROTOCOL/CONN for unexpected responses. Only
+  // _actionGreeting emits this message before the envelope or its data.
+  if (code === "EPROTOCOL" && command === "CONN" && rejected && response
+    && message === `Invalid greeting. response=${response}: ${response}`) return true;
+  return rejected && command === "DATA" && (code === "EENVELOPE" || code === "EMESSAGE");
 }
 
 // SEC-CONFIG-001: Email config from environment variables (no unsafe defaults)
@@ -78,6 +103,7 @@ if (!isEmailServiceConfigured()) {
 
 // Send email
 export async function sendEmail(options: SendEmailOptions): Promise<boolean> {
+  let attempted = false;
   try {
     const transport = getTransporter();
 
@@ -105,20 +131,26 @@ export async function sendEmail(options: SendEmailOptions): Promise<boolean> {
       return false;
     }
 
-    await transport.sendMail({
+    const message = {
       from: `"Personal Finance App" <${fromEmail}>`,
       to: options.to,
-      subject: options.subject,
+      // A user name in a subject must not be able to add headers.
+      subject: options.subject.replace(/[\r\n]+/g, " "),
       html: options.html,
       text: options.text || options.html.replace(/<[^>]*>/g, ""),
       disableFileAccess: true,
       disableUrlAccess: true,
-    });
+    };
+    attempted = true;
+    await transport.sendMail(message);
 
     logger.info("Email sent", { to: options.to });
     return true;
   } catch (error) {
     logger.error("Failed to send email", {}, error as Error);
+    if (options.throwOnUnknownDelivery && attempted && !definitelyNotAccepted(error)) {
+      throw new Error("SMTP acceptance could not be determined");
+    }
     return false;
   }
 }
@@ -139,12 +171,12 @@ export async function sendVerificationEmail(
   token: string,
   isEmailChange = false
 ): Promise<boolean> {
-  const baseUrl = process.env.APP_URL || "http://localhost:5000";
-  const verifyUrl = `${baseUrl}/verify-email?token=${token}`;
+  const verifyUrl = buildPublicAuthLink("/verify-email", token);
 
   const subject = isEmailChange
     ? "Confirm Your New Email Address"
     : "Verify Your Email Address";
+  const safeVerifyUrl = escapeHtml(verifyUrl);
 
   const html = `
     <!DOCTYPE html>
@@ -168,7 +200,7 @@ export async function sendVerificationEmail(
           }
         </p>
         <div style="text-align: center; margin: 30px 0;">
-          <a href="${verifyUrl}" 
+          <a href="${safeVerifyUrl}"
              style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                     color: white; 
                     padding: 14px 28px; 
@@ -185,7 +217,7 @@ export async function sendVerificationEmail(
         <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 20px 0;">
         <p style="font-size: 12px; color: #9ca3af; margin-bottom: 0;">
           If the button doesn't work, copy and paste this link into your browser:<br>
-          <a href="${verifyUrl}" style="color: #667eea; word-break: break-all;">${verifyUrl}</a>
+          <a href="${safeVerifyUrl}" style="color: #667eea; word-break: break-all;">${safeVerifyUrl}</a>
         </p>
       </div>
     </body>
@@ -200,8 +232,8 @@ export async function sendPasswordResetEmail(
   email: string,
   token: string
 ): Promise<boolean> {
-  const baseUrl = process.env.APP_URL || "http://localhost:5000";
-  const resetUrl = `${baseUrl}/reset-password?token=${token}`;
+  const resetUrl = buildPublicAuthLink("/reset-password", token);
+  const safeResetUrl = escapeHtml(resetUrl);
 
   const html = `
     <!DOCTYPE html>
@@ -219,7 +251,7 @@ export async function sendPasswordResetEmail(
           We received a request to reset your password. Click the button below to create a new password.
         </p>
         <div style="text-align: center; margin: 30px 0;">
-          <a href="${resetUrl}" 
+          <a href="${safeResetUrl}"
              style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); 
                     color: white; 
                     padding: 14px 28px; 
@@ -236,7 +268,7 @@ export async function sendPasswordResetEmail(
         <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 20px 0;">
         <p style="font-size: 12px; color: #9ca3af; margin-bottom: 0;">
           If the button doesn't work, copy and paste this link into your browser:<br>
-          <a href="${resetUrl}" style="color: #f59e0b; word-break: break-all;">${resetUrl}</a>
+          <a href="${safeResetUrl}" style="color: #f59e0b; word-break: break-all;">${safeResetUrl}</a>
         </p>
       </div>
     </body>
@@ -250,8 +282,12 @@ export async function sendPasswordResetEmail(
 export async function sendMfaCodeEmail(
   email: string,
   code: string,
-  name: string
+  name: string,
+  purpose: "login" | "settings" = "login"
 ): Promise<boolean> {
+  const reason = purpose === "settings"
+    ? "to change your two-step verification settings"
+    : "for logging in";
   const html = `
     <html>
     <head>
@@ -264,10 +300,10 @@ export async function sendMfaCodeEmail(
       </div>
       <div style="background: #f9fafb; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #e5e7eb; border-top: none;">
         <p style="margin-top: 0;">
-          Hi ${name},
+          Hi ${escapeHtml(name)},
         </p>
         <p>
-          Your verification code for logging in is:
+          Your verification code ${reason} is:
         </p>
         <div style="text-align: center; margin: 30px 0;">
           <span style="background: #f3f4f6; 
@@ -277,7 +313,7 @@ export async function sendMfaCodeEmail(
                        letter-spacing: 8px;
                        border-radius: 8px;
                        color: #1f2937;">
-            ${code}
+            ${escapeHtml(code)}
           </span>
         </div>
         <p style="font-size: 14px; color: #6b7280;">

@@ -1,12 +1,15 @@
 import { useState, useEffect } from "react";
-import { usePreviewRule } from "@/hooks/use-settings";
+import { usePreviewRule, RULE_PREVIEW_LIMIT } from "@/hooks/use-settings";
 import {
   Rule,
   RuleCondition,
   RuleAction,
   RuleEditorSaveData,
 } from "../types";
-import { getDefaultCondition, getDefaultAction } from "../constants";
+import { getDefaultCondition, getDefaultAction, toTagIds } from "../constants";
+
+export const EMPTY_TAGS_ERROR =
+  "Choose at least one tag for every Add tags action, or remove the action.";
 
 export interface UseRuleEditorStateProps {
   rule?: Rule | null;
@@ -34,6 +37,7 @@ export function useRuleEditorState({
   const [applyToPast, setApplyToPast] = useState(false);
   const [previewCount, setPreviewCount] = useState(0);
   const [isSaving, setIsSaving] = useState(false);
+  const [hasTriedSave, setHasTriedSave] = useState(false);
 
   // Initialize form when rule changes
   useEffect(() => {
@@ -55,6 +59,7 @@ export function useRuleEditorState({
       setApplyToPast(false);
     }
     setPreviewCount(0);
+    setHasTriedSave(false);
   }, [rule, open]);
 
   const previewMutation = usePreviewRule();
@@ -67,6 +72,7 @@ export function useRuleEditorState({
         previewMutation.mutate({
           conditions: enabledConditions,
           conditionLogic,
+          limit: RULE_PREVIEW_LIMIT,
         });
       }
     }
@@ -74,8 +80,8 @@ export function useRuleEditorState({
 
   // Update badge count
   useEffect(() => {
-    if (previewMutation.data?.matchCount !== undefined) {
-      setPreviewCount(previewMutation.data.matchCount);
+    if (previewMutation.data?.count !== undefined) {
+      setPreviewCount(previewMutation.data.count);
     }
   }, [previewMutation.data]);
 
@@ -107,8 +113,17 @@ export function useRuleEditorState({
     setActions((prev) => prev.filter((_, i) => i !== index));
   };
 
+  // The server rejects an add_tags action with no tag, disabled actions included.
+  const hasEmptyTagAction = actions.some(
+    (a) => a.type === "add_tags" && toTagIds(a.value).length === 0,
+  );
+
   const handleSave = async () => {
     if (!name.trim()) return;
+    if (hasEmptyTagAction) {
+      setHasTriedSave(true);
+      return;
+    }
 
     setIsSaving(true);
     try {
@@ -150,6 +165,7 @@ export function useRuleEditorState({
     setApplyToPast,
     previewCount,
     isSaving,
+    saveError: hasTriedSave && hasEmptyTagAction ? EMPTY_TAGS_ERROR : null,
     hasUnsavedChanges:
       name !== (rule?.name || "") ||
       conditions !== (rule?.conditions || []) ||

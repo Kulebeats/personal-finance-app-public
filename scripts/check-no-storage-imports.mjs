@@ -1,5 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import ts from "typescript";
 
 const rootDir = process.cwd();
 const allowlistPath = path.join(
@@ -11,14 +13,35 @@ const allowlistPath = path.join(
 const importRegex = /(?:^|\s)from\s+["']([^"']+)["']/gm;
 const requireRegex = /require\s*\(\s*["']([^"']+)["']\s*\)/gm;
 const dynamicImportRegex = /import\s*\(\s*["']([^"']+)["']\s*\)/gm;
+const sideEffectImportRegex = /(?:^|\s)import\s+["']([^"']+)["']/gm;
 
 const allowedExtensions = new Set([".ts", ".tsx", ".js", ".jsx"]);
 
 const normalizePath = (filePath) => filePath.replace(/\\/g, "/");
+const configPath = ts.findConfigFile(rootDir, ts.sys.fileExists, "tsconfig.json");
+let compilerOptions = {};
+if (configPath) {
+  const configuration = ts.readConfigFile(configPath, ts.sys.readFile);
+  if (configuration.error) throw new Error("Cannot read TypeScript module-resolution configuration");
+  compilerOptions = ts.parseJsonConfigFileContent(configuration.config, ts.sys, path.dirname(configPath)).options;
+}
+const resolutionCache = ts.createModuleResolutionCache(rootDir, (name) => ts.sys.useCaseSensitiveFileNames ? name : name.toLowerCase(), compilerOptions);
 
-const isStorageImport = (specifier) => {
+const isStorageImport = (specifier, importer) => {
   const normalized = specifier.replace(/\\/g, "/");
-  return /(^|\/)storage(\.[jt]sx?)?$/.test(normalized);
+  let target;
+  try {
+    if (normalized.startsWith("file:")) target = fileURLToPath(normalized);
+    else if (normalized.startsWith(".")) target = fileURLToPath(new URL(normalized, pathToFileURL(importer)));
+    else if (path.isAbsolute(normalized)) target = normalized;
+    else target = ts.resolveModuleName(normalized, importer, compilerOptions, ts.sys, resolutionCache).resolvedModule?.resolvedFileName;
+  } catch { return false; }
+  if (!target) return false;
+  const canonical = (value) => {
+    const absolute = normalizePath(path.resolve(value)).replace(/\.[jt]sx?$/i, "");
+    return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+  };
+  return canonical(target) === canonical(path.join(rootDir, "server", "storage"));
 };
 
 const loadAllowlist = async () => {
@@ -59,7 +82,7 @@ const collectStorageImports = async () => {
     const contents = await fs.readFile(file, "utf8");
     const specifiers = [];
 
-    for (const regex of [importRegex, requireRegex, dynamicImportRegex]) {
+    for (const regex of [importRegex, requireRegex, dynamicImportRegex, sideEffectImportRegex]) {
       regex.lastIndex = 0;
       let match;
       while ((match = regex.exec(contents)) !== null) {
@@ -67,7 +90,7 @@ const collectStorageImports = async () => {
       }
     }
 
-    if (specifiers.some(isStorageImport)) {
+    if (specifiers.some((specifier) => isStorageImport(specifier, file))) {
       storageImports.add(normalizePath(path.relative(rootDir, file)));
     }
   }

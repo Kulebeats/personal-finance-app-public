@@ -104,6 +104,7 @@ export function filterBudgets(
         ? context.groupMap.get(category.groupId)
         : null;
 
+      if (category.groupId === null) return true;
       if (!group || group.isArchived) return false;
       if (group.type === "transfers") return false;
       if (group.budgetMode === "by_group") return false;

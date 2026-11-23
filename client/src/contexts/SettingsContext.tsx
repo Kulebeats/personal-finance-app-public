@@ -6,6 +6,7 @@ import {
   ReactNode,
 } from "react";
 import { useDisplaySettings } from "@/hooks/use-settings";
+import { setCalendarTimeZone } from "@/lib/calendarZone";
 
 interface SettingsContextType {
   theme: string;
@@ -32,6 +33,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const [animationsEnabled, setAnimationsEnabled] = useState(() => {
     return !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   });
+
+  // NEW-15: "today" and "this month" follow the saved time zone. Set during
+  // render (idempotent) so consumers re-rendering with the new settings
+  // already compute their ranges in it; an effect would run after them.
+  setCalendarTimeZone(settings?.timezone);
 
   const toggleSidebar = () => setSidebarCollapsed((prev) => !prev);
   const toggleAnimations = () => setAnimationsEnabled((prev) => !prev);
@@ -118,12 +124,12 @@ export function useFormatters() {
 
   return {
     /**
-     * Format a number as currency using user's currency and number format settings
+     * Preserve the amount's unit when supplied, using the viewer's number format.
      */
-    formatCurrency: (amount: number) => {
+    formatCurrency: (amount: number, currency = settings.currency) => {
       return formatCurrencyUtil(
         amount,
-        settings.currency,
+        currency,
         settings.numberFormat,
       );
     },

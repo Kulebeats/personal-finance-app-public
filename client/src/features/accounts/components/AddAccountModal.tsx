@@ -2,10 +2,12 @@ import {
   Dialog,
   DialogContent,
   DialogTitle,
+  DialogDescription,
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { AlertCircle, ArrowLeft } from "lucide-react";
-import { useState, useEffect } from "react";
+import { useState } from "react";
+import { isCurrencyCode } from "@shared/denomination";
 import { useCreateAccount } from "@/hooks/useAccounts";
 import { useHousehold } from "@/hooks/use-settings";
 import { parseMoneyString } from "@/lib/money";
@@ -19,11 +21,32 @@ export function AddAccountModal({
   children,
   open: controlledOpen,
   onOpenChange: controlledOnOpenChange,
+  onCloseAutoFocus,
 }: {
   children?: React.ReactNode;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  onCloseAutoFocus?: (event: Event) => void;
 }) {
+  const [localOpen, setLocalOpen] = useState(false);
+  const [draftNumber, setDraftNumber] = useState(0);
+  const open = controlledOpen ?? localOpen;
+  const changeOpen = (next: boolean) => {
+    if (controlledOpen === undefined) setLocalOpen(next);
+    controlledOnOpenChange?.(next);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={changeOpen}>
+      {children && <DialogTrigger asChild>{children}</DialogTrigger>}
+      <DialogContent onCloseAutoFocus={onCloseAutoFocus} className="max-w-2xl p-0 overflow-y-auto gap-0 bg-card border-border">
+        {open && <AccountEditor key={draftNumber} onAddAnother={() => setDraftNumber(previous => previous + 1)} />}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AccountEditor({ onAddAnother }: { onAddAnother: () => void }) {
   const [step, setStep] = useState<"type-select" | "details" | "success">(
     "type-select",
   );
@@ -32,7 +55,7 @@ export function AddAccountModal({
   const [accountName, setAccountName] = useState("");
   const [balance, setBalance] = useState("");
   const [accountSubType, setAccountSubType] = useState("");
-  const [currency, setCurrency] = useState<string>(""); // Will be set from household
+  const [selectedCurrency, setSelectedCurrency] = useState<string>();
   const [notes, setNotes] = useState("");
   const [institution, setInstitution] = useState("");
   const [ownerUserId, setOwnerUserId] = useState<string | null>(null);
@@ -47,42 +70,9 @@ export function AddAccountModal({
   const [address, setAddress] = useState("");
 
   const createMutation = useCreateAccount();
-  const { data: householdData } = useHousehold();
-  const defaultCurrency = householdData?.household?.currency || "ZMW";
-
-  // Set currency from household when it loads
-  useEffect(() => {
-    if (defaultCurrency && !currency) {
-      setCurrency(defaultCurrency);
-    }
-  }, [defaultCurrency, currency]);
-
-  const handleOpenChange = (open: boolean) => {
-    if (!open) {
-      setTimeout(() => {
-        setStep("type-select");
-        setSelectedType(null);
-        setSelectedBank("");
-        setAccountName("");
-        setBalance("");
-        setAccountSubType("");
-        setCurrency(defaultCurrency);
-        setNotes("");
-        setInstitution("");
-        setOwnerUserId(null);
-        setOtherAccountType("");
-        // TODO-022: Reset new fields
-        setInvestmentType("");
-        setCreditLimit("");
-        setApr("");
-        setStatementDay("");
-        setEstimatedValue("");
-        setPurchaseDate("");
-        setAddress("");
-      }, 300);
-    }
-    controlledOnOpenChange?.(open);
-  };
+  const household = useHousehold();
+  const defaultCurrency = household.data?.household?.currency;
+  const currency = selectedCurrency ?? (isCurrencyCode(defaultCurrency) ? defaultCurrency : "");
 
   const handleTypeSelect = (type: AccountType) => {
     setSelectedType(type);
@@ -131,6 +121,7 @@ export function AddAccountModal({
   };
 
   const handleSave = () => {
+    if (!currency) return;
     const name =
       accountName || selectedBank || getPlaceholderName(selectedType);
     const balanceDecimal = parseMoneyString(balance);
@@ -143,7 +134,7 @@ export function AddAccountModal({
       initialBalance: balanceDecimal.toFixed(2),
       institution: institutionValue,
       // Allow user-selected currency for all account types (MED-001 fix)
-      currency: currency || defaultCurrency,
+      currency,
       notes: notes || undefined,
       ownerUserId,
     };
@@ -180,119 +171,99 @@ export function AddAccountModal({
     });
   };
 
-  const handleAddAnother = () => {
-    setStep("type-select");
-    setSelectedType(null);
-    setSelectedBank("");
-    setAccountName("");
-    setBalance("");
-    setNotes("");
-    setInstitution("");
-    setOwnerUserId(null);
-    setOtherAccountType("");
-    // TODO-022: Reset new fields
-    setInvestmentType("");
-    setCreditLimit("");
-    setApr("");
-    setStatementDay("");
-    setEstimatedValue("");
-    setPurchaseDate("");
-    setAddress("");
-  };
-
   return (
-    <Dialog open={controlledOpen} onOpenChange={handleOpenChange}>
-      {children && <DialogTrigger asChild>{children}</DialogTrigger>}
-      <DialogContent className="max-w-2xl p-0 overflow-y-auto gap-0 bg-card border-border">
-        <div className="px-6 py-4 border-b border-border flex items-center gap-4 bg-muted/30">
-          {step === "details" && (
-            <button
-              onClick={() => setStep("type-select")}
-              className="text-muted-foreground hover:text-foreground"
-              aria-label="Go back"
-            >
-              <ArrowLeft className="w-5 h-5" />
-            </button>
-          )}
-          <DialogTitle className="text-lg font-semibold text-foreground">
-            {step === "type-select" && "Add Account"}
-            {step === "details" && "Enter Account Details"}
-            {step === "success" && "Account Created"}
-          </DialogTitle>
-        </div>
+    <>
+      <DialogDescription className="sr-only">Add account details to track your balances.</DialogDescription>
+      <div className="px-6 py-4 border-b border-border flex items-center gap-4 bg-muted/30">
+        {step === "details" && (
+          <button
+            onClick={() => setStep("type-select")}
+            className="text-muted-foreground hover:text-foreground"
+            aria-label="Go back"
+          >
+            <ArrowLeft className="w-5 h-5" />
+          </button>
+        )}
+        <DialogTitle className="text-lg font-semibold text-foreground">
+          {step === "type-select" && "Add Account"}
+          {step === "details" && "Enter Account Details"}
+          {step === "success" && "Account Created"}
+        </DialogTitle>
+      </div>
 
-        <div className="p-6">
-          {step === "type-select" && (
-            <AccountTypeSelection onSelectType={handleTypeSelect} />
-          )}
+      <div className="p-6">
+        {step === "type-select" && (
+          <AccountTypeSelection onSelectType={handleTypeSelect} />
+        )}
 
-          {step === "details" && selectedType && (
-            <>
-              {createMutation.isError && (
-                <div
-                  role="alert"
-                  className="mb-4 p-3 rounded-md bg-destructive/10 border border-destructive/20 flex items-start gap-2"
-                >
-                  <AlertCircle
-                    className="w-4 h-4 text-destructive mt-0.5 flex-shrink-0"
-                    aria-hidden="true"
-                  />
-                  <div className="text-sm text-destructive">
-                    <p className="font-medium">Failed to create account</p>
-                    <p className="text-destructive/80">
-                      {createMutation.error?.message ||
-                        "An unexpected error occurred. Please try again."}
-                    </p>
-                  </div>
+        {step === "details" && selectedType && (
+          <>
+            {!currency && (household.isPending ? <p role="status">Loading household currency…</p> :
+              <p role="alert">Household currency is unavailable. <button type="button" onClick={() => { void household.refetch(); }}>Retry</button></p>)}
+            {createMutation.isError && (
+              <div
+                role="alert"
+                className="mb-4 p-3 rounded-md bg-destructive/10 border border-destructive/20 flex items-start gap-2"
+              >
+                <AlertCircle
+                  className="w-4 h-4 text-destructive mt-0.5 flex-shrink-0"
+                  aria-hidden="true"
+                />
+                <div className="text-sm text-destructive">
+                  <p className="font-medium">Failed to create account</p>
+                  <p className="text-destructive/80">
+                    {createMutation.error?.message ||
+                      "An unexpected error occurred. Please try again."}
+                  </p>
                 </div>
-              )}
-              <AccountDetailsForm
-                selectedType={selectedType}
-                selectedBank={selectedBank}
-                onSelectedBankChange={setSelectedBank}
-                accountName={accountName}
-                onAccountNameChange={setAccountName}
-                balance={balance}
-                onBalanceChange={setBalance}
-                accountSubType={accountSubType}
-                onAccountSubTypeChange={setAccountSubType}
-                currency={currency}
-                onCurrencyChange={setCurrency}
-                notes={notes}
-                onNotesChange={setNotes}
-                ownerUserId={ownerUserId}
-                onOwnerChange={setOwnerUserId}
-                otherAccountType={otherAccountType}
-                onOtherAccountTypeChange={setOtherAccountType}
-                // TODO-022: New props for previously unwired fields
-                institution={institution}
-                onInstitutionChange={setInstitution}
-                investmentType={investmentType}
-                onInvestmentTypeChange={setInvestmentType}
-                creditLimit={creditLimit}
-                onCreditLimitChange={setCreditLimit}
-                apr={apr}
-                onAprChange={setApr}
-                statementDay={statementDay}
-                onStatementDayChange={setStatementDay}
-                estimatedValue={estimatedValue}
-                onEstimatedValueChange={setEstimatedValue}
-                purchaseDate={purchaseDate}
-                onPurchaseDateChange={setPurchaseDate}
-                address={address}
-                onAddressChange={setAddress}
-                onCancel={() => setStep("type-select")}
-                onSave={handleSave}
-                isSaving={createMutation.isPending}
-              />
-            </>
-          )}
+              </div>
+            )}
+            <AccountDetailsForm
+              selectedType={selectedType}
+              selectedBank={selectedBank}
+              onSelectedBankChange={setSelectedBank}
+              accountName={accountName}
+              onAccountNameChange={setAccountName}
+              balance={balance}
+              onBalanceChange={setBalance}
+              accountSubType={accountSubType}
+              onAccountSubTypeChange={setAccountSubType}
+              currency={currency}
+              onCurrencyChange={setSelectedCurrency}
+              notes={notes}
+              onNotesChange={setNotes}
+              ownerUserId={ownerUserId}
+              onOwnerChange={setOwnerUserId}
+              otherAccountType={otherAccountType}
+              onOtherAccountTypeChange={setOtherAccountType}
+              // TODO-022: New props for previously unwired fields
+              institution={institution}
+              onInstitutionChange={setInstitution}
+              investmentType={investmentType}
+              onInvestmentTypeChange={setInvestmentType}
+              creditLimit={creditLimit}
+              onCreditLimitChange={setCreditLimit}
+              apr={apr}
+              onAprChange={setApr}
+              statementDay={statementDay}
+              onStatementDayChange={setStatementDay}
+              estimatedValue={estimatedValue}
+              onEstimatedValueChange={setEstimatedValue}
+              purchaseDate={purchaseDate}
+              onPurchaseDateChange={setPurchaseDate}
+              address={address}
+              onAddressChange={setAddress}
+              onCancel={() => setStep("type-select")}
+              onSave={handleSave}
+              isSaving={createMutation.isPending}
+            />
+          </>
+        )}
 
-          {step === "success" && (
-            <AccountSuccessStep onAddAnother={handleAddAnother} />
-          )}
-        </div>
-      </DialogContent>
-    </Dialog>
+        {step === "success" && (
+          <AccountSuccessStep onAddAnother={onAddAnother} />
+        )}
+      </div>
+    </>
   );
 }

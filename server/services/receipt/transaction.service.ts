@@ -6,11 +6,14 @@
  * @module services/receipt/transaction.service
  */
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
+  householdMembers,
   pendingReceipts,
+  receiptConversionRecords,
   tags,
   transactionTags,
+  transactions,
   type OcrExtractedData,
 } from "@shared/schema";
 import {
@@ -18,7 +21,6 @@ import {
   resolveMerchantMatch,
 } from "../merchantRecognition";
 import { receiptRepository } from "../../repositories/ReceiptRepository";
-import { tagRepository } from "../../repositories/TagRepository";
 import { transactionRepository } from "../../repositories/TransactionRepository";
 import { accountRepository } from "../../repositories/AccountRepository";
 import {
@@ -29,6 +31,26 @@ import {
 import { withTransaction, type TransactionType } from "../../utils/withTransaction";
 import { MATCH_AMOUNT_TOLERANCE } from "./matching";
 import { Money } from "../../core/money";
+import { lockedConversionResult, receiptRequestHash, requireVisibleReceiptPosting } from "./conversion-evidence";
+import { businessAuditService } from "../BusinessAuditService";
+import { lockTransactionCreateGrant } from "../../repositories/TransactionCreateBoundary";
+import { auditTransactionUpdate, isPrivateTransactionAudit } from "../transaction/updateAudit";
+import { isPostgresError } from "../../utils/postgresError";
+import { isHouseholdRole } from "../../core/authz/capabilities";
+import { normalizeTagName } from "../../modules/tags/tags.name-guard";
+
+const RECEIPT_IMPORT_TAG = normalizeTagName("Receipt Import");
+
+function assertReceiptAmount(receiptAmount: string, transactionAmount: string): void {
+  const diff = new Money(receiptAmount).abs().subtract(new Money(transactionAmount).abs()).abs();
+  if (diff.gt(new Money(MATCH_AMOUNT_TOLERANCE))) {
+    throw new ValidationError(
+      `Amount mismatch: receipt shows ${receiptAmount} but transaction is ${transactionAmount}. ` +
+      `Difference of ${diff.toString()} exceeds tolerance of ${MATCH_AMOUNT_TOLERANCE}.`,
+      [{ field: "amount", message: `Amount mismatch: receipt ${receiptAmount}, transaction ${transactionAmount}`, code: "AMOUNT_MISMATCH" }],
+    );
+  }
+}
 
 export class ReceiptTransactionService {
   /**
@@ -40,110 +62,64 @@ export class ReceiptTransactionService {
     transactionId: string,
     householdId: string,
     userId?: string,
-    options?: { skipAmountValidation?: boolean }
-  ): Promise<void> {
-    const receipt = await receiptRepository.findById(receiptId);
-    if (!receipt || receipt.householdId !== householdId) {
-      throw new NotFoundError("Receipt not found");
-    }
-
-    const visibilityUserId = userId ?? receipt.uploadedBy;
-
-    const transaction = await transactionRepository.findByIdWithVisibility(
+    options?: { skipAmountValidation?: boolean; ipAddress?: string }
+  ): Promise<boolean> {
+    const visibilityUserId = userId ?? (await receiptRepository.findById(receiptId))?.uploadedBy;
+    if (!visibilityUserId) throw new NotFoundError("Receipt not found");
+    const receipt = await receiptRepository.findForSignedMatch(receiptId, householdId, visibilityUserId);
+    if (!receipt) throw new NotFoundError("Receipt not found");
+    const preview = await transactionRepository.findByIdWithVisibility(
       transactionId,
       householdId,
       visibilityUserId
     );
-    if (!transaction) {
-      throw new NotFoundError("Transaction not found");
-    }
+    if (!preview) throw new NotFoundError("Transaction not found");
+    const merchantName = (receipt.ocrData as OcrExtractedData | null)?.merchantName;
+    const merchantMatch = merchantName && !preview.merchantId
+      ? await resolveMerchantMatch({ householdId, rawName: merchantName })
+      : undefined;
 
-    // Validate amount match unless explicitly skipped
-    const ocrData = receipt.ocrData as OcrExtractedData | null;
-    if (ocrData?.amount && !options?.skipAmountValidation) {
-      const ocrAmount = new Money(ocrData.amount).abs();
-      const txnAmount = new Money(transaction.amount).abs();
-      const diff = ocrAmount.subtract(txnAmount).abs();
-      const tolerance = new Money(MATCH_AMOUNT_TOLERANCE);
-
-      if (diff.gt(tolerance)) {
-        throw new ValidationError(
-          `Amount mismatch: receipt shows ${ocrData.amount} but transaction is ${transaction.amount}. ` +
-          `Difference of ${diff.toString()} exceeds tolerance of ${MATCH_AMOUNT_TOLERANCE}.`,
-          [
-            {
-              field: "amount",
-              message: `Amount mismatch: receipt ${ocrData.amount}, transaction ${transaction.amount}`,
-              code: "AMOUNT_MISMATCH",
-            },
-          ]
-        );
+    // Serialize linking with OCR, other linkers and the posting's current privacy.
+    return withTransaction(async (tx) => {
+      const actor = await lockTransactionCreateGrant(tx, householdId, { createActor: { householdId, userId: visibilityUserId } });
+      if (!actor) throw new NotFoundError("Transaction");
+      const locked = await receiptRepository.lockVisibleReceiptForWrite(tx, actor, receiptId);
+      if (!locked) throw new NotFoundError("Receipt not found");
+      const [conversion] = await tx.select({ transactionId: receiptConversionRecords.transactionId })
+        .from(receiptConversionRecords).where(eq(receiptConversionRecords.receiptId, receiptId));
+      if (conversion || locked.matchStatus === "matched" || locked.matchedTransactionId) {
+        if (locked.matchStatus === "matched" && locked.matchedTransactionId === transactionId
+          && (!conversion || conversion.transactionId === transactionId)) {
+          await requireVisibleReceiptPosting(tx, actor, transactionId);
+          return false;
+        }
+        throw new ConflictError("Receipt is already matched to another transaction");
       }
-    }
 
-    // Resolve the merchant (and persist any alias) up-front, before the atomic
-    // section — mirrors createTransactionFromReceipt. The alias write is a
-    // best-effort, idempotent side effect, not part of the link's atomicity.
-    let resolvedMerchant: { id: string; name: string } | null = null;
-    if (ocrData?.merchantName && !transaction.merchantId) {
-      const merchantMatch = await resolveMerchantMatch({
-        householdId,
-        rawName: ocrData.merchantName,
-      });
-      if (merchantMatch.merchant) {
-        resolvedMerchant = {
-          id: merchantMatch.merchant.id,
-          name: merchantMatch.merchant.name,
-        };
+      const [posting] = await tx.select({ amount: transactions.amount, merchantId: transactions.merchantId })
+        .from(transactions).where(and(eq(transactions.id, transactionId), eq(transactions.householdId, householdId))).for("update");
+      if (!posting) throw new NotFoundError("Transaction not found");
+      await requireVisibleReceiptPosting(tx, actor, transactionId);
+      const ocrData = locked.ocrData as OcrExtractedData | null;
+      if (ocrData?.amount && !options?.skipAmountValidation) assertReceiptAmount(ocrData.amount, posting.amount);
+
+      if (merchantMatch?.merchant && !posting.merchantId && ocrData?.merchantName === merchantName) {
         if (merchantMatch.aliasCandidate) {
-          await ensureMerchantAlias(
-            merchantMatch.merchant.id,
-            merchantMatch.aliasCandidate
-          );
+          await ensureMerchantAlias(merchantMatch.merchant.id, merchantMatch.aliasCandidate, tx);
         }
-      }
-    }
-
-    // SCP-337: the status flip + tag add must be ONE atomic, race-safe unit.
-    // Previously this was read-then-write with no transaction or lock, so a
-    // manual match racing the auto-match cron could double-link and double-tag
-    // the same receipt. Lock the receipt row FOR UPDATE and re-check its status
-    // inside the transaction before writing.
-    await withTransaction(async (tx) => {
-      const [locked] = await tx
-        .select()
-        .from(pendingReceipts)
-        .where(
-          and(
-            eq(pendingReceipts.id, receiptId),
-            eq(pendingReceipts.householdId, householdId)
-          )
-        )
-        .for("update")
-        .limit(1);
-
-      if (!locked) {
-        throw new NotFoundError("Receipt not found");
-      }
-
-      // Race guard: if the receipt was already matched (by a concurrent manual
-      // match or the auto-match cron), do not link again.
-      if (locked.matchStatus === "matched") {
-        if (locked.matchedTransactionId === transactionId) {
-          return; // idempotent: already linked to this exact transaction
-        }
-        throw new ConflictError(
-          "Receipt is already matched to another transaction"
-        );
-      }
-
-      if (resolvedMerchant) {
+        // FIN-16: the merchant/name change is audited in this same transaction.
         await transactionRepository.update(
-          transactionId,
-          householdId,
-          { merchantId: resolvedMerchant.id, name: resolvedMerchant.name },
-          undefined,
-          tx
+          transactionId, householdId, { merchantId: merchantMatch.merchant.id, name: merchantMatch.merchant.name }, undefined, tx,
+          {
+            onWrite: async (writeTx, snapshot) => {
+              await auditTransactionUpdate(writeTx, {
+                householdId, userId: userId ?? null, before: snapshot.before, after: snapshot.after,
+                privateAudit: snapshot.privateAudit || await isPrivateTransactionAudit(writeTx, snapshot.after),
+                onlyFields: ["merchantId", "name"], ipAddress: options?.ipAddress,
+                metadata: { operation: "receiptMatch", receiptId },
+              });
+            },
+          },
         );
       }
 
@@ -157,6 +133,12 @@ export class ReceiptTransactionService {
         .where(eq(pendingReceipts.id, receiptId));
 
       await this.addReceiptImportTagWithTx(tx, transactionId, householdId);
+      // The link audit is part of the match, so a failed audit undoes the link.
+      await businessAuditService.log({
+        tx, userId: userId ?? null, householdId, action: "LINK", entityType: "receipt", entityId: receiptId,
+        details: { transactionId }, ipAddress: options?.ipAddress,
+      });
+      return true;
     });
   }
 
@@ -174,10 +156,13 @@ export class ReceiptTransactionService {
       date: string;
       categoryId?: string;
       notes?: string;
-    }
-  ): Promise<{ transactionId: string }> {
-    const receipt = await receiptRepository.findById(receiptId);
-    if (!receipt || receipt.householdId !== householdId) {
+    },
+    auditContext?: { ipAddress?: string },
+  ): Promise<{ transactionId: string; replayed: boolean }> {
+    // R6-08 review: a receipt the caller cannot read is missing before any
+    // account check, so a bad account id cannot tell hidden from unknown.
+    const receipt = await receiptRepository.findForSignedMatch(receiptId, householdId, userId);
+    if (!receipt) {
       throw new NotFoundError("Receipt not found");
     }
 
@@ -191,6 +176,7 @@ export class ReceiptTransactionService {
       throw new NotFoundError("Account not found");
     }
 
+    const requestHash = receiptRequestHash(data);
     const merchantMatch = await resolveMerchantMatch({
       householdId,
       rawName: data.name,
@@ -200,14 +186,9 @@ export class ReceiptTransactionService {
       : merchantMatch.cleanedName || data.name;
     const resolvedMerchantId = merchantMatch.merchant?.id ?? null;
 
-    if (merchantMatch.merchant && merchantMatch.aliasCandidate) {
-      await ensureMerchantAlias(
-        merchantMatch.merchant.id,
-        merchantMatch.aliasCandidate
-      );
-    }
-
     const result = await withTransaction(async (tx) => {
+      const existingId = await lockedConversionResult(tx, receiptId, householdId, userId, requestHash);
+      if (existingId) return { transactionId: existingId, replayed: true };
       const { transaction } =
         await transactionRepository.createWithinTransaction(tx, {
           householdId,
@@ -221,6 +202,15 @@ export class ReceiptTransactionService {
           categoryId: data.categoryId,
           merchantId: resolvedMerchantId,
           notes: data.notes ? `[Receipt Scan] ${data.notes}` : "[Receipt Scan]",
+        }, {
+          createActor: { householdId, userId },
+          validateReferences: true,
+          publishCreatedEvent: true,
+          audit: { householdId, userId, ipAddress: auditContext?.ipAddress,
+            metadata: { operation: "createFromReceipt", receiptId } },
+          merchantAlias: merchantMatch.merchant && merchantMatch.aliasCandidate
+            ? { merchantId: merchantMatch.merchant.id, aliasName: merchantMatch.aliasCandidate }
+            : undefined,
         });
 
       await tx
@@ -234,7 +224,17 @@ export class ReceiptTransactionService {
 
       await this.addReceiptImportTagWithTx(tx, transaction.id, householdId);
 
-      return { transactionId: transaction.id };
+      await tx.insert(receiptConversionRecords).values({
+        receiptId, householdId, transactionId: transaction.id, requestVersion: 1, requestHash,
+      });
+      await businessAuditService.log({
+        tx, userId, householdId, action: "LINK", entityType: "receipt", entityId: receiptId,
+        details: { transactionId: transaction.id, method: "create" }, ipAddress: auditContext?.ipAddress,
+      });
+      return { transactionId: transaction.id, replayed: false };
+    }).catch(error => {
+      if (isPostgresError(error, "23505", "receipt_conversion_household_image_unique")) throw new ConflictError("Receipt has already been converted");
+      throw error;
     });
 
     return result;
@@ -245,39 +245,36 @@ export class ReceiptTransactionService {
     transactionId: string,
     householdId: string
   ): Promise<void> {
-    const existingTag = await tx
-      .select()
-      .from(tags)
-      .where(
-        and(eq(tags.householdId, householdId), eq(tags.name, "Receipt Import"))
-      )
-      .limit(1);
-
-    const tag =
-      existingTag[0] ||
-      (
-        await tx
-          .insert(tags)
-          .values({ householdId, name: "Receipt Import", color: "#10B981" })
-          .returning()
-      )[0];
-
-    const existingLink = await tx
-      .select()
-      .from(transactionTags)
-      .where(
-        and(
-          eq(transactionTags.transactionId, transactionId),
-          eq(transactionTags.tagId, tag.id)
-        )
-      )
-      .limit(1);
-
-    if (existingLink.length === 0) {
-      await tx
-        .insert(transactionTags)
-        .values({ transactionId, tagId: tag.id });
+    // One "Receipt Import" tag per household in any case (NEW-39). This runs after the account
+    // lock, so it cannot take the tag-name lock the import writer takes before its account lock.
+    // The unique index decides instead: a concurrent first insert wins, this insert does nothing,
+    // and the re-read returns the winner's tag.
+    const findTag = async () => (await tx.select().from(tags)
+      .where(and(eq(tags.householdId, householdId), sql`lower(${tags.name}) = lower(${RECEIPT_IMPORT_TAG})`))
+      .limit(1).for("update"))[0];
+    const tag = await findTag()
+      ?? (await tx.insert(tags).values({ householdId, name: RECEIPT_IMPORT_TAG, color: "#10B981" })
+        .onConflictDoNothing().returning())[0]
+      ?? await findTag();
+    if (!tag) throw new ConflictError("Tag state requires reconciliation");
+    // The reused tag may be member-specific (the name is one per household in any case). Apply the
+    // tag writer's rule: its member must still be in this household (TagWriteRepository).
+    if (tag.memberId) {
+      const [member] = await tx.select({ role: householdMembers.role }).from(householdMembers)
+        .where(and(eq(householdMembers.householdId, householdId), eq(householdMembers.userId, tag.memberId))).limit(1);
+      if (!member || !isHouseholdRole(member.role)) throw new ConflictError("Tag state requires reconciliation");
     }
+
+    // Serialize counter verification/effects with the single-transaction writer.
+    // Historical inconsistencies require explicit reconciliation, never a recount.
+    const [count] = await tx.select({ value: sql<number>`count(*)::int`.mapWith(Number) })
+      .from(transactionTags).where(eq(transactionTags.tagId, tag.id));
+    if (!Number.isSafeInteger(tag.usageCount) || tag.usageCount! < 0 || tag.usageCount !== count.value) {
+      throw new ConflictError("Tag state requires reconciliation");
+    }
+    const added = await tx.insert(transactionTags).values({ transactionId, tagId: tag.id })
+      .onConflictDoNothing().returning({ tagId: transactionTags.tagId });
+    if (added.length) await tx.update(tags).set({ usageCount: sql`${tags.usageCount} + 1` }).where(eq(tags.id, tag.id));
   }
 }
 

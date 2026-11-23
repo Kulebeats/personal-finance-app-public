@@ -51,12 +51,8 @@ const createMockCalendarItem = (
   day: 15,
   name: "Netflix",
   amount: { amount: "15.99", currency: "USD" },
-  type: "bill",
   status: "upcoming",
-  category: "Entertainment",
-  logo: "N",
   isPaused: false,
-  frequency: "monthly",
   raw: createMockTransaction(),
   ...overrides,
 });

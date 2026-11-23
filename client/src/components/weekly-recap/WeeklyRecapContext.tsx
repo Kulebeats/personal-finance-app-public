@@ -1,3 +1,4 @@
+import { formatDateParam } from "@/lib/dates";
 import React, { createContext, useContext, useState, useEffect } from "react";
 import {
   useWeeklyRecapData,
@@ -13,6 +14,9 @@ export type RecapStep = WeeklyRecapStep;
 interface WeeklyRecapContextType {
   data: WeeklyRecapData | undefined;
   isLoading: boolean;
+  isChecking: boolean;
+  error: Error | null;
+  retry: () => void;
   currentStep: RecapStep;
   stepIndex: number;
   totalSteps: number;
@@ -42,17 +46,21 @@ export function WeeklyRecapProvider({
   children: React.ReactNode;
   onClose: () => void;
 }) {
-  const { data, isLoading } = useWeeklyRecapData();
+  const { data, isLoading, isChecking, error, refetch } = useWeeklyRecapData();
   const { mutate: submitFeedback } = useWeeklyRecapFeedback();
 
   const [currentStep, setCurrentStep] = useState<RecapStep>("welcome");
 
-  const stepIndex = STEPS.indexOf(currentStep);
-  const totalSteps = STEPS.length;
+  // OPS-007: a section the user excluded in recap settings is not shown.
+  const steps = STEPS.filter(step =>
+    (step !== "goals" || data?.sections?.goals !== false) &&
+    (step !== "recurring" || data?.sections?.recurring !== false));
+  const stepIndex = Math.max(0, steps.indexOf(currentStep));
+  const totalSteps = steps.length;
 
   const nextStep = () => {
     if (stepIndex < totalSteps - 1) {
-      setCurrentStep(STEPS[stepIndex + 1]);
+      setCurrentStep(steps[stepIndex + 1]);
     } else {
       onClose();
     }
@@ -60,7 +68,7 @@ export function WeeklyRecapProvider({
 
   const prevStep = () => {
     if (stepIndex > 0) {
-      setCurrentStep(STEPS[stepIndex - 1]);
+      setCurrentStep(steps[stepIndex - 1]);
     }
   };
 
@@ -94,7 +102,8 @@ export function WeeklyRecapProvider({
     const weekEndDate = new Date(weekStartDate);
     weekEndDate.setDate(weekStartDate.getDate() + 6);
 
-    const formatDate = (d: Date) => d.toISOString().split("T")[0];
+    // Local calendar date; toISOString() would give the previous day east of UTC.
+    const formatDate = (d: Date) => formatDateParam(d);
 
     const weekStart = data?.weekStart ?? formatDate(weekStartDate);
     const weekEnd = data?.weekEnd ?? formatDate(weekEndDate);
@@ -111,6 +120,9 @@ export function WeeklyRecapProvider({
       value={{
         data,
         isLoading,
+        isChecking,
+        error,
+        retry: () => { void refetch(); },
         currentStep,
         stepIndex,
         totalSteps,

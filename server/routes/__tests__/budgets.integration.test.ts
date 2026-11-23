@@ -17,9 +17,9 @@ const {
     createBudget: vi.fn(),
     updateBudget: vi.fn(),
     deleteBudget: vi.fn(),
-    getBudgetAlerts: vi.fn(),
+    getBudgetAlertsReport: vi.fn(),
     moveBudgetAmount: vi.fn(),
-    getBudgetProgress: vi.fn(),
+    getBudgetProgressReport: vi.fn(),
     getBudgetForecast: vi.fn(),
   },
   mockBusinessAuditService: {
@@ -78,6 +78,7 @@ vi.mock("../../middleware/validateEntity", () => ({
 vi.mock("../../middleware/rateLimit", () => ({
   generalLimiter: (req: any, res: any, next: any) => next(),
   analyticsLimiter: (req: any, res: any, next: any) => next(),
+  strictLimiter: (_req: unknown, _res: unknown, next: () => void) => next(),
 }));
 
 // Import Routes
@@ -117,14 +118,15 @@ describe("Budgets Integration", () => {
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
 
-      expect(mockBudgetService.createBudget).toHaveBeenCalled();
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "budget",
-          entityId: "budget-1",
-          householdId: "house-123",
-        })
+      // The service writes the budget and its audit row in one transaction
+      // (A-23), so the controller hands it the actor rather than auditing after.
+      expect(mockBudgetService.createBudget).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "Groceries", amount: "500.00", currency: "ZMW" }),
+        "house-123",
+        expect.objectContaining({ userId: "user-123" }),
+        undefined,
       );
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
   });
 
@@ -152,18 +154,16 @@ describe("Budgets Integration", () => {
 
       expect(res.status).toBe(200);
 
-      expect(mockBudgetService.updateBudget).toHaveBeenCalled();
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "budget",
-          entityId: "budget-1",
-        })
-      );
+      // NEW-32: the service writes the budget and its audit row in one
+      // transaction, so the controller hands it the actor and audits nothing.
+      expect(mockBudgetService.updateBudget).toHaveBeenCalledWith(
+        "budget-1", expect.anything(), "house-123", expect.objectContaining({ userId: "user-123", ipAddress: "127.0.0.1" }));
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
     });
 
-    it("should create exactly one audit entry per budget update (QA-005)", async () => {
-      // This test verifies BE-007 fix: no duplicate audit logging
-      // Controller logs audit event, service should NOT log duplicate
+    it("should leave the one audit entry per budget update to the service (QA-005)", async () => {
+      // BE-007: no duplicate audit logging. NEW-32 moved the one row into the
+      // service transaction, so the controller writes none.
       const mockBudget = {
         id: "budget-1",
         name: "Groceries Updated",
@@ -186,9 +186,8 @@ describe("Budgets Integration", () => {
           amount: { amount: "600.00", currency: "ZMW" },
         });
 
-      // Verify exactly ONE audit log call (not duplicated)
-      expect(mockBusinessAuditService.logUpdate).toHaveBeenCalledTimes(1);
-      // Also verify log() wasn't called (service-level audit was removed)
+      expect(mockBudgetService.updateBudget).toHaveBeenCalledTimes(1);
+      expect(mockBusinessAuditService.logUpdate).not.toHaveBeenCalled();
       expect(mockBusinessAuditService.log).not.toHaveBeenCalled();
     });
   });
@@ -207,20 +206,15 @@ describe("Budgets Integration", () => {
 
       expect(res.status).toBe(200);
 
-      expect(mockBudgetService.deleteBudget).toHaveBeenCalled();
-      expect(mockBusinessAuditService.logDelete).toHaveBeenCalledWith(
-        expect.objectContaining({
-          entityType: "budget",
-          entityId: "budget-1",
-        })
-      );
+      expect(mockBudgetService.deleteBudget).toHaveBeenCalledWith("budget-1", "house-123", expect.objectContaining({ userId: "user-123", ipAddress: "127.0.0.1" }));
+      expect(mockBusinessAuditService.logDelete).not.toHaveBeenCalled();
     });
   });
 
   describe("GET /api/budgets/progress", () => {
     it("should handle zero budget without NaN (BE-PROG-001)", async () => {
       // This tests that zero budget doesn't cause division by zero / NaN
-      // Controller expects array from getBudgetProgress
+      // Controller expects { progress, unavailable } from getBudgetProgressReport
       const mockProgress = [
         {
           id: "budget-zero",
@@ -240,7 +234,7 @@ describe("Budgets Integration", () => {
         },
       ];
 
-      mockBudgetService.getBudgetProgress.mockResolvedValue(mockProgress);
+      mockBudgetService.getBudgetProgressReport.mockResolvedValue({ progress: mockProgress, unavailable: [], unbudgeted: { expense: null, income: null } });
 
       const res = await request(app).get("/api/budgets/progress").query({
         year: "2024",
@@ -332,7 +326,7 @@ describe("Budgets Integration", () => {
         },
       ];
 
-      mockBudgetService.getBudgetAlerts.mockResolvedValue(mockAlerts);
+      mockBudgetService.getBudgetAlertsReport.mockResolvedValue({ alerts: mockAlerts, unavailable: [] });
 
       const res = await request(app).get("/api/budgets/alerts").query({
         year: "2024",
@@ -354,10 +348,12 @@ describe("Budgets Integration", () => {
           spent: { amount: "650.00", currency: "ZMW" },
         },
       ]);
-      expect(mockBudgetService.getBudgetAlerts).toHaveBeenCalledWith(
+      expect(res.body.meta).toEqual({ unavailableBudgets: [] });
+      expect(mockBudgetService.getBudgetAlertsReport).toHaveBeenCalledWith(
         "house-123",
         2024,
-        1
+        1,
+        { kind: "actor", actor: { householdId: "house-123", userId: "user-123", role: "admin" } },
       );
     });
   });
@@ -399,13 +395,9 @@ describe("Budgets Integration", () => {
       });
 
       expect(res.status).toBe(200);
-      expect(mockBudgetService.moveBudgetAmount).toHaveBeenCalled();
-      expect(mockBusinessAuditService.log).toHaveBeenCalledWith(
-        expect.objectContaining({
-          action: "TRANSFER",
-          entityType: "budget",
-        })
-      );
+      expect(mockBudgetService.moveBudgetAmount).toHaveBeenCalledWith(
+        "house-123", expect.anything(), expect.objectContaining({ userId: "user-123", ipAddress: "127.0.0.1" }));
+      expect(mockBusinessAuditService.log).not.toHaveBeenCalled();
     });
   });
 });

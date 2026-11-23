@@ -1,41 +1,51 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { pensionService } from "../services/PensionService";
 import { householdGuard, requireRole, requireAuth } from "../middleware/auth";
-import { generalLimiter } from "../middleware/rateLimit";
-import {
-  insertPensionHoldingSchema,
-  insertPensionContributionSchema,
-} from "@shared/schema";
+import { insertPensionHoldingSchema } from "@shared/schema";
+import { pensionContributionSchema } from "./investment-pension.validation";
+import { businessAuditService } from "../services/BusinessAuditService";
 import { z } from "zod";
-import { getErrorMessage } from "../core/errors";
+import { getErrorMessage, HttpError, UnauthorizedError, ValidationError } from "../core/errors";
+import { logger } from "../utils/logger";
 
 const router = Router();
+/** The shared 500 body (errorHandler.ts); the cause is logged, never returned. */
+const INTERNAL_ERROR_BODY = { success: false, error: { code: "INTERNAL_ERROR", message: "An unexpected error occurred" } } as const;
+
+function pensionWriter(req: Request) {
+  const actor = req.householdContext!;
+  if (!req.user || req.user.id !== actor.userId || req.session?.userId !== actor.userId || !req.sessionID) {
+    throw new UnauthorizedError("Authentication changed; sign in again");
+  }
+  return {
+    actor,
+    session: { snapshot: structuredClone(req.user), sessionId: req.sessionID, generation: req.session.securityGeneration },
+    ipAddress: businessAuditService.getIpAddress(req),
+  };
+}
 
 // SEC-AUTH-007: Apply authentication, rate limiting, and household guard
 router.use(requireAuth);
-router.use(generalLimiter);
 router.use(householdGuard);
 
 router.get("/", async (req, res) => {
   try {
-    const { householdId } = req.householdContext!;
-    const holdings = await pensionService.getHoldings(householdId);
+    const holdings = await pensionService.getHoldings(req.householdContext!);
     res.json({ success: true, data: holdings });
   } catch (error: unknown) {
     res.status(500).json({ success: false, message: getErrorMessage(error) });
   }
 });
 
-// FIX AUTH-PENSION-001: Pass householdId to enforce isolation
+// FIX AUTH-PENSION-001 + A-56: only a holding the actor can see (else 404)
 router.get("/:id/contributions", async (req, res) => {
   try {
-    const { householdId } = req.householdContext!;
-    const contributions = await pensionService.getContributions(
-      req.params.id,
-      householdId
-    );
+    const contributions = await pensionService.getContributions(req.params.id, req.householdContext!);
     res.json({ success: true, data: contributions });
   } catch (error: unknown) {
+    if (error instanceof HttpError) {
+      return res.status(error.statusCode).json({ success: false, error: { code: error.code, message: error.message } });
+    }
     res.status(500).json({ success: false, message: getErrorMessage(error) });
   }
 });
@@ -44,46 +54,51 @@ router.get("/:id/contributions", async (req, res) => {
 // FIX DATA-PENSION-003: Add Zod validation
 router.post("/", requireRole("member"), async (req, res) => {
   try {
-    const { householdId } = req.householdContext!;
+    const writer = pensionWriter(req);
 
     // Validate input with Zod
     const validated = insertPensionHoldingSchema.parse({
       ...req.body,
-      householdId,
+      householdId: writer.actor.householdId,
     });
 
-    const holding = await pensionService.addHolding(validated, householdId);
+    const holding = await pensionService.addHolding(validated, writer);
     res.json({ success: true, data: holding });
   } catch (error: unknown) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ success: false, errors: error.errors });
     }
-    res.status(500).json({ success: false, message: getErrorMessage(error) });
+    if (error instanceof HttpError) {
+      return res.status(error.statusCode).json({ success: false, error: { code: error.code, message: error.message } });
+    }
+    // NEW-24: log the cause; never return raw error text.
+    logger.error("Pension holding create failed", { householdId: req.householdContext?.householdId, detail: getErrorMessage(error) },
+      error instanceof Error ? error : undefined);
+    res.status(500).json(INTERNAL_ERROR_BODY);
   }
 });
 
-// FIX AUTH-PENSION-001: Pass householdId to validate holding ownership
-// FIX DATA-PENSION-003: Add Zod validation
+// NEW-24: validated, atomic and audited. Amounts are MoneyDto objects; the
+// service locks the holding, checks its currency and writes the audit row.
 router.post("/:id/contributions", requireRole("member"), async (req, res) => {
   try {
-    const { householdId } = req.householdContext!;
-
-    // Validate input with Zod
-    const validated = insertPensionContributionSchema.parse({
-      ...req.body,
-      pensionHoldingId: req.params.id,
-    });
-
-    const contribution = await pensionService.addContribution(
-      validated,
-      householdId
-    );
-    res.json({ success: true, data: contribution });
-  } catch (error: unknown) {
-    if (error instanceof z.ZodError) {
-      return res.status(400).json({ success: false, errors: error.errors });
+    const parsed = pensionContributionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new ValidationError("Invalid pension contribution", parsed.error.errors);
     }
-    res.status(500).json({ success: false, message: getErrorMessage(error) });
+
+    const contribution = await pensionService.addContribution(parsed.data, {
+      pensionHoldingId: req.params.id,
+      ...pensionWriter(req),
+    });
+    res.status(201).json({ success: true, data: contribution });
+  } catch (error: unknown) {
+    if (error instanceof HttpError) {
+      return res.status(error.statusCode).json({ success: false, error: { code: error.code, message: error.message } });
+    }
+    logger.error("Pension contribution failed", { householdId: req.householdContext?.householdId,
+      pensionHoldingId: req.params.id, detail: getErrorMessage(error) }, error instanceof Error ? error : undefined);
+    res.status(500).json(INTERNAL_ERROR_BODY);
   }
 });
 

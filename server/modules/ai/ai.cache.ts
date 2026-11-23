@@ -1,16 +1,16 @@
 /**
  * AI Caching Layer
  *
- * Simple in-memory cache for AI tool results.
- * - 5-minute TTL for cacheable queries
- * - Household-scoped cache keys
- * - Invalidation on data writes
+ * Legacy L1/L2 cache primitives. Tool-result reuse is disabled until cache
+ * identity includes the current actor, visibility and data generation.
+ * AI tools continue to read and sanitize current data on every request.
  *
  * @module ai/ai.cache
  */
 
 import { logger } from '../../utils/logger';
 import {
+  productionRedis,
   redisGetJson,
   redisSetJson,
   redisDeleteByPrefix,
@@ -24,26 +24,6 @@ const DEFAULT_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const DEFAULT_TTL_SECONDS = 5 * 60; // 5 minutes
 const CACHE_CLEANUP_INTERVAL_MS = 60 * 1000; // 1 minute
 
-// Tools that should be cached
-const CACHEABLE_TOOLS = new Set([
-  'get_spending_by_category',
-  'get_budget_status',
-  'get_goals_status',
-  'get_upcoming_recurring',
-  'get_account_balances',
-  'get_merchant_spending',
-  'get_category_trends',
-  'get_monthly_summary',
-  'get_goal_assignments',
-  'get_cash_flow'
-]);
-
-// Tools that should NOT be cached (real-time data)
-const NON_CACHEABLE_TOOLS = new Set([
-  'get_recent_transactions',
-  'get_transaction_search'
-]);
-
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -53,6 +33,12 @@ interface CacheEntry<T = unknown> {
   expiresAt: number;
   createdAt: number;
   hitCount: number;
+}
+
+/** Whose view a cached tool result is: the household and the acting member. */
+export interface CacheIdentity {
+  householdId: string;
+  userId: string;
 }
 
 interface CacheStats {
@@ -80,38 +66,55 @@ export class AICache {
       evictions: 0
     };
 
-    // Start periodic cleanup
-    this.startCleanup();
+    // The admitted R20 profile has no AI-cache namespace or user/generation
+    // cache identity yet. Disable the optional cache rather than falling back
+    // to household-only L1 entries or issuing rejected ai:* Redis operations.
+    if (!productionRedis) this.startCleanup();
   }
 
   /**
-   * Check if a tool is cacheable.
+   * Bypass tool-result reuse in every profile without bypassing its lease check.
    */
-  isCacheable(toolName: string): boolean {
-    return CACHEABLE_TOOLS.has(toolName);
+  isCacheable(_toolName: string): boolean {
+    if (productionRedis) {
+      productionRedis.assertCurrent();
+    }
+    return false;
   }
 
   /**
    * Generate a cache key for a tool call.
    */
   generateKey(
-    householdId: string,
+    identity: CacheIdentity,
     toolName: string,
     args: Record<string, unknown>
   ): string {
+    // C3-08: a tool result is filtered for the member who asked, so the acting
+    // member is part of the key. Household and tool stay first so
+    // invalidateHousehold and invalidateTool still clear every member's entries.
+    const { householdId, userId } = identity;
+    if (!householdId || !userId) {
+      throw new Error('AI cache key requires the household and the acting member');
+    }
+
     // Sort args for consistent key generation
     const sortedArgs = Object.keys(args)
       .sort()
       .map(key => `${key}=${JSON.stringify(args[key])}`)
       .join('&');
 
-    return `ai:${householdId}:${toolName}:${sortedArgs}`;
+    return `ai:${householdId}:${toolName}:${userId}:${sortedArgs}`;
   }
 
   /**
    * Get a cached result.
    */
   get<T>(key: string): T | null {
+    if (productionRedis) {
+      productionRedis.assertCurrent();
+      return null;
+    }
     const entry = this.cache.get(key);
 
     if (!entry) {
@@ -144,6 +147,10 @@ export class AICache {
    * Set a cached result.
    */
   set<T>(key: string, data: T, ttlMs: number = DEFAULT_TTL_MS): void {
+    if (productionRedis) {
+      productionRedis.assertCurrent();
+      return;
+    }
     const entry: CacheEntry<T> = {
       data,
       expiresAt: Date.now() + ttlMs,
@@ -171,6 +178,10 @@ export class AICache {
    * not configured this behaves exactly like the synchronous in-memory `get`.
    */
   async getAsync<T>(key: string): Promise<T | null> {
+    if (productionRedis) {
+      productionRedis.assertCurrent();
+      return null;
+    }
     // L1: in-process cache.
     const local = this.get<T>(key);
     if (local !== null) {
@@ -200,6 +211,10 @@ export class AICache {
     data: T,
     ttlMs: number = DEFAULT_TTL_MS,
   ): Promise<void> {
+    if (productionRedis) {
+      productionRedis.assertCurrent();
+      return;
+    }
     this.set<T>(key, data, ttlMs);
     await redisSetJson<T>(key, data, Math.ceil(ttlMs / 1000) || DEFAULT_TTL_SECONDS);
   }
@@ -209,6 +224,7 @@ export class AICache {
    * Call this when data changes (transactions, budgets, goals, etc.).
    */
   invalidateHousehold(householdId: string): number {
+    productionRedis?.assertCurrent();
     let count = 0;
     const prefix = `ai:${householdId}:`;
 
@@ -220,9 +236,11 @@ export class AICache {
     }
 
     // Clear the shared Redis layer too (fire-and-forget; no-op without Redis).
-    void redisDeleteByPrefix(prefix).catch((error) =>
-      logger.warn('AI cache redis invalidation failed', { householdId, error }),
-    );
+    if (!productionRedis) {
+      void redisDeleteByPrefix(prefix).catch((error) =>
+        logger.warn('AI cache redis invalidation failed', { householdId, error }),
+      );
+    }
 
     if (count > 0) {
       this.stats.evictions += count;
@@ -241,6 +259,7 @@ export class AICache {
    * Invalidate specific tool results for a household.
    */
   invalidateTool(householdId: string, toolName: string): number {
+    productionRedis?.assertCurrent();
     let count = 0;
     const prefix = `ai:${householdId}:${toolName}:`;
 
@@ -252,13 +271,15 @@ export class AICache {
     }
 
     // Clear the shared Redis layer too (fire-and-forget; no-op without Redis).
-    void redisDeleteByPrefix(prefix).catch((error) =>
-      logger.warn('AI cache redis tool invalidation failed', {
-        householdId,
-        toolName,
-        error,
-      }),
-    );
+    if (!productionRedis) {
+      void redisDeleteByPrefix(prefix).catch((error) =>
+        logger.warn('AI cache redis tool invalidation failed', {
+          householdId,
+          toolName,
+          error,
+        }),
+      );
+    }
 
     if (count > 0) {
       this.stats.evictions += count;

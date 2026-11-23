@@ -22,7 +22,6 @@
  */
 
 import { randomUUID } from "crypto";
-import * as fs from "fs/promises";
 import * as path from "path";
 import { Request, Response, NextFunction } from "express";
 import multer from "multer";
@@ -30,6 +29,7 @@ import { eq } from "drizzle-orm";
 import { users } from "@shared/schema";
 import { businessAuditService } from "../../services/BusinessAuditService";
 import { withTransaction } from "../../utils/withTransaction";
+import { lockLiveMembership } from "./settings.membership-lock";
 import { ValidationError, NotFoundError } from "../../core/errors";
 import { success } from "../../core/http";
 import {
@@ -37,6 +37,8 @@ import {
   sanitizeUploadExtension,
 } from "../../core/uploads";
 import { logger } from "../../utils/logger";
+import { discardUnlessCommitted, putUploadObject, removeUploadObject } from "../../core/storage/upload-objects";
+import { toOwnProfileDto } from "../auth/auth.dto";
 
 /** Matches the client-side size check in ProfilePictureUpload.tsx. */
 const MAX_PICTURE_FILE_SIZE = 5 * 1024 * 1024;
@@ -120,23 +122,16 @@ async function removePictureFile(
   profilePictureUrl: string,
   householdId: string,
 ): Promise<void> {
-  const filePath = resolveOwnedPicturePath(profilePictureUrl, householdId);
-  if (!filePath) {
+  if (!resolveOwnedPicturePath(profilePictureUrl, householdId)) {
     return;
   }
   try {
-    await fs.unlink(filePath);
+    await removeUploadObject(profilePictureUrl);
   } catch (error) {
     logger.warn("Failed to remove old profile picture file", {
       error: (error as Error).message,
     });
   }
-}
-
-/** Strip the password hash before returning a user row to the client. */
-function toClientProfile(user: typeof users.$inferSelect) {
-  const { passwordHash: _passwordHash, ...profile } = user;
-  return profile;
 }
 
 export const settingsPictureController = {
@@ -161,21 +156,10 @@ export const settingsPictureController = {
       );
 
       const storedFilename = `${randomUUID()}${ext}`;
-      const directory = path.join(PICTURES_ROOT, householdId);
-      const filePath = path.join(directory, storedFilename);
-
-      // SEC-PATH-002: Verify resolved path is within expected directory.
-      // (There is no user input in the path now, but keep the containment
-      // assertion as defense-in-depth.)
-      if (!path.resolve(filePath).startsWith(PICTURES_ROOT + path.sep)) {
-        throw new ValidationError("Invalid file path");
-      }
-
       const pictureUrl = `/uploads/profile-pictures/${householdId}/${storedFilename}`;
 
-      // Write the file first; if the transactional DB update fails we remove it.
-      await fs.mkdir(directory, { recursive: true });
-      await fs.writeFile(filePath, file.buffer);
+      // Store the bytes (OPS-001); if the transactional DB update fails we remove them.
+      await putUploadObject({ stored: pictureUrl, householdId, purpose: "profile-picture", bytes: file.buffer, mediaType: file.mimetype, userId });
 
       // Rule 10: lock the user row FOR UPDATE so concurrent uploads/deletes
       // serialize — otherwise both read the same oldPictureUrl and the
@@ -186,6 +170,10 @@ export const settingsPictureController = {
       let oldPictureUrl: string | null;
       try {
         const result = await withTransaction(async (tx) => {
+          // Live membership, under the lock erasure takes first (members, then the user
+          // row): an erasure that removed this member commits before the URL is published,
+          // and this upload then rolls back, so it never names bytes erasure deleted.
+          await lockLiveMembership(tx, householdId, userId);
           const [locked] = await tx
             .select()
             .from(users)
@@ -226,8 +214,8 @@ export const settingsPictureController = {
         updatedUser = result.updated;
         oldPictureUrl = result.oldPictureUrl;
       } catch (error) {
-        // DB update rolled back after the file write; don't leave the orphan.
-        await removePictureFile(pictureUrl, householdId);
+        // The new file goes only if the update certainly rolled back.
+        await discardUnlessCommitted(pictureUrl, "profile-picture", error);
         throw error;
       }
 
@@ -239,7 +227,7 @@ export const settingsPictureController = {
         userId: userId.substring(0, 8),
       });
 
-      success(res, { profile: toClientProfile(updatedUser), pictureUrl }, 200, {
+      success(res, { profile: toOwnProfileDto(updatedUser), pictureUrl }, 200, {
         message: "Profile picture uploaded successfully",
       });
     } catch (error) {
@@ -301,7 +289,7 @@ export const settingsPictureController = {
         });
       }
 
-      success(res, { profile: toClientProfile(result.updated) }, 200, {
+      success(res, { profile: toOwnProfileDto(result.updated) }, 200, {
         message: "Profile picture removed",
       });
     } catch (error) {

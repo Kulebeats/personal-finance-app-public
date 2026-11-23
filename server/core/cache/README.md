@@ -53,10 +53,10 @@ const goals = await cachedGetGoals(householdId);
 import { invalidateTag, invalidateTags } from "./core/cache";
 
 // Invalidate all entries tagged "goals"
-invalidateTag("goals");
+await invalidateTag("goals");
 
 // Invalidate multiple tags
-invalidateTags(["goals", "accounts"]);
+await invalidateTags(["goals", "accounts"]);
 ```
 
 ### Prefix Invalidation
@@ -65,8 +65,14 @@ invalidateTags(["goals", "accounts"]);
 import { invalidatePrefix } from "./core/cache";
 
 // Invalidate all keys starting with "reports:"
-invalidatePrefix("reports");
+await invalidatePrefix("reports");
 ```
+
+Invalidation helpers resolve with confirmed deletion counts and reject failures.
+A required Redis backend supplies `assertCurrent()` for lifetime fencing; it uses
+the async methods and rejects unsupported patterns or unavailable remote work.
+Its synchronous Map methods refuse, and confirmed remote absence stays absent.
+Ordinary optional backends keep their existing local fallback behavior.
 
 ## Decorator (Class Methods)
 

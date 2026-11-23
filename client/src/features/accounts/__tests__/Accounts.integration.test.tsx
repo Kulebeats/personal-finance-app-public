@@ -3,6 +3,12 @@ import Accounts from "@/pages/Accounts";
 import { TestWrapper } from "@/test/test-utils";
 import { vi, Mock } from "vitest"; // Import Mock type
 import * as hooks from "@/hooks"; // Import all hooks to mock specific properties
+import { personalPreferences, personalUserId } from "@/hooks/__tests__/personal-preferences-fixture";
+vi.mock("@/contexts/SessionContext", () => ({ useSession: () => ({ status: { state: "ready", subject: { id: "11111111-1111-4111-8111-111111111111" } }, loading: false }) }));
+vi.mock("@/hooks/use-settings", async original => ({ ...await original<typeof import("@/hooks/use-settings")>(),
+  useUserPreferences: () => ({ data: personalPreferences(), isLoading: false, error: null }),
+  useProfile: () => ({ data: { id: personalUserId } }), useHouseholdMembers: () => ({ data: [] }),
+}));
 
 // Mock the hooks module
 vi.mock("@/hooks", async (importOriginal) => {
@@ -82,7 +88,8 @@ describe("Accounts Page Integration", () => {
     });
 
     (hooks.useNetWorthHistory as Mock).mockReturnValue({
-      data: { series: [] },
+      data: { accounts: mockAccounts, series: [], currentStatus: "available",
+        latest: { assets: 5000, liabilities: 1500, netWorth: 3500, currency: "ZMW" } },
       isLoading: false,
     });
   });
@@ -118,7 +125,7 @@ describe("Accounts Page Integration", () => {
     expect(screen.getByText("Summary")).toBeDefined();
     expect(screen.getAllByText("Assets").length).toBeGreaterThan(0);
     // Summary values
-    expect(screen.getByText("K3,500.00")).toBeDefined(); // Net Worth
+    expect(screen.getByText(/ZMW.*3,500\.00/)).toBeDefined(); // Coherent current net worth with its denomination.
   });
 
   it("does not render the removed ViewSwitcher placeholder-only dropdown", () => {
@@ -135,7 +142,7 @@ describe("Accounts Page Integration", () => {
   });
 
   it("shows loading state", () => {
-    (hooks.useAccounts as Mock).mockReturnValue({
+    (hooks.useNetWorthHistory as Mock).mockReturnValue({
       data: undefined,
       isLoading: true,
       error: null,
@@ -147,8 +154,7 @@ describe("Accounts Page Integration", () => {
       </TestWrapper>
     );
 
-    // Should find loader (we removed specific text, look for valid loading indicator)
-    // Or just check that Accounts content isn't there
-    expect(screen.queryByText("Net Worth")).toBeNull();
+    expect(screen.getAllByText(/Checking current access/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Main Checking")).not.toBeInTheDocument();
   });
 });

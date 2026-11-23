@@ -18,6 +18,7 @@ import {
 import { createHousehold } from "../sections/HouseholdSection/components/CreateHouseholdForm";
 import { updateHouseholdGeneral } from "../sections/HouseholdSection/components/EditHouseholdForm";
 import { updateWeeklyRecapSettings } from "../sections/WeeklyRecapSection";
+import { updateAutoRolloverBudget } from "../sections/HouseholdSection/components/BudgetRolloverSetting";
 
 const mockFetch = vi.fn();
 
@@ -159,7 +160,7 @@ describe("settings section mutations attach x-csrf-token", () => {
   });
 
   it("updateWeeklyRecapSettings PATCHes with the header and unwraps the envelope", async () => {
-    const settings = { enabled: true, dayOfWeek: 0 };
+    const settings = { enabled: true, emailEnabled: false, dayOfWeek: 0, includeGoals: true, includeRecurring: true };
     mockFetch.mockResolvedValue(
       mockFetchResponse({ success: true, data: settings }),
     );
@@ -171,5 +172,22 @@ describe("settings section mutations attach x-csrf-token", () => {
       csrfHeadered("PATCH"),
     );
     expect(result).toEqual(settings);
+  });
+
+  it("updateAutoRolloverBudget PUTs only the rollover flag with the header", async () => {
+    const preferences = { householdId: "h1", autoRolloverBudget: true };
+    mockFetch.mockResolvedValue(
+      mockFetchResponse({ success: true, data: { preferences } }),
+    );
+
+    const result = await updateAutoRolloverBudget(true);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/settings/preferences",
+      csrfHeadered("PUT"),
+    );
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(init.body).toBe(JSON.stringify({ autoRolloverBudget: true }));
+    expect(result).toEqual(preferences);
   });
 });

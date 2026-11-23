@@ -1,0 +1,11 @@
+pfa_completion_r00_20261015_r00oct15a1_test|127.0.0.1|55432|UTC|pfa-synthetic-test:v1:r00oct15a1:pfa_completion_r00_20261015_r00oct15a1_test
+12
+filter_presets|filter_presets_name_unique_per_scope
+filter_presets|filter_presets_one_default_per_scope
+filter_presets|filter_presets_pkey
+household_members|household_members_household_user_unique
+household_members|household_members_pkey
+chk_budget_alert_threshold|CHECK (((alert_threshold IS NULL) OR ((alert_threshold >= 0) AND (alert_threshold <= 200))))
+chk_budget_amount_positive|CHECK (((amount)::numeric >= (0)::numeric))
+chk_budget_warning_threshold|CHECK (((warning_threshold IS NULL) OR ((warning_threshold >= 0) AND (warning_threshold <= 100))))
+chk_budgets_period_monthly|CHECK (((period)::text = 'monthly'::text))

@@ -6,11 +6,13 @@
  * @module hooks/investments/useSecurities
  */
 
+import { userErrorMessage } from "@/lib/errorCopy";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "../../lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { investmentKeys } from "./keys";
 import type { Security } from "./types";
+import { valuationQueryPolicy } from "./valuationQueryPolicy";
 
 export function useSecurities(options?: {
   type?: string;
@@ -19,6 +21,7 @@ export function useSecurities(options?: {
   search?: string;
 }) {
   return useQuery({
+    ...valuationQueryPolicy,
     queryKey: [...investmentKeys.securities(), options],
     queryFn: async () => {
       const params = new URLSearchParams();
@@ -39,6 +42,7 @@ export function useSecurities(options?: {
 
 export function useSecurity(id: string) {
   return useQuery({
+    ...valuationQueryPolicy,
     queryKey: investmentKeys.security(id),
     queryFn: async () => {
       const response = await apiRequest(
@@ -75,7 +79,7 @@ export function useCreateSecurity() {
     onError: (error: Error) => {
       toast({
         title: "Error",
-        description: error.message || "Failed to create security",
+        description: userErrorMessage(error, "Failed to create security"),
         variant: "destructive",
       });
     },
@@ -91,15 +95,17 @@ export function useUpdateSecurityPrice() {
       id,
       price,
       date,
+      validThrough,
     }: {
       id: string;
-      price: number;
-      date?: string;
+      price: string | number;
+      date: string;
+      validThrough: string;
     }) => {
       const response = await apiRequest(
         "PUT",
         `/api/investments/securities/${id}/price`,
-        { price, date }
+        { price, date, validThrough }
       );
       return response.json();
     },
@@ -111,13 +117,13 @@ export function useUpdateSecurityPrice() {
       });
       toast({
         title: "Price Updated",
-        description: `${data.data.symbol} price updated to ${data.data.currentPrice}`,
+        description: `${data.data.symbol} price recorded through ${data.data.validThrough}`,
       });
     },
     onError: (error: Error) => {
       toast({
         title: "Error",
-        description: error.message || "Failed to update price",
+        description: userErrorMessage(error, "Failed to update price"),
         variant: "destructive",
       });
     },

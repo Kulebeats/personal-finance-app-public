@@ -2,6 +2,7 @@ import { sql, and, eq, gte, lte, isNull, or } from "drizzle-orm";
 import { transactions, accounts } from "@shared/schema";
 import { Money } from "../../core/money";
 import { moneyFromValue } from "./moneyUtils";
+import { flowExpense, flowIncome } from "./flowClassification";
 
 export interface SankeyFilters {
   householdId: string;
@@ -60,10 +61,8 @@ export function buildSankeyBaseConditions(filters: SankeyFilters) {
     gte(transactions.date, filters.from),
     lte(transactions.date, filters.to),
     or(eq(accounts.hideTransactions, false), isNull(accounts.hideTransactions)),
-    sql`NOT EXISTS (
-      SELECT 1 FROM transaction_splits
-      WHERE transaction_splits.transaction_id = ${transactions.id}
-    )`,
+    // NEW-14: split transactions are read, not dropped; expense queries join
+    // their split rows (splitAllocation.ts), income totals use the parent.
   ];
 
   if (filters.scope === "mine" && filters.userId) {
@@ -89,28 +88,19 @@ export function buildSankeyBaseConditions(filters: SankeyFilters) {
   return conditions;
 }
 
+// NEW-06: the shared flow rule; a transfer touching a liability (a card
+// repayment) is never income or expense, even with includeTransfers on.
+const sankeyFlowCols = {
+  type: sql`${transactions.type}`, isTransferIn: sql`${transactions.isTransferIn}`,
+  accountId: sql`${transactions.accountId}`, transferAccountId: sql`${transactions.transferAccountId}`,
+};
+
 export function getIncomeTypeCondition(includeTransfers: boolean) {
-  return includeTransfers
-    ? or(
-        eq(transactions.type, "income"),
-        and(
-          eq(transactions.type, "transfer"),
-          eq(transactions.isTransferIn, true)
-        )
-      )
-    : eq(transactions.type, "income");
+  return flowIncome(sankeyFlowCols, includeTransfers);
 }
 
 export function getExpenseTypeCondition(includeTransfers: boolean) {
-  return includeTransfers
-    ? or(
-        eq(transactions.type, "expense"),
-        and(
-          eq(transactions.type, "transfer"),
-          eq(transactions.isTransferIn, false)
-        )
-      )
-    : eq(transactions.type, "expense");
+  return flowExpense(sankeyFlowCols, includeTransfers);
 }
 
 export function calculateTotalIncome(

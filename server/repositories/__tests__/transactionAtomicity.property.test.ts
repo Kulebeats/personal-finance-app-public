@@ -11,15 +11,25 @@ import fc from "fast-check";
 
 // Mock the database module
 let mockTransactionFn: any;
+let mockSelectFn: any;
+let mockLockFn: any;
 let mockUpdateFn: any;
 let mockDeleteFn: any;
 
 vi.mock("../../db", () => {
   mockUpdateFn = vi.fn().mockReturnThis();
   mockDeleteFn = vi.fn().mockReturnThis();
+  mockLockFn = vi.fn().mockResolvedValue([]);
+  mockSelectFn = vi.fn(() => ({
+    from: vi.fn().mockReturnThis(),
+    where: vi.fn().mockReturnThis(),
+    orderBy: vi.fn().mockReturnThis(),
+    for: mockLockFn,
+  }));
   
   mockTransactionFn = vi.fn(async (callback: any) => {
     const mockTx = {
+      select: mockSelectFn,
       update: mockUpdateFn,
       delete: mockDeleteFn,
       set: vi.fn().mockReturnThis(),
@@ -102,6 +112,9 @@ describe("Property 18: Transaction Atomicity", () => {
 
           // Transaction should have been called
           expect(mockTransactionFn).toHaveBeenCalled();
+          expect(mockSelectFn).toHaveBeenCalledTimes(1);
+          expect(mockLockFn).toHaveBeenCalledWith("no key update");
+          expect(mockUpdateFn).toHaveBeenCalledTimes(failAtIndex + 1);
 
           // The transaction callback should have been executed
           // (Drizzle automatically rolls back on error)
@@ -299,6 +312,8 @@ describe("Property 18: Transaction Atomicity", () => {
         expect(mockTransactionFn).toHaveBeenCalled();
 
         // Update should have been called for each category
+        expect(mockSelectFn).toHaveBeenCalledTimes(1);
+        expect(mockLockFn).toHaveBeenCalledWith("no key update");
         expect(mockUpdateFn).toHaveBeenCalledTimes(categoryIds.length);
 
         return true;

@@ -1,6 +1,9 @@
+import { toastActionError } from "@/lib/actionErrorToast";
+import { throwIfResNotOk } from "@/lib/queryClient";
+import { protectedFetch } from "@/lib/protected-fetch";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { PendingReceipt } from "@shared/schema";
+import type { ReceiptDto } from "@shared/receipt-dto";
 import { OcrExtractedData } from "../lib/receiptParser";
 // apiCall attaches the x-csrf-token header (raw fetch 403s under CSRF
 // enforcement) and self-heals on a stale token.
@@ -35,13 +38,14 @@ export function useReceipts(options: UseReceiptsOptions = {}) {
       if (options.limit) params.append("limit", options.limit.toString());
       if (options.offset) params.append("offset", options.offset.toString());
 
-      const res = await fetch(`/api/receipts?${params.toString()}`, {
+      const res = await protectedFetch(`/api/receipts?${params.toString()}`, {
         credentials: "include",
       });
-      if (!res.ok) throw new Error("Failed to fetch receipts");
+      await throwIfResNotOk(res);
+
       return res.json() as Promise<{
         success: true;
-        data: PendingReceipt[];
+        data: ReceiptDto[];
         pagination: { total: number; limit: number; offset: number };
       }>;
     },
@@ -52,11 +56,12 @@ export function useReceipt(id: string) {
   return useQuery({
     queryKey: receiptKeys.detail(id),
     queryFn: async () => {
-      const res = await fetch(`/api/receipts/${id}`, {
+      const res = await protectedFetch(`/api/receipts/${id}`, {
         credentials: "include",
       });
-      if (!res.ok) throw new Error("Failed to fetch receipt");
-      return res.json() as Promise<{ success: true; data: PendingReceipt }>;
+      await throwIfResNotOk(res);
+
+      return res.json() as Promise<{ success: true; data: ReceiptDto }>;
     },
     enabled: !!id,
   });
@@ -101,7 +106,7 @@ export function useUploadReceipt() {
       toast.success("Receipt uploaded successfully");
     },
     onError: (err) => {
-      toast.error(err.message);
+      toastActionError("The receipt could not be uploaded.", err);
     },
   });
 }
@@ -158,7 +163,7 @@ export function useMatchReceipt() {
       toast.success("Receipt matched to transaction");
     },
     onError: (err) => {
-      toast.error(err.message);
+      toastActionError("The receipt could not be matched.", err);
     },
   });
 }
@@ -195,7 +200,7 @@ export function useCreateTransactionFromReceipt() {
       toast.success("Transaction created from receipt");
     },
     onError: (err) => {
-      toast.error(err.message);
+      toastActionError("The transaction could not be created from this receipt.", err);
     },
   });
 }
@@ -234,7 +239,7 @@ export function useDeleteReceipt() {
       toast.success("Receipt deleted");
     },
     onError: (err) => {
-      toast.error(err.message);
+      toastActionError("The receipt could not be deleted.", err);
     },
   });
 }

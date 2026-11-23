@@ -32,6 +32,15 @@ const mockTagRepository = vi.hoisted(() => ({
 const mockTransactionRepository = vi.hoisted(() => ({
   findByIdWithVisibility: vi.fn(),
 }));
+const mockTagWriteRepository = vi.hoisted(() => ({ write: vi.fn() }));
+vi.mock("../../../repositories/TagWriteRepository", () => ({ tagWriteRepository: mockTagWriteRepository }));
+// Create/rename run the name check and write in one locked transaction (NEW-36). The
+// repository is mocked here, so the transaction and its advisory lock are pass-throughs;
+// the real lock and case-insensitive check are in tags.name-case.realdb.integration.test.ts.
+vi.mock("../../../utils/withTransaction", () => ({ withTransaction: (work: (tx: object) => unknown) => work({}) }));
+vi.mock("../tags.name-guard", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../tags.name-guard")>()), lockTagNames: vi.fn().mockResolvedValue(undefined),
+}));
 
 const mockAuditService = vi.hoisted(() => ({
   logCreate: vi.fn().mockResolvedValue(undefined),
@@ -48,6 +57,28 @@ vi.mock("../../../repositories/TagRepository", () => ({
 vi.mock("../../../repositories/TransactionRepository", () => ({
   transactionRepository: mockTransactionRepository,
 }));
+
+// This suite models repository outcomes; real actor/privacy/snapshot SQL lives
+// in completion-r04.tags.realdb.integration.test.ts. Keep controllers, request
+// validation and service delegation real. Atomic writer effects and audit are
+// covered with actual PG in completion-r04.tag-writes.realdb.integration.test.ts.
+vi.mock("../../../repositories/TagReadRepository", async () => {
+  const { NotFoundError } = await import("../../../core/errors");
+  return { tagReadRepository: {
+    list: (actor: { householdId: string }, options: unknown) => mockTagRepository.findByHousehold(actor.householdId, options),
+    get: async (actor: { householdId: string }, id: string) => {
+      const row = await mockTagRepository.findById(id, actor.householdId);
+      if (!row) throw new NotFoundError("Tag not found");
+      return row;
+    },
+    transactionTags: async (actor: { householdId: string; userId: string }, id: string) => {
+      if (!await mockTransactionRepository.findByIdWithVisibility(id, actor.householdId, actor.userId)) throw new NotFoundError("Transaction not found");
+      return mockTagRepository.getTransactionTags(id);
+    },
+    mutationTags: async (_actor: unknown, rows: unknown[]) => rows,
+    mutationTransactionTags: (_actor: unknown, id: string) => mockTagRepository.getTransactionTags(id),
+  } };
+});
 
 vi.mock("../../../services/BusinessAuditService", () => ({
   businessAuditService: mockAuditService,
@@ -95,6 +126,7 @@ function createTestApp() {
       (req as any).householdContext = {
         householdId: testHouseholdId,
         userId: testUserId,
+        role: "member",
       };
     }
     next();
@@ -162,6 +194,7 @@ describe("Tags Integration Tests", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockTagWriteRepository.write.mockReset().mockResolvedValue({ added: 0, removed: 0 });
   });
 
   // ==========================================================================
@@ -493,7 +526,11 @@ describe("Tags Integration Tests", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(mockAuditService.log).toHaveBeenCalled();
+      expect(mockTagWriteRepository.write).toHaveBeenCalledWith(
+        expect.objectContaining({ householdId: testHouseholdId, userId: testUserId }),
+        { operation: "add", transactionId: testTransactionId, tagIds: [testTag.id] }, "127.0.0.1",
+      );
+      expect(mockAuditService.log).not.toHaveBeenCalled();
     });
 
     it("should get transaction tags", async () => {
@@ -525,7 +562,11 @@ describe("Tags Integration Tests", () => {
         .set("X-Test-Auth", "authenticated");
 
       expect(res.status).toBe(200);
-      expect(mockAuditService.log).toHaveBeenCalled();
+      expect(mockTagWriteRepository.write).toHaveBeenCalledWith(
+        expect.objectContaining({ householdId: testHouseholdId, userId: testUserId }),
+        { operation: "remove", transactionId: testTransactionId, tagIds: [testTag.id] }, "127.0.0.1",
+      );
+      expect(mockAuditService.log).not.toHaveBeenCalled();
     });
   });
 
@@ -535,6 +576,7 @@ describe("Tags Integration Tests", () => {
 
   describe("Transaction Tags - Authorization Boundaries", () => {
     it("should return 404 when transaction not visible to user", async () => {
+      mockTagWriteRepository.write.mockRejectedValueOnce(Object.assign(new Error("Transaction not found"), { statusCode: 404 }));
       // Transaction belongs to different user and is private
       mockTransactionRepository.findByIdWithVisibility.mockResolvedValue(
         undefined,
@@ -561,6 +603,7 @@ describe("Tags Integration Tests", () => {
     });
 
     it("should not allow removing tags from inaccessible transaction", async () => {
+      mockTagWriteRepository.write.mockRejectedValueOnce(Object.assign(new Error("Transaction not found"), { statusCode: 404 }));
       mockTransactionRepository.findByIdWithVisibility.mockResolvedValue(
         undefined,
       );
@@ -628,6 +671,7 @@ describe("Tags Integration Tests", () => {
     });
 
     it("should handle removing non-existent tag gracefully", async () => {
+      mockTagWriteRepository.write.mockRejectedValueOnce(Object.assign(new Error("Tag not found"), { statusCode: 404 }));
       const nonExistentTagId = randomUUID();
       mockTransactionRepository.findByIdWithVisibility.mockResolvedValue(
         testTransaction,
@@ -641,15 +685,15 @@ describe("Tags Integration Tests", () => {
       expect(res.status).toBe(404);
     });
 
-    it("should return 404 for invalid UUID format", async () => {
+    it("should return 400 for invalid UUID format", async () => {
       mockTagRepository.findById.mockResolvedValue(undefined);
 
       const res = await request(app)
         .get("/api/tags/invalid-uuid")
         .set("X-Test-Auth", "authenticated");
 
-      // Invalid UUID is treated as "not found" rather than validation error
-      expect(res.status).toBe(404);
+      // Malformed IDs fail validation before reaching the repository seam.
+      expect(res.status).toBe(400);
     });
 
     it("should handle very long color hex codes", async () => {

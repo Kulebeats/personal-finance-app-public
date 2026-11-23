@@ -11,6 +11,8 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Loader2, Eye, EyeOff } from "lucide-react";
 import { FormField } from "@/features/settings/components";
+import { PASSWORD_MAX_LENGTH } from "@shared/password-policy";
+import { fieldErrorProps, type FieldMessages } from "../authFieldErrors";
 
 interface LoginFormProps {
   loginEmail: string;
@@ -24,6 +26,7 @@ interface LoginFormProps {
   isLoading: boolean;
   showResendVerification: boolean;
   isResendingVerification: boolean;
+  fieldErrors?: FieldMessages;
   onSubmit: (e: React.FormEvent) => void;
   onTogglePassword: () => void;
   onKeyEvent: (e: React.KeyboardEvent) => void;
@@ -43,6 +46,7 @@ export function LoginForm({
   isLoading,
   showResendVerification,
   isResendingVerification,
+  fieldErrors = {},
   onSubmit,
   onTogglePassword,
   onKeyEvent,
@@ -51,22 +55,25 @@ export function LoginForm({
 }: LoginFormProps) {
   return (
     <form onSubmit={onSubmit} className="space-y-4">
-      <FormField label="Email" htmlFor="email" required>
+      <FormField label="Email" htmlFor="email" required error={fieldErrors.email}>
         <Input
           id="email"
+          disabled={isLoading}
           type="email"
           placeholder="you@example.com"
           value={loginEmail}
           onChange={(e) => setLoginEmail(e.target.value)}
           autoComplete="username"
           required
+          {...fieldErrorProps("email", fieldErrors.email)}
         />
       </FormField>
 
-      <FormField label="Password" htmlFor="password" required>
+      <FormField label="Password" htmlFor="password" required error={fieldErrors.password}>
         <div className="relative">
           <Input
             id="password"
+            disabled={isLoading}
             type={showPassword ? "text" : "password"}
             placeholder="Enter your password"
             value={loginPassword}
@@ -74,8 +81,10 @@ export function LoginForm({
             onKeyDown={onKeyEvent}
             onKeyUp={onKeyEvent}
             autoComplete="current-password"
+            maxLength={PASSWORD_MAX_LENGTH}
             className="pr-10"
             required
+            {...fieldErrorProps("password", fieldErrors.password)}
           />
           <Button
             type="button"

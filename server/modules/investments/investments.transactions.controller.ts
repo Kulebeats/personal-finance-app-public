@@ -20,14 +20,14 @@ async function listTransactions(
   next: NextFunction,
 ) {
   try {
-    const { householdId } = req.householdContext!;
+    const actor = req.householdContext!;
     const parsed = listInvestmentTransactionsQuerySchema.safeParse(req.query);
     if (!parsed.success) {
       throw new ValidationError("Invalid request data", parsed.error.errors);
     }
 
     const transactions = await investmentService.getTransactions(
-      householdId,
+      actor,
       parsed.data,
     );
 
@@ -43,7 +43,7 @@ async function createTransaction(
   next: NextFunction,
 ) {
   try {
-    const { householdId, userId } = req.householdContext!;
+    const actor = req.householdContext!;
     const parsed = createInvestmentTransactionSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new ValidationError("Invalid request data", parsed.error.errors);
@@ -51,24 +51,10 @@ async function createTransaction(
 
     const transaction = await investmentService.createTransaction(
       parsed.data,
-      householdId,
+      actor,
+      businessAuditService.getIpAddress(req),
     );
-
-    await businessAuditService.logCreate({
-      userId,
-      householdId,
-      entityType: "investment_transaction",
-      entityId: transaction.id,
-      newValue: {
-        type: transaction.type,
-        holdingId: transaction.holdingId,
-        quantity: transaction.quantity,
-        amount: transaction.amount,
-      },
-      ipAddress: businessAuditService.getIpAddress(req),
-    });
-
-    logger.info("Created investment transaction", { householdId });
+    logger.info("Created investment transaction", { householdId: actor.householdId });
     success(res, transaction, 201);
     return;
   } catch (error) {
@@ -78,7 +64,7 @@ async function createTransaction(
 
 async function listTaxLots(req: Request, res: Response, next: NextFunction) {
   try {
-    const { householdId } = req.householdContext!;
+    const actor = req.householdContext!;
     const parsed = listTaxLotsQuerySchema.safeParse(req.query);
     if (!parsed.success) {
       return res.status(400).json({
@@ -94,7 +80,7 @@ async function listTaxLots(req: Request, res: Response, next: NextFunction) {
       });
     }
 
-    const data = await investmentService.getTaxLots(householdId, parsed.data);
+    const data = await investmentService.getTaxLots(actor, parsed.data);
     return success(res, data);
   } catch (error) {
     next(error);

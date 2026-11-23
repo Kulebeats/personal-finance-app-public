@@ -13,8 +13,7 @@ import {
   useCurrentYearRange,
   useReportsAnnual,
 } from "@/hooks/use-reports";
-import { formatCurrency } from "@/lib/utils";
-import { toMoneyNumber } from "@/lib/money";
+import { formatCurrency, toMoneyNumber } from "@/lib/money";
 import { ChartA11yToggle } from "./shared/ChartA11yToggle";
 import { ChartDataTable } from "./shared/ChartDataTable";
 import { CHART_COLORS } from "@/features/reports";
@@ -250,7 +249,7 @@ export default function CategoryBreakdownWidget() {
         data={savingsPieData}
         title="Savings Breakdown"
         isLoading={annualLoading}
-        formatter={formatCurrency}
+        formatter={(v) => formatCurrency(v, annualData?.baseCurrency ?? "")}
         emptyMessage="No savings data for this period"
         widgetId="savings-breakdown"
       />

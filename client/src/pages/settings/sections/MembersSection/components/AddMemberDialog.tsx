@@ -17,34 +17,60 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { UserPlus, Loader2, Shield, Briefcase, Eye } from "lucide-react";
-import { useAddMember } from "@/hooks/use-settings";
+import { UserPlus, Loader2, Shield, Briefcase, Eye, GraduationCap } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import type { InvitableRole } from "@shared/household-members";
+import { useInviteMember } from "@/hooks/use-household-membership";
+import { ROLE_DESCRIPTIONS, ROLE_LABELS } from "../roleDescriptions";
 
 interface AddMemberDialogProps {
+  /** Only the owner may invite an admin (spec §A3). */
+  canInviteAdmin: boolean;
   children?: React.ReactNode;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
 }
 
-export function AddMemberDialog({ children, open: controlledOpen, onOpenChange }: AddMemberDialogProps) {
-  const addMember = useAddMember();
+interface RoleOption {
+  value: InvitableRole;
+  label: string;
+  icon: LucideIcon;
+}
+
+const DEFAULT_ROLE: InvitableRole = "member";
+const ROLE_ICONS: ReadonlyArray<Omit<RoleOption, "label">> = [
+  { value: "admin", icon: Shield },
+  { value: "member", icon: Briefcase },
+  { value: "view_only", icon: Eye },
+  { value: "professional", icon: GraduationCap },
+];
+// AH-13: the same role lines as the members screen, so neither promises more than the server grants.
+const ROLE_OPTIONS: readonly RoleOption[] = ROLE_ICONS.map(option => ({
+  ...option, label: `${ROLE_LABELS[option.value]} - ${ROLE_DESCRIPTIONS[option.value]}`,
+}));
+
+/** AH-05: Add Member sends an email invitation (POST /api/household/invite). */
+export function AddMemberDialog({ canInviteAdmin, children, open: controlledOpen, onOpenChange }: AddMemberDialogProps) {
+  const inviteMember = useInviteMember();
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
-  const [newMemberEmail, setNewMemberEmail] = useState("");
-  const [newMemberRole, setNewMemberRole] = useState("member");
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<InvitableRole>(DEFAULT_ROLE);
 
   // Use controlled state if provided, otherwise use internal state
   const isOpen = controlledOpen !== undefined ? controlledOpen : uncontrolledOpen;
   const setIsOpen = onOpenChange || setUncontrolledOpen;
+  const roleOptions = ROLE_OPTIONS.filter((option) => canInviteAdmin || option.value !== "admin");
+  const trimmedEmail = email.trim();
 
-  const handleAddMember = () => {
-    if (!newMemberEmail.trim()) return;
-    addMember.mutate(
-      { emailOrUsername: newMemberEmail.trim(), role: newMemberRole },
+  const handleInvite = () => {
+    if (!trimmedEmail) return;
+    inviteMember.mutate(
+      { email: trimmedEmail, role },
       {
         onSuccess: () => {
           setIsOpen(false);
-          setNewMemberEmail("");
-          setNewMemberRole("member");
+          setEmail("");
+          setRole(DEFAULT_ROLE);
         },
       },
     );
@@ -62,71 +88,54 @@ export function AddMemberDialog({ children, open: controlledOpen, onOpenChange }
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Add Household Member</DialogTitle>
+          <DialogTitle>Invite a household member</DialogTitle>
           <DialogDescription>
-            Add an existing user to your household. They must have a registered
-            account first.
+            We'll email them an invitation. They join once they accept it while
+            signed in with that address.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 pt-4">
           <div className="space-y-2">
-            <Label htmlFor="member-email">Email or Username</Label>
+            <Label htmlFor="member-email">Email address</Label>
             <Input
               id="member-email"
-              value={newMemberEmail}
-              onChange={(e) => setNewMemberEmail(e.target.value)}
-              placeholder="user@example.com or username"
+              type="email"
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="partner@example.com"
             />
-            <p className="text-xs text-muted-foreground">
-              The user must already have a registered account.
-            </p>
           </div>
           <div className="space-y-2">
             <Label htmlFor="member-role">Role</Label>
-            <Select value={newMemberRole} onValueChange={setNewMemberRole}>
+            <Select value={role} onValueChange={(value) => setRole(value as InvitableRole)}>
               <SelectTrigger id="member-role" aria-label="Select role for new member">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="admin">
-                  <div className="flex items-center gap-2">
-                    <Shield className="w-4 h-4" />
-                    <span>Admin - Can manage members and settings</span>
-                  </div>
-                </SelectItem>
-                <SelectItem value="member">
-                  <div className="flex items-center gap-2">
-                    <Briefcase className="w-4 h-4" />
-                    <span>Member - Can add/edit transactions</span>
-                  </div>
-                </SelectItem>
-                <SelectItem value="view_only">
-                  <div className="flex items-center gap-2">
-                    <Eye className="w-4 h-4" />
-                    <span>View Only - Read-only access</span>
-                  </div>
-                </SelectItem>
-                <SelectItem value="professional">
-                  <div className="flex items-center gap-2">
-                    <Briefcase className="w-4 h-4" />
-                    <span>Professional - Advisor access</span>
-                  </div>
-                </SelectItem>
+                {roleOptions.map(({ value, label, icon: Icon }) => (
+                  <SelectItem key={value} value={value}>
+                    <div className="flex items-center gap-2">
+                      <Icon className="w-4 h-4" aria-hidden="true" />
+                      <span>{label}</span>
+                    </div>
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>
           <Button
-            onClick={handleAddMember}
-            disabled={addMember.isPending || !newMemberEmail.trim()}
+            onClick={handleInvite}
+            disabled={inviteMember.isPending || !trimmedEmail}
             className="w-full bg-rose-500 hover:bg-rose-600"
           >
-            {addMember.isPending ? (
+            {inviteMember.isPending ? (
               <>
                 <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Adding...
+                Sending...
               </>
             ) : (
-              "Add Member"
+              "Send invitation"
             )}
           </Button>
         </div>

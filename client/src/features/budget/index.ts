@@ -22,6 +22,7 @@ export { MoveMoneyModal } from "./components/MoveMoneyModal";
 export { BudgetDetailModal } from "./components/BudgetDetailModal";
 export { BudgetSection } from "./components/BudgetSection";
 export { ContributionsSection } from "./components/ContributionsSection";
+export { BudgetGridScroller } from "./components/BudgetGridScroller";
 export { BudgetWalkthrough } from "./components/BudgetWalkthrough";
 export { BudgetSummaryCard } from "./components/BudgetSummaryCard";
 export { BudgetPageHeader } from "./components/BudgetPageHeader";

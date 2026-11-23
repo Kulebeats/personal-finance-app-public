@@ -1,4 +1,4 @@
-import { useForm } from "react-hook-form";
+import { useForm, type FieldErrors } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect, useCallback } from "react";
 import {
@@ -6,13 +6,15 @@ import {
   type ProfileFormData,
   defaultProfileData,
 } from "@/features/settings/schemas/profileSchema";
-import { useProfile, useUpdateProfile } from "@/hooks/use-settings";
+import { useProfile, useUpdateProfile, type UpdateProfileData } from "@/hooks/use-settings";
+import { NRC_FIELD_MODE } from "@shared/profile-policy";
+import { formatLocalDate, parseLocalDate } from "./profile-date";
 
 export interface UseProfileFormReturn {
   form: ReturnType<typeof useForm<ProfileFormData>>;
   isLoading: boolean;
   isSubmitting: boolean;
-  onSubmit: () => Promise<boolean>;
+  onSubmit: () => Promise<{ saved: true } | { saved: false; errors: FieldErrors<ProfileFormData> }>;
   isDirty: boolean;
   saveProfile: (data: ProfileFormData) => Promise<void>;
 }
@@ -39,12 +41,12 @@ export function useProfileForm(): UseProfileFormReturn {
     mode: "onBlur", // Validate on blur for better UX
   });
 
-  // Initialize form with API data when loaded
+  // Load API data into the form. A picture or banner upload also refreshes the
+  // profile; keepDirtyValues keeps every field the user has edited but not yet
+  // saved, and only refreshes the untouched ones.
   useEffect(() => {
     if (profileData && !isProfileLoading) {
-      // Transform API data to form data format
-      const formData = transformApiToFormData(profileData);
-      form.reset(formData, { keepDirty: false });
+      form.reset(transformApiToFormData(profileData), { keepDirtyValues: true });
     }
   }, [profileData, isProfileLoading]); // Removed 'form' from dependencies to prevent unnecessary resets
 
@@ -52,25 +54,32 @@ export function useProfileForm(): UseProfileFormReturn {
     async (data: ProfileFormData) => {
       // Transform form data to API format (creates a new object)
       const apiData = transformFormToApiData(data);
-      await updateProfile.mutateAsync(apiData);
+      const saved = await updateProfile.mutateAsync(apiData);
+      // Saved: the server copy is now the clean baseline. The form is locked
+      // while this runs (isSubmitting), so no edit can be typed in flight and
+      // lost here.
+      form.reset(transformApiToFormData(saved));
     },
-    [updateProfile]
+    [form, updateProfile]
   );
 
-  const onSubmit = useCallback(async () => {
-    const isValid = await form.trigger();
-    if (isValid) {
-      const data = form.getValues();
-      await saveProfile(data);
-      return true;
-    }
-    return false;
+  const onSubmit = useCallback(async (): ReturnType<UseProfileFormReturn["onSubmit"]> => {
+    let result: Awaited<ReturnType<UseProfileFormReturn["onSubmit"]>> = { saved: false, errors: {} };
+    await form.handleSubmit(
+      async data => {
+        await saveProfile(data);
+        result = { saved: true };
+      },
+      errors => { result = { saved: false, errors }; },
+    )();
+    return result;
   }, [form, saveProfile]);
 
   return {
     form,
     isLoading: isProfileLoading,
-    isSubmitting: updateProfile.isPending,
+    // True from Save until the reply is applied; the form locks its fields.
+    isSubmitting: form.formState.isSubmitting || updateProfile.isPending,
     onSubmit,
     isDirty: form.formState.isDirty,
     saveProfile,
@@ -156,7 +165,7 @@ interface RawProfileAddress {
 /**
  * Raw profile payload consumed by the profile form. Models the canonical
  * profile fields plus a few legacy/transitional fields the transform still
- * reads defensively (`salaryRange`, `profilePicture`, and address
+ * reads defensively (`profilePicture`, and address
  * `street`/`zip`). Every field is optional because the transform supplies its
  * own defaults, and values may be `null` since they originate from nullable DB
  * columns.
@@ -185,8 +194,6 @@ export interface RawProfileApiResponse {
   investmentGoal?: string | null;
   riskTolerance?: string | null;
   profilePictureUrl?: string | null;
-  /** @deprecated legacy field not present on the canonical profile */
-  salaryRange?: string | null;
   /** @deprecated legacy field, superseded by profilePictureUrl */
   profilePicture?: string | null;
 }
@@ -202,7 +209,8 @@ export function transformApiToFormData(
     firstName: apiData.firstName || "",
     lastName: apiData.lastName || "",
     displayName: apiData.displayName || undefined,
-    birthday: apiData.birthday ? new Date(apiData.birthday) : null,
+    // Local calendar day, not new Date("YYYY-MM-DD") (UTC midnight).
+    birthday: apiData.birthday ? parseLocalDate(apiData.birthday) : null,
     birthdayHideYear: apiData.birthdayHideYear ?? false,
     timezone: apiData.timezone || "Africa/Lusaka",
     gender:
@@ -249,28 +257,60 @@ export function transformApiToFormData(
       undefined,
     riskTolerance:
       (apiData.riskTolerance as ProfileFormData["riskTolerance"]) || undefined,
-    salaryRange: apiData.salaryRange || undefined,
     profilePicture:
       apiData.profilePictureUrl || apiData.profilePicture || undefined,
   };
 }
 
 /**
- * Transform form data to API request format
+ * Transform form data to the PUT /api/settings/profile body.
+ *
+ * Builds the body from an explicit list of the keys the server accepts; the
+ * server refuses any other key. NRC is sent only while NRC_FIELD_MODE is
+ * "editable" ("" clears it). Not sent: profilePicture and bannerUrl (saved by
+ * their upload endpoints).
  */
 export function transformFormToApiData(
   formData: ProfileFormData
-): Record<string, unknown> {
+): UpdateProfileData {
+  const { address, socialLinks } = formData;
   return {
-    ...formData,
-    // Convert Date to ISO string for API
-    birthday: formData.birthday ? formData.birthday.toISOString() : null,
-    // Ensure empty strings are converted to null for optional fields
-    // Add +260 prefix if user entered only 9 digits
+    fullName: formData.fullName,
+    firstName: formData.firstName,
+    lastName: formData.lastName,
+    displayName: formData.displayName,
+    // The picked calendar day as YYYY-MM-DD; toISOString() would shift it in UTC+ zones.
+    birthday: formData.birthday ? formatLocalDate(formData.birthday) : null,
+    birthdayHideYear: formData.birthdayHideYear,
+    timezone: formData.timezone,
+    bio: formData.bio,
+    gender: formData.gender,
+    // Add +260 prefix if user entered only 9 digits; empty becomes null
     phoneNumberMobile: addCountryCode(formData.phoneNumberMobile),
     phoneNumberWork: addCountryCode(formData.phoneNumberWork),
     phoneNumberHome: formData.phoneNumberHome || null,
-    profilePicture: formData.profilePicture || null,
-    profilePictureUrl: formData.profilePicture || null,
+    occupation: formData.occupation,
+    address: {
+      addressLine1: address.addressLine1,
+      addressLine2: address.addressLine2,
+      city: address.city,
+      state: address.state,
+      postalCode: address.postalCode,
+      country: address.country,
+    },
+    annualIncome: formData.annualIncome || null,
+    incomeFrequency: formData.incomeFrequency,
+    employmentStatus: formData.employmentStatus,
+    investmentGoal: formData.investmentGoal,
+    riskTolerance: formData.riskTolerance,
+    ...(NRC_FIELD_MODE === "editable" ? { nrc: formData.nrc ?? "" } : {}),
+    socialLinks: {
+      linkedin: socialLinks.linkedin,
+      facebook: socialLinks.facebook,
+      twitter: socialLinks.twitter,
+      github: socialLinks.github,
+      email: socialLinks.email,
+      website: socialLinks.website,
+    },
   };
 }

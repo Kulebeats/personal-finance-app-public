@@ -629,25 +629,25 @@ Positive finding: No `as any` usage found in tags module.
 ## 14. Appendix: Files Reviewed
 
 ### Server Files
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/tags/tags.controller.ts` (184 LOC)
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/tags/tags.routes.ts` (34 LOC)
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/tags/tags.validation.ts` (39 LOC)
-- `/mnt/c/Users/kuwan/personal-finance-app/server/modules/tags/index.ts` (6 LOC)
-- `/mnt/c/Users/kuwan/personal-finance-app/server/repositories/TagRepository.ts` (184 LOC)
-- `/mnt/c/Users/kuwan/personal-finance-app/server/storage/StorageTagModule.ts` (226 LOC)
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/tags/tags.controller.ts` (184 LOC)
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/tags/tags.routes.ts` (34 LOC)
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/tags/tags.validation.ts` (39 LOC)
+- `/mnt/c/Users/USER/personal-finance-app/server/modules/tags/index.ts` (6 LOC)
+- `/mnt/c/Users/USER/personal-finance-app/server/repositories/TagRepository.ts` (184 LOC)
+- `/mnt/c/Users/USER/personal-finance-app/server/storage/StorageTagModule.ts` (226 LOC)
 
 ### Client Files
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/hooks/useTags.ts` (242 LOC)
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/tags/TagBadge.tsx` (61 LOC)
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/tags/TagColorPicker.tsx` (62 LOC)
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/tags/TagModal.tsx` (131 LOC)
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/tags/TagsList.tsx` (164 LOC)
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/tags/TagsMultiSelect.tsx` (158 LOC)
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/components/tags/index.ts` (12 LOC)
-- `/mnt/c/Users/kuwan/personal-finance-app/client/src/lib/api.ts` (tagsApi section)
+- `/mnt/c/Users/USER/personal-finance-app/client/src/hooks/useTags.ts` (242 LOC)
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/tags/TagBadge.tsx` (61 LOC)
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/tags/TagColorPicker.tsx` (62 LOC)
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/tags/TagModal.tsx` (131 LOC)
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/tags/TagsList.tsx` (164 LOC)
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/tags/TagsMultiSelect.tsx` (158 LOC)
+- `/mnt/c/Users/USER/personal-finance-app/client/src/components/tags/index.ts` (12 LOC)
+- `/mnt/c/Users/USER/personal-finance-app/client/src/lib/api.ts` (tagsApi section)
 
 ### Schema Files
-- `/mnt/c/Users/kuwan/personal-finance-app/shared/schema.ts` (tags table, transactionTags table)
+- `/mnt/c/Users/USER/personal-finance-app/shared/schema.ts` (tags table, transactionTags table)
 
 ---
 

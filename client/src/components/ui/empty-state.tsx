@@ -32,7 +32,7 @@ import {
 
 export interface EmptyStateAction {
   label: string;
-  onClick: () => void;
+  onClick: React.MouseEventHandler<HTMLButtonElement>;
   variant?:
     | "default"
     | "outline"

@@ -11,6 +11,7 @@ import { format, parseISO } from "date-fns";
 import { CheckCircle2, AlertCircle, Tag } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import type { TransactionWithDetails } from "../types";
+import { useTransferLegLabel } from "../transferLeg";
 
 interface TransactionCardProps {
   transaction: TransactionWithDetails;
@@ -28,13 +29,14 @@ export const TransactionCard = memo(function TransactionCard({
   // Use type field to determine income/expense, not sign inference (T-02 fix)
   const isIncome = transaction.type === "income";
   const displayName = transaction.merchantName || transaction.name || "Unknown";
-  const displayCategory = transaction.categoryName || "Uncategorized";
+  const transferLabel = useTransferLegLabel(transaction);
+  const displayCategory = transferLabel ?? (transaction.categoryName || "Uncategorized");
 
   return (
     <Card
       role="button"
       tabIndex={0}
-      aria-label={`${displayName}, ${formatCurrency(transaction.amount)}, ${format(parseISO(transaction.date), "MMMM d, yyyy")}`}
+      aria-label={`${displayName}, ${transferLabel ? `${transferLabel}, ` : ""}${formatCurrency(transaction.amount)}, ${format(parseISO(transaction.date), "MMMM d, yyyy")}`}
       className={cn(
         "p-4 cursor-pointer hover:shadow-md transition-shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         isSelected && "ring-2 ring-primary"

@@ -3,13 +3,16 @@ import { Loader2, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { useUtcValuationDate } from "@/hooks/investments/useUtcValuationDate";
 
 type SecurityItem = {
   id: string;
   symbol: string;
   name: string;
+  currency: string;
   currentPrice?: string | null;
   exchange?: string | null;
+  valuationPrice?: { source: "manual"; effectiveDate: string; validThrough: string } | null;
 };
 
 type AddHoldingSecurityStepProps = {
@@ -17,9 +20,10 @@ type AddHoldingSecurityStepProps = {
   onSearchQueryChange: (value: string) => void;
   securities: SecurityItem[];
   loadingSecurities: boolean;
-  formatCurrency: (value: number) => string;
   onSelectSecurity: (securityId: string) => void;
   onCreateNew: () => void;
+  pricesUnavailable?: boolean;
+  onRetryPrices?: () => void;
 };
 
 export function AddHoldingSecurityStep({
@@ -27,12 +31,18 @@ export function AddHoldingSecurityStep({
   onSearchQueryChange,
   securities,
   loadingSecurities,
-  formatCurrency,
   onSelectSecurity,
   onCreateNew,
+  pricesUnavailable = false,
+  onRetryPrices,
 }: AddHoldingSecurityStepProps) {
+  const today = useUtcValuationDate();
   return (
     <div className="space-y-4">
+      {pricesUnavailable && <div role="alert" className="space-y-2 text-sm">
+        <p>Price quotes are unavailable. You can still choose a security and enter your actual purchase details.</p>
+        {onRetryPrices && <Button type="button" variant="outline" onClick={onRetryPrices}>Retry prices</Button>}
+      </div>}
       <div className="relative">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
         <Input
@@ -49,33 +59,43 @@ export function AddHoldingSecurityStep({
             <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
           </div>
         ) : securities.length > 0 ? (
-          securities.map((security) => (
-            <button
-              key={security.id}
-              onClick={() => onSelectSecurity(security.id)}
-              className={cn(
-                "w-full flex items-center justify-between p-3 rounded-lg border transition-colors text-left",
-                "hover:bg-muted/50 hover:border-primary/50"
-              )}
-            >
-              <div>
-                <div className="font-semibold">{security.symbol}</div>
-                <div className="text-sm text-muted-foreground">
-                  {security.name}
+          securities.map((security) => {
+            const mark = security.valuationPrice;
+            const eligible = !mark || (mark.effectiveDate <= today && mark.validThrough >= today);
+            const showPrice = !pricesUnavailable && eligible && security.currentPrice !== null && security.currentPrice !== undefined;
+            return (
+              <button
+                key={security.id}
+                onClick={() => onSelectSecurity(security.id)}
+                className={cn(
+                  "w-full flex items-center justify-between p-3 rounded-lg border transition-colors text-left",
+                  "hover:bg-muted/50 hover:border-primary/50"
+                )}
+              >
+                <div>
+                  <div className="font-semibold">{security.symbol}</div>
+                  <div className="text-sm text-muted-foreground">
+                    {security.name}
+                  </div>
                 </div>
-              </div>
-              <div className="text-right">
-                <div className="text-sm font-medium">
-                  {security.currentPrice
-                    ? formatCurrency(Number(security.currentPrice))
-                    : "N/A"}
+                <div className="text-right">
+                  <div className="text-sm font-medium">
+                    {showPrice
+                      ? `${security.currency} ${security.currentPrice}`
+                      : pricesUnavailable || mark ? "Price unavailable" : "N/A"}
+                  </div>
+                  {showPrice && mark && (
+                    <div className="text-xs text-muted-foreground">
+                      Household valuation price, valid through {mark.validThrough}
+                    </div>
+                  )}
+                  <div className="text-xs text-muted-foreground uppercase">
+                    {security.exchange}
+                  </div>
                 </div>
-                <div className="text-xs text-muted-foreground uppercase">
-                  {security.exchange}
-                </div>
-              </div>
-            </button>
-          ))
+              </button>
+            );
+          })
         ) : searchQuery ? (
           <div className="text-center py-8 text-muted-foreground">
             <p>No securities found for "{searchQuery}"</p>

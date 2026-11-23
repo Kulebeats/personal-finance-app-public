@@ -9,7 +9,6 @@
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import type { TransactionFilters } from "../types";
 
 // Types
 export interface FilterPreset {
@@ -18,7 +17,8 @@ export interface FilterPreset {
   userId: string;
   name: string;
   context: "transactions" | "reports" | "budget" | "cashflow";
-  filters: TransactionFilters;
+  /** Untyped JSON from the API; read it with presetToTransactionFilters. */
+  filters: Record<string, unknown>;
   isDefault: boolean;
   isShared: boolean;
   createdAt: string;
@@ -171,6 +171,10 @@ export function useDeleteFilterPreset() {
       });
       queryClient.removeQueries({
         queryKey: filterPresetKeys.detail(data.id),
+      });
+      // A deleted default must stop being applied (falls back to no preset).
+      queryClient.invalidateQueries({
+        queryKey: filterPresetKeys.default(data.context),
       });
     },
   });

@@ -45,9 +45,8 @@ export function MerchantFormDialog({ state }: MerchantFormDialogProps) {
               onClick={actions.handleDeleteMerchant}
               disabled={
                 mutations.deleteMerchant.isPending ||
+                mutations.mergeMerchants.isPending ||
                 (viewState.deleteAction === "merge" && !viewState.mergeTarget) ||
-                (viewState.deleteAction === "hard" &&
-                  viewState.deleteConfirmText.trim() !== "DELETE") ||
                 !viewState.deleteAcknowledged
               }
             >

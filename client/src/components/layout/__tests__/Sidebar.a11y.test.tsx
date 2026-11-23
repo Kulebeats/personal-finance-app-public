@@ -27,11 +27,11 @@ describe("Sidebar accessibility", () => {
       />,
     );
 
-    const active = screen.getByText("Transactions").closest("[aria-current]");
+    const active = screen.getByRole("link", { name: "Transactions" });
     expect(active).toHaveAttribute("aria-current", "page");
 
     // Inactive items must not advertise themselves as the current page.
-    const inactive = screen.getByText("Dashboard").closest("div");
+    const inactive = screen.getByRole("link", { name: "Dashboard" });
     expect(inactive).not.toHaveAttribute("aria-current");
   });
 
@@ -45,13 +45,28 @@ describe("Sidebar accessibility", () => {
       />,
     );
 
-    // Labels are visually hidden when collapsed, so each item must carry an
-    // aria-label to remain reachable by assistive tech.
+    // Assistive technology encounters the native anchor itself, so a named
+    // descendant div alone cannot satisfy the navigation contract.
     for (const item of allItems) {
       expect(
-        screen.getByLabelText(item.label, { selector: "[aria-current], div" }),
-      ).toBeInTheDocument();
+        screen.getByRole("link", { name: item.label }),
+      ).toHaveAttribute("href", item.href);
     }
+  });
+
+  it("uses one native, named Profile link with no nested button or tab stop", async () => {
+    const user = userEvent.setup();
+    render(<Sidebar collapsed={true} onToggle={vi.fn()} location="/" profileName="Ada Lovelace" />);
+    const profile = screen.getByRole("link", { name: "Profile: Ada Lovelace" });
+    expect(profile).toHaveAttribute("href", "/profile");
+    expect(profile.querySelector('[role="button"], button, [tabindex]')).toBeNull();
+    expect(screen.queryByRole("button", { name: "Profile: Ada Lovelace" })).not.toBeInTheDocument();
+    profile.focus();
+    expect(profile).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(screen.getByRole("link", { name: "Settings" })).toHaveFocus();
+    await user.tab();
+    expect(profile).toHaveFocus();
   });
 
   it("exposes a labelled, keyboard-operable collapse control when expanded", async () => {

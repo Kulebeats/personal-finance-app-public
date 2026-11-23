@@ -2,8 +2,7 @@ import { AreaChart, Area, XAxis, YAxis, CartesianGrid } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Loader2 } from "lucide-react";
 import { useReportsAnnual, useCurrentYearRange } from "@/hooks/use-reports";
-import { formatCurrency } from "@/lib/utils";
-import { toMoneyNumber } from "@/lib/money";
+import { formatCurrency, toMoneyNumber } from "@/lib/money";
 import {
   ChartContainer,
   ChartTooltip,
@@ -83,7 +82,7 @@ export default function CumulativeGrowthWidget() {
               <ChartTooltip
                 content={
                   <ChartTooltipContent
-                    formatter={(value) => formatCurrency(Number(value))}
+                    formatter={(value) => formatCurrency(Number(value), data?.baseCurrency ?? "")}
                   />
                 }
               />

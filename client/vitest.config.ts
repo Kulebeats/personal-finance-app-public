@@ -1,17 +1,32 @@
 import { configDefaults, defineConfig } from "vitest/config";
 import { resolve } from "path";
+import { prepareTestEnvironment } from "../server/testing/test-target.mjs";
+
+prepareTestEnvironment();
 
 process.env.BROWSERSLIST_IGNORE_OLD_DATA ??= "1";
 
 // Specs that must run in a UTC+2 zone. Assigning process.env.TZ inside a
 // worker thread does not change that thread's Date zone, so these run in a
 // forked child whose TZ is set when the process is spawned.
-const LUSAKA_TZ_SPECS = ["client/src/hooks/__tests__/use-reports.month-range.test.ts"];
+const BIRTHDAY_TZ_SPEC = "client/src/pages/settings/sections/ProfileSection/__tests__/birthday-timezone.test.ts";
+const LUSAKA_TZ_SPECS = ["client/src/hooks/__tests__/use-reports.month-range.test.ts", BIRTHDAY_TZ_SPEC];
+// Specs that must also run in a UTC- zone (same forked-child reason).
+const NEW_YORK_TZ_SPECS = [
+  BIRTHDAY_TZ_SPEC,
+  "client/src/features/reports/__tests__/chartSeries.month-labels.test.ts",
+  "client/src/lib/__tests__/householdMonthRange.test.ts",
+  "client/src/hooks/__tests__/use-reports.calendar-zone.test.ts",
+  "client/src/components/merchants/detail/__tests__/useMerchantDetailState.calendar-zone.test.tsx",
+  "client/src/hooks/__tests__/calendar-zone.late-arrival.test.tsx",
+  "client/src/components/session/__tests__/HouseholdCalendarZone.test.tsx",
+  "client/src/components/transactions/__tests__/DateRangePopover.calendar-zone.test.tsx",
+];
 
 export default defineConfig({
   test: {
     environment: "jsdom",
-    setupFiles: [resolve(__dirname, "src/test-setup.ts")],
+    setupFiles: [resolve(__dirname, "../server/testing/test-setup.ts"), resolve(__dirname, "src/test-setup.ts")],
     globals: true,
     pool: "threads",
     fileParallelism: false,
@@ -27,7 +42,7 @@ export default defineConfig({
         test: {
           name: "client",
           include: ["client/**/*.{test,spec}.{ts,tsx}"],
-          exclude: [...configDefaults.exclude, ...LUSAKA_TZ_SPECS],
+          exclude: [...configDefaults.exclude, ...LUSAKA_TZ_SPECS, ...NEW_YORK_TZ_SPECS],
         },
       },
       {
@@ -37,6 +52,15 @@ export default defineConfig({
           include: LUSAKA_TZ_SPECS,
           pool: "forks",
           env: { TZ: "Africa/Lusaka" },
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "client-tz-new-york",
+          include: NEW_YORK_TZ_SPECS,
+          pool: "forks",
+          env: { TZ: "America/New_York" },
         },
       },
     ],

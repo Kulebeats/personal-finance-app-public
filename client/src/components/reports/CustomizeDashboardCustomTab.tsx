@@ -3,11 +3,13 @@ import { Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { CustomChartConfig } from "@shared/reports";
+import { useRef } from "react";
+import { useReportPreferenceAction } from "@/hooks/use-report-preference-action";
 
 type CustomizeDashboardCustomTabProps = {
   customCharts: CustomChartConfig[];
   onEditCustomChart: (chart: CustomChartConfig) => void;
-  onDeleteCustomChart: (id: string) => void;
+  onDeleteCustomChart: (id: string) => Promise<unknown>;
   onClose: () => void;
 };
 
@@ -17,6 +19,9 @@ export function CustomizeDashboardCustomTab({
   onDeleteCustomChart,
   onClose,
 }: CustomizeDashboardCustomTabProps) {
+  const { run, pending, error } = useReportPreferenceAction();
+  const retryId = useRef<string>();
+  const remove = (id: string) => { retryId.current = id; void run(() => onDeleteCustomChart(id)); };
   return (
     <div className="flex-1 overflow-hidden">
       <p className="text-sm text-muted-foreground mb-4">
@@ -41,6 +46,7 @@ export function CustomizeDashboardCustomTab({
               </div>
               <div className="flex items-center gap-2">
                 <Button
+                  disabled={pending}
                   size="icon"
                   variant="ghost"
                   onClick={() => {
@@ -52,10 +58,11 @@ export function CustomizeDashboardCustomTab({
                   <Pencil className="h-4 w-4" />
                 </Button>
                 <Button
+                  disabled={pending}
                   size="icon"
                   variant="ghost"
                   className="text-destructive"
-                  onClick={() => onDeleteCustomChart(chart.id)}
+                  onClick={() => remove(chart.id)}
                   aria-label={`Delete ${chart.name}`}
                 >
                   <Trash2 className="h-4 w-4" />
@@ -65,6 +72,7 @@ export function CustomizeDashboardCustomTab({
           ))
         )}
       </ScrollArea>
+      {error && <div><p role="alert">{error}</p><Button disabled={pending} onClick={() => { if (retryId.current) remove(retryId.current); }}>Retry Delete</Button></div>}
     </div>
   );
 }

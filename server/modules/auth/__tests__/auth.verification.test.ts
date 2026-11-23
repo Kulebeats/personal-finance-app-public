@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { authService } from "../auth.service";
 import { userRepository } from "../../../repositories/UserRepository";
-import { ForbiddenError, ValidationError } from "../../../core/errors";
+import { ValidationError } from "../../../core/errors";
+import { consumeEmailVerificationToken, issueInitialEmailVerification } from "../../../services/security-email";
+
+// Facade tests mock the durable boundary; actual consumption and races use PG.
+vi.mock("../../../services/security-email", () => ({ consumeEmailVerificationToken: vi.fn(), issueInitialEmailVerification: vi.fn() }));
 
 // Mock dependencies
 vi.mock("../../../repositories/UserRepository", () => ({
@@ -9,7 +13,6 @@ vi.mock("../../../repositories/UserRepository", () => ({
     findByEmail: vi.fn(),
     findByUsername: vi.fn(),
     findById: vi.fn(),
-    findByVerificationToken: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
     createLoginHistory: vi.fn(),
@@ -17,6 +20,11 @@ vi.mock("../../../repositories/UserRepository", () => ({
     findSessions: vi.fn(),
     upsertSession: vi.fn(),
   },
+}));
+vi.mock("../../../services/session-identity", () => ({
+  assertCurrentCredential: vi.fn().mockResolvedValue(undefined),
+  registerSessionIdentity: (_user: unknown, data: unknown) => userRepository.upsertSession(data as any),
+  revokeLoginSession: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("../../../auth", () => ({
@@ -41,9 +49,6 @@ vi.mock("../../../utils/logger", () => ({
   },
 }));
 
-vi.mock("../auth.mfa-policy", () => ({
-  checkMfaPolicy: vi.fn().mockResolvedValue({ suggestEnrollment: false }),
-}));
 
 vi.mock("../auth.security.monitor", () => ({
   authSecurityMonitor: {
@@ -69,6 +74,8 @@ vi.mock("../../../seed", () => ({
 describe("Email Verification", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(consumeEmailVerificationToken).mockReset();
+    vi.mocked(issueInitialEmailVerification).mockReset().mockResolvedValue(null);
   });
 
   describe("register", () => {
@@ -86,10 +93,11 @@ describe("Email Verification", () => {
       const req = {
         ip: "127.0.0.1",
         headers: {},
+        sessionID: "verification-register-unit-session",
         session: { regenerate: (cb: any) => cb(), cookie: {} },
       } as any;
 
-      await authService.register(
+      const result = await authService.register(
         {
           email: "new@example.com",
           username: "newuser",
@@ -99,12 +107,39 @@ describe("Email Verification", () => {
         req,
       );
 
+      expect(result.user.id).toBe(mockUser.id);
+      expect(req.session.userId).toBe(mockUser.id);
+      expect(userRepository.upsertSession).toHaveBeenCalledWith(expect.objectContaining({ userId: mockUser.id, sessionToken: req.sessionID }));
+
       expect(userRepository.create).toHaveBeenCalledWith(
         expect.objectContaining({
           emailVerified: false,
           emailVerificationToken: expect.any(String),
           emailVerificationExpiry: expect.any(Date),
         }),
+      );
+    });
+  });
+
+  describe("register display settings", () => {
+    it("seeds the light theme for a new account", async () => {
+      (userRepository.findByEmail as any).mockResolvedValue(null);
+      (userRepository.findByUsername as any).mockResolvedValue(null);
+      (userRepository.create as any).mockResolvedValue({ id: "theme-user-id", email: "theme@example.com", username: "themeuser" });
+      const req = {
+        ip: "127.0.0.1",
+        headers: {},
+        sessionID: "theme-register-unit-session",
+        session: { regenerate: (cb: any) => cb(), cookie: {} },
+      } as any;
+
+      await authService.register(
+        { email: "theme@example.com", username: "themeuser", password: "Password1!", fullName: "Theme User" },
+        req,
+      );
+
+      expect(userRepository.createDisplaySettings).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: "theme-user-id", theme: "light" }),
       );
     });
   });
@@ -135,7 +170,7 @@ describe("Email Verification", () => {
           },
           req,
         ),
-      ).rejects.toThrow(ForbiddenError);
+      ).rejects.toMatchObject({ statusCode: 403, code: "EMAIL_VERIFICATION_REQUIRED" });
     });
 
     it("should allow login if email verified", async () => {
@@ -153,6 +188,7 @@ describe("Email Verification", () => {
       const req = {
         ip: "127.0.0.1",
         headers: {},
+        sessionID: "verification-login-unit-session",
         session: { regenerate: (cb: any) => cb(), cookie: {} },
       } as any;
 
@@ -161,41 +197,22 @@ describe("Email Verification", () => {
         req,
       );
 
-      expect(result.user).toBeDefined();
+      expect(result.user?.id).toBe(mockUser.id);
+      expect(req.session.userId).toBe(mockUser.id);
+      expect(userRepository.upsertSession).toHaveBeenCalledWith(expect.objectContaining({ userId: mockUser.id, sessionToken: req.sessionID }));
     });
   });
 
   describe("verifyEmail", () => {
     it("should verify user when token is valid", async () => {
-      const mockUser = {
-        id: "user-1",
-        email: "test@example.com",
-        emailVerified: false,
-        emailVerificationExpiry: new Date(Date.now() + 10000), // Valid
-      };
-
-      (userRepository.findByVerificationToken as any).mockResolvedValue(
-        mockUser,
-      );
-
       await authService.verifyEmail("valid-token");
 
-      expect(userRepository.update).toHaveBeenCalledWith("user-1", {
-        emailVerified: true,
-        emailVerificationToken: null,
-        emailVerificationExpiry: null,
-      });
+      expect(consumeEmailVerificationToken).toHaveBeenCalledWith("valid-token", { initialOnly: true, request: undefined });
+      expect(userRepository.update).not.toHaveBeenCalled();
     });
 
     it("should throw error if token expired", async () => {
-      const mockUser = {
-        id: "user-1",
-        emailVerificationExpiry: new Date(Date.now() - 10000), // Expired
-      };
-
-      (userRepository.findByVerificationToken as any).mockResolvedValue(
-        mockUser,
-      );
+      vi.mocked(consumeEmailVerificationToken).mockRejectedValueOnce(new ValidationError("Verification token expired"));
 
       await expect(authService.verifyEmail("expired-token")).rejects.toThrow(
         ValidationError,
@@ -203,7 +220,7 @@ describe("Email Verification", () => {
     });
 
     it("should throw error if token invalid", async () => {
-      (userRepository.findByVerificationToken as any).mockResolvedValue(null);
+      vi.mocked(consumeEmailVerificationToken).mockRejectedValueOnce(new ValidationError("Invalid verification token"));
       await expect(authService.verifyEmail("invalid-token")).rejects.toThrow(
         ValidationError,
       );
@@ -220,15 +237,12 @@ describe("Email Verification", () => {
 
       (userRepository.findByEmail as any).mockResolvedValue(mockUser);
 
+      vi.mocked(issueInitialEmailVerification).mockResolvedValueOnce({ userId: mockUser.id, email: mockUser.email, token: "synthetic-issued-token" });
+
       await authService.resendVerification("test@example.com");
 
-      expect(userRepository.update).toHaveBeenCalledWith(
-        "user-1",
-        expect.objectContaining({
-          emailVerificationToken: expect.any(String),
-          emailVerificationExpiry: expect.any(Date),
-        }),
-      );
+      expect(issueInitialEmailVerification).toHaveBeenCalledWith("test@example.com");
+      expect(userRepository.update).not.toHaveBeenCalled();
     });
 
     it("should do nothing if user already verified", async () => {

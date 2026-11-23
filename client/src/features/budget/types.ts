@@ -19,10 +19,12 @@ export interface BudgetCategory {
   id: string;
   name: string;
   icon: ElementType;
-  budget: number;
-  actual: number;
-  remaining: number;
+  budget: number | null;
+  actual: number | null;
+  remaining: number | null;
   budgetId?: string;
+  coverage?: "group" | "unavailable";
+  currency?: string | null;
 }
 
 /**
@@ -34,11 +36,22 @@ export interface BudgetGroup {
   type: "income" | "expense" | "savings" | "debt";
   items: BudgetCategory[];
   expanded?: boolean;
-  budget?: number;
+  budget?: number | null;
+  /** A configured limit omitted from progress because its currency could not be reported. */
+  hasWithheldLimit?: boolean;
+  /** Unsaved input, kept separate from the reported limit. */
+  budgetDraft?: number;
+  /** The inline editor's native unit. Null means the editor is withheld. */
+  budgetEditCurrency?: string | null;
+  budgetEditPending?: boolean;
   isFlexible?: boolean;
   budgetId?: string;
   budgetMode?: "by_category" | "by_group";
   isGroupBudget?: boolean;
+  /** Reported group spending, independent of any category rows. */
+  actual?: number;
+  actualIncomplete?: boolean;
+  currency?: string | null;
 }
 
 /**
@@ -95,6 +108,7 @@ export interface ForecastEditData {
   year: number;
   month: number;
   amount: string;
+  currency: string | null;
 }
 
 /**

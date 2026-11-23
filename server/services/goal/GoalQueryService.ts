@@ -1,13 +1,14 @@
-﻿import { desc, eq } from "drizzle-orm";
+﻿import { and, desc, eq, sql } from "drizzle-orm";
 import {
   accounts,
   goalAccountAssignments,
   goalActivityLog,
   goals,
+  households,
   type Goal,
 } from "@shared/schema";
 import { db } from "../../db";
-import { Money } from "../../core/money";
+import { Money, toMoneyDto } from "../../core/money";
 import {
   calculateMonthlyProjection,
   calculatePercentComplete,
@@ -20,25 +21,84 @@ import {
 } from "../goalCalculations";
 import { debtPayoffCalculator } from "../DebtPayoffCalculator";
 import { GoalBaseService } from "./GoalBaseService";
+import type { HouseholdContext } from "../../middleware/householdGuard";
+import { visibleAccountPredicate } from "../../core/authz/transaction-visibility";
+import { visibleGoalActivitySources } from "../../core/authz/goal-activity-visibility";
+import { visibleGoalProgressSources } from "../../core/authz/goal-progress-visibility";
+import { NotFoundError } from "../../utils/errorHandler";
+import { readGoalsWithVisibility, type ViewerGoal } from "./GoalViewerProgress";
+import { calendarDaysForMonths, wholeCalendarMonthsBetween } from "./goalCalendarDays";
+import { householdToday } from "../householdCalendarToday";
+import { householdGoalTotals } from "./goalSummaryTotals";
+
+type GoalListOptions = NonNullable<Parameters<GoalBaseService["getGoals"]>[1]>;
+
+/** Status and completion filters on what this viewer may see: a hidden goal matches no status and is never completed. */
+function matchesViewerFilters(goal: ViewerGoal<Goal>, options: GoalListOptions): boolean {
+  if (options.status && goal.status !== options.status) return false;
+  return options.includeCompleted === true || goal.isCompleted !== true;
+}
+
+/** A visible goal's remaining amount and percent complete, from its live progress. */
+function remainingAndPercent(goal: Goal) {
+  const current = new Money(goal.currentAmount);
+  const remainingMoney = goal.type === "pay_down" ? current : new Money(goal.targetAmount).subtract(current);
+  return {
+    remaining: remainingMoney.isNegative() ? 0 : remainingMoney.toNumber(),
+    percentComplete: calculatePercentComplete(goal),
+  };
+}
+
+/**
+ * A debt goal's projected interest, in the goal's own currency.
+ * debtPayoffCalculator.calculatePayoff takes numbers (legacy boundary).
+ */
+function projectedInterestFor(goal: Goal): Money {
+  const balance = new Money(goal.currentAmount).abs().toNumber();
+  const apr = Number(goal.interestRate ?? 0); // Interest rate is a percentage, not currency
+  const monthlyPaymentMoney = new Money(goal.monthlyPayment ?? 0);
+  if (!Number.isFinite(balance) || !Number.isFinite(apr) || monthlyPaymentMoney.isNegativeOrZero()) {
+    return Money.zero();
+  }
+  const oneTimePayment = goal.oneTimePayment ? new Money(goal.oneTimePayment) : Money.zero();
+  const scenario = debtPayoffCalculator.calculatePayoff(
+    balance, apr, monthlyPaymentMoney.toNumber(), oneTimePayment.toNumber(),
+  );
+  return new Money(scenario.totalInterest);
+}
 
 export class GoalQueryService extends GoalBaseService {
-  async getGoalWithProgress(id: string, householdId: string, userId: string) {
-    const baseGoal = await this.getGoalById(id, householdId);
-    const goal = await this.applyInvestmentHoldingsProgress(baseGoal);
-    const timezone = await this.getUserTimezone(userId);
+  /**
+   * One goal as this viewer may see it, the row and the verdict from one read.
+   * Every response that carries a goal, writes included, returns this (#235 M1).
+   */
+  async getViewerGoal(id: string, actor: HouseholdContext): Promise<ViewerGoal<Goal>> {
+    const [row] = await readGoalsWithVisibility(actor, { goalId: id });
+    if (!row) throw new NotFoundError("Goal not found");
+    return (await this.valueGoalForViewer(row.goal, row.visibility)).viewer;
+  }
+
+  /** List for one viewer: hidden progress sources withhold the progress (FIN-01). */
+  async getGoalsForViewer(actor: HouseholdContext, options: GoalListOptions = {}) {
+    const rows = await readGoalsWithVisibility(actor, { type: options.type, includeArchived: options.includeArchived });
+    const viewerGoals = await Promise.all(rows.map(async ({ goal, visibility }) =>
+      (await this.valueGoalForViewer(goal, visibility)).viewer));
+    return viewerGoals.filter((goal) => matchesViewerFilters(goal, options));
+  }
+
+  async getGoalWithProgress(id: string, actor: HouseholdContext) {
+    const [row] = await readGoalsWithVisibility(actor, { goalId: id });
+    if (!row) throw new NotFoundError("Goal not found");
+    const { viewer: viewerGoal, valued: goal } = await this.valueGoalForViewer(row.goal, row.visibility);
+    const timezone = await this.getUserTimezone(actor.userId);
     const today = this.getTodayInTimezone(timezone);
 
-    const currentAmountMoney = new Money(goal.currentAmount);
-    const remainingMoney =
-      goal.type === "pay_down"
-        ? currentAmountMoney
-        : new Money(goal.targetAmount).subtract(currentAmountMoney);
-    const remaining = remainingMoney.isNegative() ? 0 : remainingMoney.toNumber();
-    const percentComplete = calculatePercentComplete(goal);
+    const { remaining, percentComplete } = goal ? remainingAndPercent(goal) : { remaining: null, percentComplete: null };
+    const targetDate = row.goal.targetDate;
 
     let daysLeft: number | null = null;
-    if (goal.targetDate) {
-      const target = new Date(`${goal.targetDate}T00:00:00Z`);
+    if (targetDate) {
+      const target = new Date(`${targetDate}T00:00:00Z`);
       daysLeft = Math.max(
         0,
         Math.ceil((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
@@ -48,11 +108,16 @@ export class GoalQueryService extends GoalBaseService {
     const assignments = await db
       .select({ assignment: goalAccountAssignments, account: accounts })
       .from(goalAccountAssignments)
+      .innerJoin(goals, eq(goalAccountAssignments.goalId, goals.id))
       .innerJoin(accounts, eq(goalAccountAssignments.accountId, accounts.id))
-      .where(eq(goalAccountAssignments.goalId, goal.id));
+      .where(and(
+        eq(goals.id, row.goal.id),
+        eq(goals.householdId, actor.householdId),
+        visibleAccountPredicate(actor),
+      ));
 
     return {
-      ...goal,
+      ...viewerGoal,
       percentComplete,
       remaining,
       daysLeft,
@@ -65,52 +130,52 @@ export class GoalQueryService extends GoalBaseService {
     };
   }
 
-  async getProjection(id: string, householdId: string, userId: string) {
-    const baseGoal = await this.getGoalById(id, householdId);
-    const goal = await this.applyInvestmentHoldingsProgress(baseGoal);
-    const timezone = await this.getUserTimezone(userId);
-    const today = this.getTodayInTimezone(timezone);
-
-    const monthlyProjection = calculateMonthlyProjection(goal);
-    const projectedCompletionDate = calculateProjectedCompletion(
-      goal,
-      monthlyProjection ?? undefined
-    );
-    const status = calculateStatus(goal);
-
-    let monthsRemaining: number | null = null;
-    if (goal.targetDate) {
-      const target = new Date(`${goal.targetDate}T00:00:00Z`);
-      monthsRemaining =
-        (target.getFullYear() - today.getFullYear()) * 12 +
-        (target.getMonth() - today.getMonth());
+  async getProjection(id: string, actor: HouseholdContext) {
+    const [row] = await readGoalsWithVisibility(actor, { goalId: id });
+    if (!row) throw new NotFoundError("Goal not found");
+    const { valued: goal } = await this.valueGoalForViewer(row.goal, row.visibility);
+    // Hidden sources, or a price or rate the valuation needs is missing: no forecast number.
+    if (!goal) {
+      return { availability: "unavailable" as const, monthlyProjection: null, projectedCompletionDate: null,
+        status: null, monthsRemaining: null };
     }
+    // NEW-15: calendar months from the household's calendar date, in Money.
+    const today = await householdToday(db, actor.householdId);
+    const monthlyProjection = calculateMonthlyProjection(goal, today);
 
     return {
-      monthlyProjection: monthlyProjection ?? null,
-      projectedCompletionDate,
-      status,
-      monthsRemaining,
+      availability: "available" as const,
+      monthlyProjection: monthlyProjection ? toMoneyDto(monthlyProjection, goal.currency) : null,
+      projectedCompletionDate: calculateProjectedCompletion(goal, today, monthlyProjection),
+      status: calculateStatus(goal, undefined, today),
+      monthsRemaining: goal.targetDate ? wholeCalendarMonthsBetween(today, goal.targetDate) : null,
     };
   }
 
-  async getSummary(householdId: string) {
-    const goalsList = await this.getGoals(householdId, {
-      includeArchived: false,
-      includeCompleted: true,
-    });
+  async getSummary(actor: HouseholdContext) {
+    const { householdId } = actor;
+    // Totals, statuses and milestones aggregate progress, so a goal whose
+    // sources are hidden from this viewer contributes only to the counts.
+    // Rows and verdicts come from one read (one snapshot).
+    const rows = await readGoalsWithVisibility(actor, { includeArchived: false });
+    // A-04 / A-30: only goals whose progress is shown are valued, and only they reach the totals.
+    const valued = await Promise.all(rows.map(({ goal, visibility }) => this.valueGoalForViewer(goal, visibility)));
+    const goalsList = valued.flatMap(({ valued: goal }) => (goal ? [goal] : []));
+    const countByType = (type: Goal["type"]) => rows.filter(({ goal }) => goal.type === type).length;
+    // NEW-35: summary money is MoneyDto in the household currency.
+    const [household] = await db.select({ currency: households.currency }).from(households)
+      .where(eq(households.id, householdId)).limit(1);
+    const currency = household?.currency ?? "ZMW";
+    const dto = (value: Money) => toMoneyDto(value.toString(), currency);
+    // A-09: each goal is converted from its own currency; one with no rate is left out and counted.
+    const totals = await householdGoalTotals(goalsList, currency, householdId);
 
     const saveUpGoals = goalsList.filter((g) => g.type === "save_up");
     const payDownGoals = goalsList.filter((g) => g.type === "pay_down");
+    const investmentGoals = goalsList.filter((g) => g.type === "investment");
 
-    const sumAmounts = (
-      list: Goal[],
-      field: "currentAmount" | "targetAmount"
-    ) =>
-      list.reduce((sum, g) => {
-        const val = new Money(g[field]);
-        return sum.add(val);
-      }, new Money(0));
+    const sumAmounts = (list: Goal[], field: "currentAmount" | "targetAmount") =>
+      totals.sum(list, (g) => new Money(g[field]));
 
     const saveUpTotalSaved = sumAmounts(saveUpGoals, "currentAmount");
     const saveUpTotalTarget = sumAmounts(saveUpGoals, "targetAmount");
@@ -124,52 +189,12 @@ export class GoalQueryService extends GoalBaseService {
             .toNumber()
         );
 
-    const payDownTotalDebt = payDownGoals.reduce((sum, g) => {
-      const val = new Money(g.currentAmount);
-      return sum.add(val.abs());
-    }, Money.zero());
-
-    // Note: I am converting to number at end to preserve return signature of getSummary if it returns numbers.
-    // Ideally update getSummary return type to string/Money, but frontend expects numbers?
-    // Let's keep strict return types for now or update DTO later.
-    // Wait, payDownTotalOriginal...
-
-    const payDownTotalOriginal = payDownGoals.reduce((sum, g) => {
-      const original = g.originalBalance
-        ? new Money(g.originalBalance)
-        : new Money(g.targetAmount);
-      return sum.add(original); // Assumed positive as per create logic
-    }, Money.zero());
-    // Calculate projected interest using Money for accumulation
-    // Note: debtPayoffCalculator.calculatePayoff requires number inputs (legacy boundary)
-    const projectedInterestMoney = payDownGoals.reduce((sum, goal) => {
-      const balanceMoney = new Money(goal.currentAmount).abs();
-      const balance = balanceMoney.toNumber();
-      const apr = Number(goal.interestRate ?? 0); // Interest rate is a percentage, not currency
-      const monthlyPaymentMoney = new Money(goal.monthlyPayment ?? 0);
-      const monthlyPayment = monthlyPaymentMoney.toNumber();
-      if (
-        !Number.isFinite(balance) ||
-        !Number.isFinite(apr) ||
-        monthlyPaymentMoney.isNegativeOrZero()
-      ) {
-        return sum;
-      }
-
-      const oneTimePaymentMoney = goal.oneTimePayment
-        ? new Money(goal.oneTimePayment)
-        : Money.zero();
-
-      const scenario = debtPayoffCalculator.calculatePayoff(
-        balance,
-        apr,
-        monthlyPayment,
-        oneTimePaymentMoney.toNumber()
-      );
-
-      // Accumulate using Money to maintain precision
-      return sum.add(new Money(scenario.totalInterest));
-    }, Money.zero());
+    const payDownTotalDebt = totals.sum(payDownGoals, (g) => new Money(g.currentAmount).abs());
+    // Assumed positive as per create logic
+    const payDownTotalOriginal = totals.sum(payDownGoals, (g) =>
+      new Money(g.originalBalance ? g.originalBalance : g.targetAmount));
+    // Each goal's projected interest in its own currency, converted like the other totals.
+    const projectedInterestMoney = totals.sum(payDownGoals, projectedInterestFor);
 
     const recentActivity = await db
       .select({
@@ -178,14 +203,19 @@ export class GoalQueryService extends GoalBaseService {
         amount: goalActivityLog.amount,
         createdAt: goalActivityLog.createdAt,
         goalName: goals.name,
+        goalCurrency: goals.currency,
+        // In the same read: an amount on a goal whose progress is hidden is withheld (#235 M6).
+        progressVisible: sql<boolean>`coalesce((${visibleGoalProgressSources(actor)}), false)`,
       })
       .from(goalActivityLog)
       .innerJoin(goals, eq(goalActivityLog.goalId, goals.id))
-      .where(eq(goals.householdId, householdId))
+      .where(and(eq(goals.householdId, householdId), visibleGoalActivitySources(actor)))
       .orderBy(desc(goalActivityLog.createdAt))
       .limit(10);
 
     const milestonePercents = [25, 50, 75, 100];
+    // Days away count real calendar months from the household's today, not 30-day months (NEW-15).
+    const today = await householdToday(db, householdId);
 
     const estimateMilestoneDays = (
       goal: Goal,
@@ -237,24 +267,23 @@ export class GoalQueryService extends GoalBaseService {
           return null;
         }
 
-        return Math.max(0, Math.ceil(entry.month * 30));
+        return calendarDaysForMonths(today, entry.month);
       }
 
-      const monthlyProjectionMoney = goal.monthlyProjection
+      const monthlyProjection = goal.monthlyProjection
         ? new Money(goal.monthlyProjection)
-        : null;
-      const monthlyProjection = monthlyProjectionMoney?.toNumber() ?? calculateMonthlyProjection(goal) ?? 0;
-
-      if (!Number.isFinite(monthlyProjection) || monthlyProjection <= 0) {
+        : calculateMonthlyProjection(goal, today);
+      if (!monthlyProjection || monthlyProjection.isNegativeOrZero()) {
         return null;
       }
 
-      const months = remainingToMilestone / monthlyProjection;
+      // A ratio of two amounts (months), not money.
+      const months = remainingToMilestone / monthlyProjection.toNumber();
       if (!Number.isFinite(months) || months < 0) {
         return null;
       }
 
-      return Math.max(0, Math.ceil(months * 30));
+      return calendarDaysForMonths(today, months);
     };
 
     const upcomingMilestones = goalsList
@@ -323,48 +352,43 @@ export class GoalQueryService extends GoalBaseService {
 
     return {
       saveUp: {
-        total: saveUpGoals.length,
+        total: countByType("save_up"),
         onTrack: saveUpGoals.filter((g) => g.status === "on_track").length,
         behind: saveUpGoals.filter((g) => g.status === "behind").length,
         atRisk: saveUpGoals.filter((g) => g.status === "at_risk").length,
         completed: saveUpGoals.filter((g) => g.status === "completed").length,
-        totalSaved: Number(saveUpTotalSaved.toString()),
-        totalTarget: Number(saveUpTotalTarget.toString()),
+        totalSaved: dto(saveUpTotalSaved),
+        totalTarget: dto(saveUpTotalTarget),
         overallProgress,
+        // A-09: goals left out of these totals because their currency has no rate.
+        excludedCount: totals.excludedCount(saveUpGoals),
       },
       payDown: {
-        total: payDownGoals.length,
-        totalDebt: Number(payDownTotalDebt.toString()),
-        totalPaid: Number(
-          (payDownTotalOriginal.subtract(payDownTotalDebt).isNegative()
+        total: countByType("pay_down"),
+        totalDebt: dto(payDownTotalDebt),
+        totalPaid: dto(
+          payDownTotalOriginal.subtract(payDownTotalDebt).isNegative()
             ? Money.zero()
             : payDownTotalOriginal.subtract(payDownTotalDebt)
-          ).toString()
         ),
-        projectedInterest: Number(projectedInterestMoney.toString()),
+        projectedInterest: dto(projectedInterestMoney),
         onTrack: payDownGoals.filter((g) => g.status === "on_track").length,
         behind: payDownGoals.filter((g) => g.status === "behind").length,
+        excludedCount: totals.excludedCount(payDownGoals),
       },
       investment: {
-        total: goalsList.filter((g) => g.type === "investment").length,
-        totalSaved: Number(
-          sumAmounts(
-            goalsList.filter((g) => g.type === "investment"),
-            "currentAmount"
-          ).toString()
-        ),
-        totalTarget: Number(
-          sumAmounts(
-            goalsList.filter((g) => g.type === "investment"),
-            "targetAmount"
-          ).toString()
-        ),
+        total: countByType("investment"),
+        totalSaved: dto(sumAmounts(investmentGoals, "currentAmount")),
+        totalTarget: dto(sumAmounts(investmentGoals, "targetAmount")),
+        excludedCount: totals.excludedCount(investmentGoals),
       },
       recentActivity: recentActivity.map((activity) => ({
         goalId: activity.goalId,
         goalName: activity.goalName,
         activityType: activity.activityType,
-        amount: activity.amount ? new Money(activity.amount).toNumber() : 0,
+        amount: activity.amount === null || activity.progressVisible !== true
+          ? null
+          : toMoneyDto(activity.amount, activity.goalCurrency),
         createdAt: activity.createdAt?.toISOString() ?? null,
       })),
       upcomingMilestones,

@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
 import { useGoalsSummary } from "@/hooks/useGoals";
+import { toMoneyNumber } from "@/lib/money";
 
 export default function GoalsStep() {
   const { nextStep, prevStep, submitStepFeedback } = useWeeklyRecap();
@@ -30,8 +31,8 @@ export default function GoalsStep() {
   const hasGoals = summary && (summary.saveUp.total > 0 || summary.payDown.total > 0);
   const totalGoals = (summary?.saveUp.total || 0) + (summary?.payDown.total || 0);
   const onTrackCount = (summary?.saveUp.onTrack || 0) + (summary?.payDown.onTrack || 0);
-  const totalSaved = summary?.saveUp.totalSaved || 0;
-  const totalTarget = summary?.saveUp.totalTarget || 0;
+  const totalSaved = toMoneyNumber(summary?.saveUp.totalSaved ?? 0);
+  const totalTarget = toMoneyNumber(summary?.saveUp.totalTarget ?? 0);
   const overallProgress = totalTarget > 0 ? (totalSaved / totalTarget) * 100 : 0;
 
   return (

@@ -7,6 +7,9 @@ import {
 } from "@/components/ui/card";
 import { useFXAttribution, useFXHistorical } from "@/hooks/useInvestments";
 import { useFormat } from "@/hooks/use-format";
+import { FX_ATTRIBUTION_CURRENCY } from "@/hooks/investments/types";
+import Decimal from "decimal.js";
+import { moneyValueToDecimal, sumMoneyValues, toMoneyNumber } from "@/lib/money";
 import { TrendingUp, TrendingDown, RefreshCcw, Info } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -44,6 +47,9 @@ export function FXImpactPanel() {
     30,
   );
   const { formatCurrency } = useFormat();
+  // Attribution amounts are in the server's FX base, never the display currency (A-31).
+  // They arrive as MoneyDto (defect 10); a number appears only for display.
+  const formatFx = (value: Decimal) => formatCurrency(toMoneyNumber(value.toFixed(2)), FX_ATTRIBUTION_CURRENCY);
 
   if (attributionLoading) {
     return <Skeleton className="w-full h-[400px]" />;
@@ -68,37 +74,30 @@ export function FXImpactPanel() {
     );
   }
 
-  // Calculate totals
-  const totalCostBasis = attribution.reduce(
-    (sum, item) => sum + item.costBasis,
-    0,
-  );
-  const totalGain = attribution.reduce((sum, item) => sum + item.totalGain, 0);
-  const totalAssetReturn = attribution.reduce(
-    (sum, item) => sum + item.assetReturn,
-    0,
-  );
-  const totalFxReturn = attribution.reduce(
-    (sum, item) => sum + item.fxReturn,
-    0,
+  // Totals in Decimal from the MoneyDto amounts, never float sums (defect 10).
+  const totalCostBasis = sumMoneyValues(attribution.map((item) => item.costBasis));
+  const totalGain = sumMoneyValues(attribution.map((item) => item.totalGain));
+  const totalAssetReturn = sumMoneyValues(attribution.map((item) => item.assetReturn));
+  const totalFxReturn = sumMoneyValues(attribution.map((item) => item.fxReturn));
+
+  const totalReturnPercent = totalCostBasis.greaterThan(0)
+    ? totalGain.dividedBy(totalCostBasis).times(100).toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toNumber()
+    : 0;
+
+  // Currency exposure: ZMW value per security currency, summed in Decimal.
+  const currencyExposure = attribution.reduce<Record<string, Decimal>>(
+    (acc, item) => ({
+      ...acc,
+      [item.currency]: (acc[item.currency] ?? new Decimal(0)).plus(moneyValueToDecimal(item.currentValue)),
+    }),
+    {},
   );
 
-  const totalReturnPercent =
-    totalCostBasis > 0 ? (totalGain / totalCostBasis) * 100 : 0;
-
-  // Calculate Currency Exposure
-  const currencyExposure = attribution.reduce(
-    (acc, item) => {
-      acc[item.currency] = (acc[item.currency] || 0) + item.currentValue;
-      return acc;
-    },
-    {} as Record<string, number>,
-  );
-
+  // The chart takes numbers; they are display values only.
   const exposureData = Object.entries(currencyExposure).map(
     ([name, value]) => ({
       name,
-      value,
+      value: toMoneyNumber(value.toFixed(2)),
     }),
   );
 
@@ -110,12 +109,12 @@ export function FXImpactPanel() {
             <Card className="bg-primary/5 border-primary/20 col-span-full">
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-medium text-muted-foreground">
-                  Total Return (ZMW)
+                  Total Return ({FX_ATTRIBUTION_CURRENCY})
                 </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="text-2xl font-bold flex items-center gap-2">
-                  {formatCurrency(totalGain)}
+                  {formatFx(totalGain)}
                   <span
                     className={`text-xs px-2 py-0.5 rounded-full ${
                       totalReturnPercent >= 0
@@ -154,7 +153,7 @@ export function FXImpactPanel() {
               </CardHeader>
               <CardContent>
                 <div className="text-2xl font-bold">
-                  {formatCurrency(totalAssetReturn)}
+                  {formatFx(totalAssetReturn)}
                 </div>
                 <div className="flex items-center text-xs text-muted-foreground mt-1">
                   <TrendingUp className="h-3 w-3 mr-1" />
@@ -185,10 +184,10 @@ export function FXImpactPanel() {
               <CardContent>
                 <div
                   className={`text-2xl font-bold ${
-                    totalFxReturn < 0 ? "text-red-500" : "text-emerald-500"
+                    totalFxReturn.isNegative() ? "text-red-500" : "text-emerald-500"
                   }`}
                 >
-                  {formatCurrency(totalFxReturn)}
+                  {formatFx(totalFxReturn)}
                 </div>
                 <div className="flex items-center text-xs text-muted-foreground mt-1">
                   <TrendingDown className="h-3 w-3 mr-1" />
@@ -226,7 +225,7 @@ export function FXImpactPanel() {
                   ))}
                 </Pie>
                 <RechartsTooltip
-                  formatter={(value: number) => formatCurrency(value)}
+                  formatter={(value: number) => formatCurrency(value, FX_ATTRIBUTION_CURRENCY)}
                 />
                 <Legend />
               </PieChart>
@@ -237,7 +236,7 @@ export function FXImpactPanel() {
 
       <FXAttributionTable
         attribution={attribution}
-        formatCurrency={formatCurrency}
+        formatAmount={formatFx}
       />
     </div>
   );

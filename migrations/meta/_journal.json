@@ -85,6 +85,321 @@
       "when": 1784458934366,
       "tag": "0011_hash_email_verification_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1792025953989,
+      "tag": "0012_durable_session_revocation",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1792030078739,
+      "tag": "0013_r01_security_notices",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1793366400000,
+      "tag": "0014_r05_personal_account_filter",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1793434886584,
+      "tag": "0015_r14_durable_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1793581158757,
+      "tag": "0016_r04_snapshot_provenance",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1793594010478,
+      "tag": "0017_r12_provider_fx_quotes",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1793600401933,
+      "tag": "0018_r08_posting_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1793603390306,
+      "tag": "0019_r04_account_worth_captures",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1793611691941,
+      "tag": "0020_r08_receipt_conversion_records",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1793613910857,
+      "tag": "0021_r10_month_only_budget",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1793616728009,
+      "tag": "0022_r08_transaction_create_owner_intent",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1793619358740,
+      "tag": "0023_r08_ordinary_create_request_digest",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1793622576639,
+      "tag": "0024_r08_transfer_create_request",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1793630934909,
+      "tag": "0025_r13_grz_valuation_and_principal",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1793656089447,
+      "tag": "0026_r13_opening_operation_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1793664563195,
+      "tag": "0027_r13_holding_deletion_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1793705886078,
+      "tag": "0028_r13_sip_authorization",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1794829970005,
+      "tag": "0029_c306_sip_occurrences",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1794829971005,
+      "tag": "0030_c306_household_security_prices",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1794860034111,
+      "tag": "0032_r12_household_fx_rates",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1794863596501,
+      "tag": "0033_r13_grz_bond_sale_settlement",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1794866360861,
+      "tag": "0031_new12_household_one_owner",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1794867551221,
+      "tag": "0035_r10_goal_progress_sources",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1794882050782,
+      "tag": "0036_r05_household_saved_views",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1794883391835,
+      "tag": "0037_r16_notification_outcomes",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1794896454698,
+      "tag": "0038_r16_recap_feedback",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1794903923691,
+      "tag": "0039_r13_grz_bond_sale_immutable",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1794913451971,
+      "tag": "0040_r10_goal_progress_adjustments",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1794921745721,
+      "tag": "0041_r13_investment_fx_rate_scale",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1794928509790,
+      "tag": "0042_r13_sip_fill_dated_fx",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1794947101709,
+      "tag": "0045_r07_drop_salary_range",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1794952070390,
+      "tag": "0046_r09_import_batch_history",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1794981251010,
+      "tag": "0047_r13_sip_fill_fx_source",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1794981311010,
+      "tag": "0048_new39_tags_scoped_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1794981371010,
+      "tag": "0049_new39_fk_names",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1795184811951,
+      "tag": "0050_r17_ai_admission_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1795184871951,
+      "tag": "0051_ops001_storage_objects",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1795288911478,
+      "tag": "0052_a36_tbill_receipt_settlement",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1795294183968,
+      "tag": "0053_a36_tbill_interest_guard",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1795295289618,
+      "tag": "0054_a70_pay_down_goal_targets",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1795297485201,
+      "tag": "0055_a66_grz_household_business_date",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1795352392432,
+      "tag": "0056_a34_storage_purge_items",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1795356996191,
+      "tag": "0057_push_subscription_session",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1795416353281,
+      "tag": "0058_new13_securities_owner_household",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1795416577021,
+      "tag": "0059_mfa_grace",
+      "breakpoints": true
     }
   ]
 }

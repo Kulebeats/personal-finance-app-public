@@ -8,16 +8,20 @@
  */
 
 import { Request, Response, NextFunction } from "express";
-import { randomUUID } from "crypto";
+import { isIP } from "node:net";
+import { z } from "zod";
 import { recurringService } from "../../services/RecurringService";
+import { listRecurringCalendar } from "../../services/recurring/RecurringCalendarQuery";
 import { logger } from "../../utils/logger";
 import { success } from "../../core/http";
 import { ValidationError } from "../../core/errors";
 import { toMoneyDto } from "../../core/money";
+import { positiveMoneyDtoSchema } from "../../core/validation/money";
 import {
   createRecurringSchema,
   updateRecurringSchema,
   listRecurringQuerySchema,
+  recurringCalendarQuerySchema,
   upcomingQuerySchema,
   createRecurringFromTransactionSchema,
   createRecurringFromExistingTransactionSchema,
@@ -26,6 +30,7 @@ import {
   processRecurringSchema,
 } from "./recurring.validation";
 import { businessAuditService } from "../../services/BusinessAuditService";
+import { recordRecurringBatchSummary } from "../../services/recurring/RecurringBatchAudit";
 import { recurringLifecycleController } from "./recurring.lifecycle.controller";
 import { recurringPatternController } from "./recurring.pattern.controller";
 import {
@@ -41,11 +46,11 @@ export const recurringController = {
 
   async list(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
+      const actor = req.householdContext!;
       const queryResult = listRecurringQuerySchema.safeParse(req.query);
       const options = queryResult.success ? queryResult.data : {};
-      const rules = await recurringService.getRecurringRules(
-        householdId,
+      const rules = await recurringService.getVisibleRecurringRules(
+        actor,
         options,
       );
       logger.request(req, "Listed recurring rules", { count: rules.length });
@@ -57,10 +62,23 @@ export const recurringController = {
 
   async getById(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
+      const actor = req.householdContext!;
       const { id } = req.params;
-      const rule = await recurringService.getRecurringById(id, householdId);
+      const rule = await recurringService.getVisibleRecurringById(id, actor);
       return success(res, mapRecurringRuleMoney(rule));
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  async getCalendar(req: Request, res: Response, next: NextFunction) {
+    try {
+      const parsed = recurringCalendarQuerySchema.safeParse(req.query);
+      if (!parsed.success) throw new ValidationError("Invalid request data", parsed.error.issues);
+      const occurrences = await listRecurringCalendar(req.householdContext!, parsed.data);
+      return success(res, occurrences.map(({ rule, ...occurrence }) => ({
+        ...occurrence, rule: mapRecurringRuleMoney(rule),
+      })));
     } catch (error) {
       next(error);
     }
@@ -68,11 +86,11 @@ export const recurringController = {
 
   async getUpcoming(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
+      const actor = req.householdContext!;
       const queryResult = upcomingQuerySchema.safeParse(req.query);
       const days = queryResult.success ? queryResult.data.days : 30;
       const upcoming = await recurringService.getUpcomingBills(
-        householdId,
+        actor,
         days,
       );
       return success(res, upcoming.map(mapRecurringRuleMoney));
@@ -83,12 +101,11 @@ export const recurringController = {
 
   async getSummary(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
-      const summary = await recurringService.getSummaryData(householdId);
+      const summary = await recurringService.getSummaryData(req.householdContext!);
       return success(res, {
         ...summary,
-        totalMonthlyIncome: toMoneyDto(summary.totalMonthlyIncome),
-        totalMonthlyExpenses: toMoneyDto(summary.totalMonthlyExpenses),
+        totalMonthlyIncome: toMoneyDto(summary.totalMonthlyIncome, summary.currency),
+        totalMonthlyExpenses: toMoneyDto(summary.totalMonthlyExpenses, summary.currency),
       });
     } catch (error) {
       next(error);
@@ -97,10 +114,10 @@ export const recurringController = {
 
   async getHistory(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
+      const actor = req.householdContext!;
       const { id } = req.params;
       const { limit } = historyQuerySchema.parse(req.query);
-      const history = await recurringService.getHistory(id, householdId, limit);
+      const history = await recurringService.getHistory(id, actor, limit);
       return success(res, history);
     } catch (error) {
       next(error);
@@ -109,11 +126,11 @@ export const recurringController = {
 
   async getLinkedTransactions(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
+      const actor = req.householdContext!;
       const { id } = req.params;
       const links = await recurringService.getLinkedTransactions(
         id,
-        householdId,
+        actor,
       );
       return success(res, links.map(mapRecurringLinkMoney));
     } catch (error) {
@@ -135,20 +152,16 @@ export const recurringController = {
           parseResult.error.errors,
         );
       }
+      // The CREATE audit row is written inside the rule's transaction (FIN-13).
       const rule = await recurringService.createRecurring(
         parseResult.data,
         householdId,
         req.user!.id,
+        {
+          actor: req.householdContext!, currency: positiveMoneyDtoSchema.parse(req.body.amount).currency,
+          audit: { ipAddress: businessAuditService.getIpAddress(req) },
+        },
       );
-
-      await businessAuditService.logCreate({
-        userId: req.user!.id,
-        householdId,
-        entityId: rule.id,
-        entityType: "recurring_rule",
-        newValue: { name: rule.name, amount: rule.amount },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
 
       logger.request(req, "Created recurring rule");
       return success(res, mapRecurringRuleMoney(rule), 201);
@@ -159,7 +172,7 @@ export const recurringController = {
 
   async update(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
+      const actor = req.householdContext!;
       const { id } = req.params;
       const parseResult = updateRecurringSchema.safeParse(req.body);
       if (!parseResult.success) {
@@ -169,38 +182,15 @@ export const recurringController = {
         );
       }
 
-      // Fetch before state for audit
-      const beforeRule = await recurringService.getRecurringById(
-        id,
-        householdId,
-      );
-
-      const rule = await recurringService.updateRecurring(
-        id,
-        parseResult.data,
-        householdId,
-        req.user!.id,
-      );
-
-      await businessAuditService.logUpdate({
-        userId: req.user!.id,
-        householdId,
-        entityId: id,
-        entityType: "recurring_rule",
-        oldValue: {
-          name: beforeRule.name,
-          amount: beforeRule.amount,
-          frequency: beforeRule.frequency,
-          isActive: beforeRule.isActive,
-        },
-        newValue: {
-          name: rule.name,
-          amount: rule.amount,
-          frequency: rule.frequency,
-          isActive: rule.isActive,
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
+      const { confirmDenomination, expectedDefinition, ...updates } = parseResult.data;
+      const denomination = req.body.amount === undefined && confirmDenomination === undefined ? undefined : {
+        confirmDenomination,
+        currency: req.body.amount === undefined ? undefined : positiveMoneyDtoSchema.parse(req.body.amount).currency,
+        ...(expectedDefinition === undefined ? {} : { expectedDefinition }),
+      };
+      // The UPDATE audit row is written inside the update's transaction (FIN-13).
+      const audit = { ipAddress: businessAuditService.getIpAddress(req) };
+      const { rule } = await recurringService.updateRecurring(id, updates, actor, denomination, audit);
 
       logger.request(req, "Updated recurring rule");
       return success(res, mapRecurringRuleMoney(rule));
@@ -211,30 +201,10 @@ export const recurringController = {
 
   async delete(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId, userId } = req.householdContext!;
       const { id } = req.params;
 
-      // Capture entity snapshot before deletion for audit
-      const deletedRule = await recurringService.getRecurringById(
-        id,
-        householdId,
-      );
-
-      await recurringService.deleteRecurring(id, householdId);
-
-      await businessAuditService.logDelete({
-        userId,
-        householdId,
-        entityId: id,
-        entityType: "recurring_rule",
-        oldValue: {
-          name: deletedRule.name,
-          amount: deletedRule.amount,
-          frequency: deletedRule.frequency,
-          accountId: deletedRule.accountId,
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
+      // The DELETE audit row is written inside the deletion's transaction (FIN-13).
+      await recurringService.deleteRecurring(id, req.householdContext!, { ipAddress: businessAuditService.getIpAddress(req) });
       logger.request(req, "Deleted recurring rule");
       return success(res, { message: "Recurring rule deleted successfully" });
     } catch (error) {
@@ -254,9 +224,8 @@ export const recurringController = {
 
   async linkTransaction(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
+      const actor = req.householdContext!;
       const { id } = req.params;
-      const userId = req.user!.id;
       const parseResult = linkTransactionSchema.safeParse(req.body);
       if (!parseResult.success) {
         throw new ValidationError(
@@ -264,26 +233,13 @@ export const recurringController = {
           parseResult.error.errors,
         );
       }
-      const link = await recurringService.linkTransaction(
+      // The LINK audit row is written inside the link's transaction (FIN-13).
+      const link = await recurringService.linkVisibleTransaction(
         id,
         parseResult.data.transactionId,
-        householdId,
-        userId,
-        "manual",
+        actor,
+        { ipAddress: businessAuditService.getIpAddress(req) },
       );
-      await businessAuditService.log({
-        userId,
-        householdId,
-        action: "LINK",
-        entityType: "recurring_rule",
-        entityId: id,
-        details: {
-          transactionId: parseResult.data.transactionId,
-          linkId: link.id,
-          matchMethod: "manual",
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
       logger.request(req, "Linked transaction to recurring");
       return success(res, mapRecurringLinkMoney(link));
     } catch (error) {
@@ -293,26 +249,12 @@ export const recurringController = {
 
   async unlinkTransaction(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
-      const { linkId } = req.params;
-      const userId = req.user!.id;
-      const deletedLink = await recurringService.unlinkTransaction(
-        linkId,
-        householdId,
-        userId,
-      );
-      await businessAuditService.log({
-        userId,
-        householdId,
-        action: "UNLINK",
-        entityType: "recurring_rule",
-        entityId: deletedLink.recurringTransactionId,
-        details: {
-          transactionId: deletedLink.transactionId,
-          linkId: deletedLink.id,
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
+      const actor = req.householdContext!;
+      const { id, linkId } = req.params;
+      const ids = z.object({ id: z.string().uuid(), linkId: z.string().uuid() }).safeParse({ id, linkId });
+      if (!ids.success) throw new ValidationError("Invalid recurring link ID", ids.error.errors);
+      // The UNLINK audit row is written inside the unlink's transaction (FIN-13).
+      await recurringService.unlinkTransaction(id, linkId, actor, { ipAddress: businessAuditService.getIpAddress(req) });
       logger.request(req, "Unlinked transaction");
       return success(res, { message: "Unlinked successfully" });
     } catch (error) {
@@ -336,35 +278,33 @@ export const recurringController = {
       }
 
       const { dryRun, asOfDate } = parseResult.data;
+      const today = new Date().toISOString().slice(0, 10);
+      if (asOfDate !== undefined && asOfDate > today) {
+        throw new ValidationError("Processing date cannot be in the future", [
+          { field: "asOfDate", message: "Choose today or an earlier date." },
+        ]);
+      }
+      const cutoff = asOfDate ?? today;
       const result = await recurringService.processRecurring(
         householdId,
-        asOfDate,
+        cutoff,
         dryRun,
+        req.householdContext!,
       );
 
-      if (!dryRun) {
-        await businessAuditService.log({
-          userId,
-          householdId,
-          action: "PROCESS",
-          entityType: "recurring_batch",
-          entityId: randomUUID(),
-          details: {
-            processed: result.processed,
-            created: result.created,
-            errors: result.errors.length,
-            asOfDate: asOfDate || new Date().toISOString().split("T")[0],
-          },
-          ipAddress: businessAuditService.getIpAddress(req),
-        });
-      }
+      // A run that processed something reports whether its summary row was written (FIN-13).
+      const auditRecorded = !dryRun && result.processed > 0
+        ? await recordRecurringBatchSummary({ householdId, userId }, {
+          processed: result.processed, created: result.created, errors: result.errors.length, asOfDate: cutoff,
+        }, businessAuditService.getIpAddress(req))
+        : undefined;
 
       logger.request(req, "Processed recurring transactions", {
         processed: result.processed,
         created: result.created,
         dryRun,
       });
-      return success(res, { ...result, dryRun });
+      return success(res, { ...result, dryRun, ...(auditRecorded === undefined ? {} : { auditRecorded }) });
     } catch (error) {
       next(error);
     }
@@ -389,29 +329,14 @@ export const recurringController = {
       }
 
       const { recurring, ...transactionData } = parseResult.data;
+      const requestIp = req.ip?.split("%")[0];
       const result = await recurringService.createRecurringFromTransaction(
         transactionData,
         recurring,
         householdId,
         userId,
+        requestIp && isIP(requestIp) ? requestIp : undefined,
       );
-
-      if (!result.isDuplicate) {
-        await businessAuditService.logCreate({
-          userId,
-          householdId,
-          entityId: result.recurringRule.id,
-          entityType: "recurring_rule",
-          newValue: {
-            name: result.recurringRule.name,
-            amount: result.recurringRule.amount,
-            source: "transaction",
-            transactionId: result.transaction.id,
-          },
-          ipAddress: businessAuditService.getIpAddress(req),
-          metadata: { operation: "createFromTransaction" },
-        });
-      }
 
       logger.request(req, "Created recurring from transaction");
       return success(
@@ -446,23 +371,10 @@ export const recurringController = {
           parseResult.data,
           householdId,
           userId,
+          // A new rule's CREATE audit row is written inside its transaction
+          // (FIN-13); a duplicate writes nothing and so is not audited.
+          { ipAddress: businessAuditService.getIpAddress(req) },
         );
-      if (!result.isDuplicate) {
-        await businessAuditService.logCreate({
-          userId,
-          householdId,
-          entityId: result.recurringRule.id,
-          entityType: "recurring_rule",
-          newValue: {
-            name: result.recurringRule.name,
-            amount: result.recurringRule.amount,
-            source: "transaction",
-            transactionId,
-          },
-          ipAddress: businessAuditService.getIpAddress(req),
-          metadata: { operation: "createFromTransaction" },
-        });
-      }
       logger.request(req, "Created recurring from transaction");
       return success(res, {
         transaction: mapTransactionMoney(result.transaction),

@@ -6,7 +6,7 @@
 
 import { Card } from "@/components/ui/card";
 import { formatCurrency, formatPercentage } from "../utils/reportFormatters";
-import type { MoneyValue } from "@shared/money";
+import type { MoneyDto } from "@shared/money";
 import {
   Tooltip,
   TooltipContent,
@@ -20,30 +20,31 @@ import {
   NET_WORTH_COLOR,
 } from "../utils/chartTheme";
 
-interface SummaryCardsProps {
-  income: MoneyValue;
-  expenses: MoneyValue;
-  savings: MoneyValue;
+export interface SummaryTotals {
+  income: MoneyDto;
+  expenses: MoneyDto;
+  savings: MoneyDto;
   savingsRate: number;
-  currency?: string;
 }
 
-export function SummaryCards({
-  income,
-  expenses,
-  savings,
-  savingsRate,
-  currency = "USD",
-}: SummaryCardsProps) {
+interface SummaryCardsProps {
+  /** Null until the report arrives: the cards show "—", never a guessed currency. */
+  totals: SummaryTotals | null;
+}
+
+const UNKNOWN = "—";
+const amountOf = (value: MoneyDto | undefined) => (value ? formatCurrency(value, value.currency) : UNKNOWN);
+
+export function SummaryCards({ totals }: SummaryCardsProps) {
   return (
     <TooltipProvider>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4" aria-busy={totals === null}>
         <Card className="p-6 flex flex-col items-center justify-center shadow-sm text-center">
           <div
             className="font-bold text-xl mb-1"
             style={{ color: INCOME_COLOR }}
           >
-            {formatCurrency(income, currency)}
+            {amountOf(totals?.income)}
           </div>
           <div className="text-xs text-muted-foreground uppercase tracking-wider font-semibold flex items-center gap-1">
             Total Income
@@ -54,7 +55,7 @@ export function SummaryCards({
             className="font-bold text-xl mb-1"
             style={{ color: EXPENSE_COLOR }}
           >
-            {formatCurrency(expenses, currency)}
+            {amountOf(totals?.expenses)}
           </div>
           <div className="text-xs text-muted-foreground uppercase tracking-wider font-semibold flex items-center gap-1">
             Total Expenses
@@ -62,13 +63,13 @@ export function SummaryCards({
         </Card>
         <Card className="p-6 flex flex-col items-center justify-center shadow-sm text-center">
           <div className="text-foreground font-bold text-xl mb-1">
-            {formatCurrency(savings, currency)}
+            {amountOf(totals?.savings)}
           </div>
           <div className="text-xs text-muted-foreground uppercase tracking-wider font-semibold flex items-center gap-1">
             Total Net Income
             <Tooltip>
-              <TooltipTrigger>
-                <Info className="w-3 h-3 cursor-help" />
+              <TooltipTrigger type="button" aria-label="About Total Net Income" className="max-md:inline-flex max-md:h-11 max-md:w-11 max-md:items-center max-md:justify-center">
+                <Info className="w-3 h-3 cursor-help" aria-hidden="true" />
               </TooltipTrigger>
               <TooltipContent>
                 <p>Income minus Expenses</p>
@@ -78,13 +79,13 @@ export function SummaryCards({
         </Card>
         <Card className="p-6 flex flex-col items-center justify-center shadow-sm text-center">
           <div className="text-foreground font-bold text-xl mb-1">
-            {formatPercentage(savingsRate)}
+            {totals ? formatPercentage(totals.savingsRate) : UNKNOWN}
           </div>
           <div className="text-xs text-muted-foreground uppercase tracking-wider font-semibold flex items-center gap-1">
             Savings Rate
             <Tooltip>
-              <TooltipTrigger>
-                <Info className="w-3 h-3 cursor-help" />
+              <TooltipTrigger type="button" aria-label="About Savings Rate" className="max-md:inline-flex max-md:h-11 max-md:w-11 max-md:items-center max-md:justify-center">
+                <Info className="w-3 h-3 cursor-help" aria-hidden="true" />
               </TooltipTrigger>
               <TooltipContent>
                 <p>Percentage of income saved</p>

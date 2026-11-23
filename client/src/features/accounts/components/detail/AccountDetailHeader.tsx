@@ -16,7 +16,7 @@ import {
 import { getCurrencySymbol } from "@/lib/format";
 import { getAccountDisplayNumber } from "../../utils/accountValue";
 import { TimeRangeSelector, type DateRange } from "@/components/accounts";
-import { useToast } from "@/hooks/use-toast";
+import { useCopyBalanceHistory } from "./useCopyBalanceHistory";
 import { useExportTransactions, useExportBalanceHistory } from "@/hooks";
 import { type Account } from "@/lib/api";
 import { ReactNode } from "react";
@@ -26,6 +26,7 @@ interface AccountDetailHeaderProps {
   dateRange: DateRange;
   setDateRange: (range: DateRange) => void;
   onEdit: () => void;
+  onReconcile?: () => void;
   onImportTransactions: () => void;
   onImportBalanceHistory: () => void;
   hasHistory: boolean;
@@ -37,12 +38,13 @@ export function AccountDetailHeader({
   dateRange,
   setDateRange,
   onEdit,
+  onReconcile,
   onImportTransactions,
   onImportBalanceHistory,
   hasHistory,
   children,
 }: AccountDetailHeaderProps) {
-  const { toast } = useToast();
+  const balanceCopy = useCopyBalanceHistory(account.id);
   const exportTransactions = useExportTransactions();
   const exportBalanceHistory = useExportBalanceHistory();
 
@@ -95,6 +97,7 @@ export function AccountDetailHeader({
                 <Edit3 className="mr-2 h-4 w-4" />
                 Edit account
               </DropdownMenuItem>
+              {onReconcile && <DropdownMenuItem onClick={onReconcile}>Reconcile balance</DropdownMenuItem>}
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={() => exportTransactions.mutate({ id: account.id })}
@@ -110,13 +113,8 @@ export function AccountDetailHeader({
               {/* TODO-042: "Transfer data" removed - implement when transfer flow is designed */}
               <DropdownMenuSeparator />
               <DropdownMenuItem
-                onClick={() => {
-                  toast({
-                    title: "Feature moved",
-                    description:
-                      "Please export balance history using the option below.",
-                  });
-                }}
+                onClick={() => void balanceCopy.copy()}
+                disabled={balanceCopy.isPending}
               >
                 <Copy className="mr-2 h-4 w-4" />
                 Copy balance history

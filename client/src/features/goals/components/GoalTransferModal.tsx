@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { userErrorMessage } from "@/lib/errorCopy";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -9,16 +10,18 @@ import {
 import { Button } from "@/components/ui/button";
 import {
   useGoals,
-  useLinkTransaction,
   useTransferBetweenGoals,
   type Goal,
 } from "@/hooks/useGoals";
 import { useAccounts } from "@/hooks/useAccounts";
-import { useCreateTransaction } from "@/hooks/useTransactions";
 import { useCategories } from "@/hooks/useCategories";
 import { useToast } from "@/hooks/use-toast";
 import { GoalTransferForm } from "./GoalTransferForm";
-import { parseMoney } from "@/lib/utils";
+import { OverfundConfirm, needsOverfundConfirm } from "./OverfundConfirm";
+import { isOverfundRefusal, useContributeFromAccount } from "../hooks/useContributeFromAccount";
+import { generateIdempotencyKey } from "@/lib/api";
+import { checkTransferAmount } from "./transferAmount";
+import { afterContributionFailure, contributionRequestFor, type SentContribution } from "./contributionRequest";
 
 export function GoalTransferModal({
   open,
@@ -33,7 +36,6 @@ export function GoalTransferModal({
   const { data: accounts = [] } = useAccounts();
   const { data: categoriesData } = useCategories({ includeArchived: false });
   const transferMutation = useTransferBetweenGoals();
-  const createTransaction = useCreateTransaction();
   const { toast } = useToast();
 
   const [mode, setMode] = useState<"goal-to-goal" | "account-to-goal">(
@@ -47,7 +49,19 @@ export function GoalTransferModal({
   const [date, setDate] = useState<Date>(new Date());
   const [isBudget, setIsBudget] = useState(false);
   const [reason, setReason] = useState("");
-  const linkTransaction = useLinkTransaction(toGoalId);
+  const [confirmOverfund, setConfirmOverfund] = useState(false);
+  // The server refused with its over-fund 409: nothing was written, and a
+  // confirmation lets the same request go through (#245, Astra round 2).
+  const [serverAskedOverfund, setServerAskedOverfund] = useState(false);
+  const contributeFromAccount = useContributeFromAccount(toGoalId);
+  // One key per contribution as entered: resending it unchanged replays, so a
+  // double submit records one expense; any edit makes it a new contribution.
+  const contributionKey = useMemo(
+    () => generateIdempotencyKey(),
+    [open, mode, fromId, toGoalId, amount, date, reason, isBudget]
+  );
+  useEffect(() => setServerAskedOverfund(false), [contributionKey]);
+  const sentContribution = useRef<SentContribution | null>(null);
   const fromAccount = useMemo(
     () => accounts.find((account) => account.id === fromId),
     [accounts, fromId]
@@ -61,6 +75,7 @@ export function GoalTransferModal({
       setReason("");
       setDate(new Date());
       setIsBudget(false);
+      setConfirmOverfund(false);
       setMode("goal-to-goal");
       return;
     }
@@ -111,66 +126,85 @@ export function GoalTransferModal({
     );
   }, [categoriesData]);
 
-  const amountValue = parseMoney(amount);
+  const targetGoal = useMemo(
+    () => goals.find((goal) => goal.id === toGoalId),
+    [goals, toGoalId]
+  );
+  // A confirmation given for one goal never carries over to another.
+  useEffect(() => setConfirmOverfund(false), [toGoalId]);
+  // Both modes move money into the target, so both follow the over-fund rule (goals QA F5).
+  // The amount is only comparable with the goal's balance in the goal's own currency;
+  // across currencies the server's 409 is what asks.
+  const comparable = mode === "goal-to-goal" || fromAccount?.currency === targetGoal?.currency;
+  const hintsOverfund = targetGoal?.progressAvailability === "unavailable" || comparable
+    ? needsOverfundConfirm(targetGoal, amount)
+    : false;
+  const asksOverfund = serverAskedOverfund || hintsOverfund;
+  const overfundConfirmed = asksOverfund && confirmOverfund ? true : undefined;
+
+  // Sent exactly as typed: a JS number would round 2.675 to 2.67 (#245, Astra round 3).
+  const amountCheck = checkTransferAmount(amount);
+  const exactAmount = amountCheck.amount;
   const canSubmit =
     fromId &&
     toGoalId &&
-    amount &&
-    amountValue > 0 &&
+    exactAmount &&
     fromId !== toGoalId &&
+    (!asksOverfund || confirmOverfund) &&
     (!isBudget || !!budgetCategory);
 
   const handleSubmit = async () => {
-    if (!canSubmit) return;
+    if (!canSubmit || !exactAmount) return;
 
     try {
       if (mode === "goal-to-goal") {
-        // Format amount as decimal string (e.g., "100.00") for API
-        const formattedAmount = amountValue.toFixed(2);
         await transferMutation.mutateAsync({
           fromGoalId: fromId,
           toGoalId,
           amount: {
-            amount: formattedAmount,
+            amount: exactAmount,
             currency: fromGoal?.currency || "ZMW",
           },
           reason: reason || undefined,
+          confirmOverfund: overfundConfirmed,
         });
       } else {
-        const targetGoal = goals.find((goal) => goal.id === toGoalId);
-        const formattedAmount = amountValue.toFixed(2);
-        const formattedDate = date.toISOString().split("T")[0];
-        const marker = `Goal contribution: ${targetGoal?.name ?? "Goal"} [goal:${toGoalId}]`;
-        const notes = reason ? `${reason} | ${marker}` : marker;
-        const currency = fromAccount?.currency || "ZMW";
-
-        const transaction = await createTransaction.mutateAsync({
+        // The expense and its link are one server write (#245, Astra round 2). A retry
+        // under the same key resends the first request; only the confirmation is fresh.
+        const sent = contributionRequestFor(sentContribution.current, contributionKey, () => ({
           accountId: fromId,
-          date: formattedDate,
-          name: marker,
-          amount: { amount: formattedAmount, currency },
-          type: "expense",
+          amount: { amount: exactAmount, currency: fromAccount?.currency || "ZMW" },
+          date: date.toISOString().split("T")[0],
+          reason: reason || undefined,
           categoryId: isBudget ? budgetCategory?.id : undefined,
-          isExcludedFromBudget: !isBudget,
-          notes,
-        });
-
-        await linkTransaction.mutateAsync({
-          transactionId: transaction.transaction.id,
-          linkType: "contribution",
-          amount: { amount: formattedAmount, currency },
-        });
+          idempotencyKey: contributionKey,
+        }));
+        sentContribution.current = sent;
+        await contributeFromAccount.mutateAsync({ ...sent.request, confirmOverfund: overfundConfirmed });
 
         toast({
           title: "Contribution added",
-          description: `Added ${formattedAmount} to ${
+          description: `Added ${exactAmount} to ${
             targetGoal?.name ?? "goal"
           }.`,
         });
       }
       onClose();
-    } catch {
-      // Error handled by mutation usually, or toast here
+    } catch (error) {
+      sentContribution.current = afterContributionFailure(sentContribution.current, error);
+      // Nothing was written; the server asks for a confirmation the member can give.
+      if (isOverfundRefusal(error)) {
+        setServerAskedOverfund(true);
+        setConfirmOverfund(false);
+      }
+      // A transfer's hook shows its own error; the contribution's is shown here.
+      if (mode === "account-to-goal") {
+        toast({
+          title: "Contribution not recorded",
+          description: userErrorMessage(error, "Please try again."),
+          variant: "destructive",
+        });
+      }
     }
   };
 
@@ -192,6 +226,7 @@ export function GoalTransferModal({
           toGoalId={toGoalId}
           onToGoalChange={setToGoalId}
           amount={amount}
+          amountError={amountCheck.error}
           onAmountChange={setAmount}
           date={date}
           onDateChange={setDate}
@@ -202,6 +237,10 @@ export function GoalTransferModal({
           budgetCategory={budgetCategory}
         />
 
+        {asksOverfund && targetGoal ? (
+          <OverfundConfirm goal={targetGoal} checked={confirmOverfund} onCheckedChange={setConfirmOverfund} />
+        ) : null}
+
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
             Cancel
@@ -211,13 +250,10 @@ export function GoalTransferModal({
             disabled={
               !canSubmit ||
               transferMutation.isPending ||
-              createTransaction.isPending ||
-              linkTransaction.isPending
+              contributeFromAccount.isPending
             }
           >
-            {transferMutation.isPending ||
-            createTransaction.isPending ||
-            linkTransaction.isPending
+            {transferMutation.isPending || contributeFromAccount.isPending
               ? "Transferring..."
               : "Transfer"}
           </Button>

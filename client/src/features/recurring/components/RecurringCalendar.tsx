@@ -27,6 +27,24 @@ interface RecurringCalendarProps {
 }
 
 const DAYS_IN_WEEK = 7;
+const statusLabels: Record<CalendarItem["status"], string> = {
+  upcoming: "Upcoming",
+  due: "Due today",
+  overdue: "Overdue",
+  pending: "Pending",
+  paid: "Paid",
+  received: "Received",
+  skipped: "Skipped",
+};
+const statusColors: Record<CalendarItem["status"], string> = {
+  upcoming: "bg-chart-1",
+  due: "bg-chart-1",
+  overdue: "bg-destructive",
+  pending: "bg-chart-1",
+  paid: "bg-chart-income",
+  received: "bg-chart-income",
+  skipped: "bg-muted-foreground",
+};
 
 export function RecurringCalendar({
   calendarItems,
@@ -142,49 +160,38 @@ export function RecurringCalendar({
                     {day}
                   </span>
 
-                  {items.map((item) => (
-                    <Tooltip key={item.id}>
-                      <TooltipTrigger asChild>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onItemClick(item.raw);
-                          }}
-                          type="button"
-                          aria-label={`${item.name} - ${formatCurrency(
-                            item.amount,
-                          )} due`}
-                          className={cn(
-                            "w-full text-left flex items-center gap-2 bg-card dark:bg-slate-800 border border-border/50 rounded-lg px-2 py-1.5 shadow-sm text-[11px] truncate cursor-pointer transition-all hover:border-primary/30 hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-primary/50",
-                            item.isPaused && "opacity-60 grayscale",
-                          )}
-                        >
-                          <div
+                  {items.map((item) => {
+                    const status = statusLabels[item.status];
+                    const amount = item.amount ? formatCurrency(item.amount) : null;
+                    return (
+                      <Tooltip key={item.id}>
+                        <TooltipTrigger asChild>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onItemClick(item.raw);
+                            }}
+                            type="button"
+                            aria-label={[item.name, amount, status].filter(Boolean).join(", ")}
                             className={cn(
-                              "w-1.5 h-1.5 rounded-full shrink-0",
-                              item.isPaused
-                                ? "bg-muted-foreground"
-                                : item.status === "paid"
-                                  ? "bg-chart-income"
-                                  : "bg-chart-1",
+                              "w-full text-left flex items-center gap-2 bg-card dark:bg-slate-800 border border-border/50 rounded-lg px-2 py-1.5 shadow-sm text-[11px] truncate cursor-pointer transition-all hover:border-primary/30 hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-primary/50",
+                              item.isPaused && "opacity-60 grayscale",
                             )}
-                          />
-                          <span className="truncate font-medium text-foreground">
-                            {item.name}
-                          </span>
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent side="right" className="text-xs">
-                        <div className="font-bold">{item.name}</div>
-                        <div className="text-muted-foreground">
-                          {formatCurrency(item.amount)}
-                        </div>
-                        <div className="text-[10px] uppercase tracking-wider mt-1 text-muted-foreground/80">
-                          {item.isPaused ? "Paused" : item.status}
-                        </div>
-                      </TooltipContent>
-                    </Tooltip>
-                  ))}
+                          >
+                            <div className={cn("w-1.5 h-1.5 rounded-full shrink-0", statusColors[item.status])} />
+                            <span className="truncate font-medium text-foreground">{item.name}</span>
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="right" className="text-xs">
+                          <div className="font-bold">{item.name}</div>
+                          {amount && <div className="text-muted-foreground">{amount}</div>}
+                          <div className="text-[10px] uppercase tracking-wider mt-1 text-muted-foreground/80">
+                            {status}
+                          </div>
+                        </TooltipContent>
+                      </Tooltip>
+                    );
+                  })}
                 </div>
               );
             })}

@@ -88,6 +88,23 @@ describe("Receipt Parser", () => {
       const score = calculateConfidence({});
       expect(score).toBe(0);
     });
+
+    it("gives a zero amount no amount points (NEW-23)", () => {
+      expect(calculateConfidence({ amount: "0.00" })).toBe(0);
+      expect(calculateConfidence({ amount: "0.01" })).toBeGreaterThan(0);
+    });
+  });
+
+  describe("zero amounts are not amounts (NEW-23)", () => {
+    it("finds no total when the only amount on the receipt is zero", () => {
+      expect(parseReceiptText("ACME STORE\nCHANGE 0.00").amount).toBeUndefined();
+      expect(parseReceiptText("ACME STORE\nCHANGE 0.00\nCASH 12.50").amount).toBe("12.50");
+    });
+
+    it("reads a zero tip as no tip", () => {
+      expect(parseReceiptText("ACME STORE\nTip: 0.00").tip).toBeUndefined();
+      expect(parseReceiptText("ACME STORE\nTip: 2.00").tip).toBe("2.00");
+    });
   });
 
   describe("currency detection", () => {

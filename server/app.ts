@@ -7,21 +7,28 @@ import express, {
   NextFunction,
 } from "express";
 import session from "express-session";
-import connectPgSimple from "connect-pg-simple";
+import { sessionStore } from "./config/session-store";
 import helmet from "helmet";
+import { buildCspDirectives } from "./core/contentSecurityPolicy";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import { doubleCsrf } from "csrf-csrf";
 import { sessionSanity } from "./middleware/sessionSanity";
+import { createCsrfPolicyMiddleware } from "./middleware/csrf-policy";
 import { pool } from "./db";
 import { registerRoutes } from "./routes";
 import { attachUser, requireAuth } from "./auth";
 import { householdGuard } from "./middleware/householdGuard";
 import { serveUpload } from "./middleware/uploadsAuth";
-import { requestIdMiddleware, logger } from "./utils/logger";
+import { requestIdMiddleware, logger, safeRouteTemplate } from "./utils/logger";
 import { apiErrorMiddleware } from "./utils/errorHandler";
+import { apiNotFound } from "./middleware/apiNotFound";
 import { initializeServices } from "./startup";
+import { stopScheduler } from "./scheduler";
 import { validateEnvOrThrow } from "./utils/validateEnv";
+import healthRoutes, { healthLimiter } from "./modules/health/health.routes";
+import authEmailLinkRoutes from "./routes/auth-email-link";
+import { parsesOwnJsonBody } from "./middleware/importBody";
 
 // SEC-STARTUP-001: Validate environment variables before app initialization
 // This prevents the app from starting with missing/invalid configuration
@@ -58,30 +65,7 @@ app.use(
     // Content Security Policy - restrict resource loading
     contentSecurityPolicy: isDevelopment
       ? false
-      : {
-          directives: {
-            defaultSrc: ["'self'"],
-            styleSrc: [
-              "'self'",
-              "'unsafe-inline'",
-              "https://fonts.googleapis.com",
-            ],
-            scriptSrc: ["'self'"],
-            imgSrc: ["'self'", "data:", "https:"],
-            fontSrc: ["'self'", "https://fonts.gstatic.com"],
-            connectSrc: ["'self'"],
-            frameSrc: ["'none'"],
-            objectSrc: ["'none'"],
-            baseUri: ["'self'"],
-            formAction: ["'self'"],
-            upgradeInsecureRequests: [],
-            // CSP violation reporting - set CSP_REPORT_URI to receive reports
-            // Example: https://your-csp-reporting-service.com/report
-            ...(process.env.CSP_REPORT_URI && {
-              reportUri: [process.env.CSP_REPORT_URI],
-            }),
-          },
-        },
+      : { directives: buildCspDirectives(process.env.CSP_REPORT_URI) },
     // HTTP Strict Transport Security - force HTTPS
     hsts: isDevelopment
       ? false
@@ -123,19 +107,29 @@ app.use(
   }),
 );
 
+// Reserved public probes must finish before session get/touch, user attachment,
+// body parsing or any other stateful middleware, even with a signed cookie.
+app.use("/health", healthRoutes);
+app.get("/healthz", healthLimiter, (_req: Request, res: Response) => {
+  res.status(app.locals.isShuttingDown ? 503 : 200).json({
+    status: app.locals.isShuttingDown ? "shutting_down" : "ok",
+  });
+});
+app.use(authEmailLinkRoutes);
+
 declare module "http" {
   interface IncomingMessage {
     rawBody: unknown;
   }
 }
 
-app.use(
-  express.json({
-    verify: (req, _res, buf) => {
-      req.rawBody = buf;
-    },
-  }),
-);
+const globalJson = express.json({
+  verify: (req, _res, buf) => {
+    req.rawBody = buf;
+  },
+});
+// The import preview and execute routes parse their own, larger body after auth (middleware/importBody.ts).
+app.use((req, res, next) => (parsesOwnJsonBody(req) ? next() : globalJson(req, res, next)));
 app.use(express.urlencoded({ extended: false }));
 
 // Session configuration
@@ -143,14 +137,9 @@ if (!process.env.SESSION_SECRET) {
   throw new Error("SESSION_SECRET environment variable is required");
 }
 
-const PgSession = connectPgSimple(session);
 app.use(
   session({
-    store: new PgSession({
-      pool,
-      tableName: "session",
-      createTableIfMissing: true,
-    }),
+    store: sessionStore,
     secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
@@ -192,28 +181,7 @@ const { generateCsrfToken, doubleCsrfProtection } = doubleCsrf({
 export { generateCsrfToken };
 
 // Apply CSRF protection to all routes except safe methods
-app.use((req, res, next) => {
-  // Skip CSRF for safe methods and specific paths
-  if (
-    process.env.NODE_ENV === "test" || // Skip CSRF in test environment
-    ["GET", "HEAD", "OPTIONS"].includes(req.method) ||
-    req.path === "/api/csrf-token" ||
-    req.path.startsWith("/healthz") ||
-    req.path.startsWith("/api/cron") || // Cron uses secret header auth
-    req.path === "/api/auth/login" || // Pre-auth routes don't need CSRF
-    req.path === "/api/auth/verify-mfa" || // Pre-auth MFA verification
-    req.path === "/api/auth/mfa/verify" || // Pre-auth MFA verification
-    req.path === "/api/auth/mfa/resend" || // Pre-auth MFA code resend (rate-limited)
-    req.path === "/api/auth/resend-verification" || // Pre-auth email resend (rate-limited)
-    req.path === "/api/auth/forgot-password" || // Pre-auth reset request (strict rate limit)
-    req.path === "/api/auth/reset-password" || // Pre-auth reset completion (strict rate limit)
-    req.path === "/api/auth/register" ||
-    req.path === "/api/auth/logout" // Logout is safe to exempt - only destroys current session
-  ) {
-    return next();
-  }
-  doubleCsrfProtection(req, res, next);
-});
+app.use(createCsrfPolicyMiddleware(doubleCsrfProtection));
 
 // Attach user to request if authenticated
 app.use(attachUser);
@@ -236,8 +204,8 @@ app.use((req, res, next) => {
     const duration = Date.now() - start;
     if (path.startsWith("/api")) {
       // Only log request metadata, NOT response bodies (PII risk)
-      const logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      logger.info(logLine, { requestId: req.requestId });
+      logger.info("HTTP request completed", { requestId: req.requestId, method: req.method,
+        route: safeRouteTemplate(req), statusCode: res.statusCode, durationMs: duration });
     }
   });
 
@@ -252,14 +220,9 @@ export default async function runApp(
 
   const server = await registerRoutes(app);
 
-  // Health check endpoint (Kubernetes-style)
-  app.get("/healthz", (_req: Request, res: Response) => {
-    if (app.locals.isShuttingDown) {
-      res.status(503).json({ status: "shutting_down" });
-      return;
-    }
-    res.json({ status: "ok", timestamp: new Date().toISOString() });
-  });
+  // Unknown /api paths answer a JSON 404. This must stay before `setup` (the SPA/static
+  // fallback) and before the error middleware that renders the 404.
+  app.use("/api", apiNotFound);
 
   // Use structured error middleware
   app.use(apiErrorMiddleware);
@@ -343,6 +306,9 @@ export default async function runApp(
     app.locals.isShuttingDown = true;
 
     logger.info("Graceful shutdown initiated", { signal });
+
+    // Start no new scheduled job or outbox batch; a running job keeps its lock until done.
+    await stopScheduler().catch((err) => logger.error("Error stopping scheduler", { err }));
 
     // Stop accepting new connections
     server.close(() => {

@@ -12,8 +12,8 @@
 import request from "supertest";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import type { Express } from "express";
-import { db } from "../../../db";
-import { eq } from "drizzle-orm";
+import { db, pool } from "../../../db";
+import { eq, inArray } from "drizzle-orm";
 import {
   users,
   households,
@@ -21,6 +21,8 @@ import {
   accounts,
   securities,
   holdings,
+  auditLogs,
+  householdFxRateOverrides,
 } from "@shared/schema";
 import {
   getTestApp,
@@ -29,6 +31,7 @@ import {
 } from "../../../__tests__/fixtures";
 import { hashPassword } from "../../../auth";
 import { randomUUID } from "crypto";
+import { seedDatedFxRate } from "../../../testing/fixtures/dated-fx-rate";
 import type { FieldError } from "../../../core/errors/ValidationError";
 
 describe("Investments Module - Database Integration Tests", () => {
@@ -136,6 +139,9 @@ describe("Investments Module - Database Integration Tests", () => {
       currentPrice: "300.00",
     });
 
+    // NEW-21: foreign trades need a dated rate; this suite claims none, so a synthetic 20.
+    await seedDatedFxRate(householdId, testUser.id, "20");
+
     // Authenticate primary user
     const loginRes = await request(app).post("/api/auth/login").send({
       email: testUser.email,
@@ -204,7 +210,13 @@ describe("Investments Module - Database Integration Tests", () => {
   });
 
   afterAll(async () => {
+    // Actor-only audits and Express session payloads have no household cascade.
+    // Remove only this fixture's records before deleting their actor rows.
+    const actorIds = [userId, otherUserId];
+    await pool.query('delete from "session" where sess->>\'userId\'=ANY($1::text[]) or sess->>\'mfaPendingUserId\'=ANY($1::text[])', [actorIds]);
+    await db.delete(auditLogs).where(inArray(auditLogs.userId, actorIds));
     // Cleanup in reverse dependency order
+    await db.delete(householdFxRateOverrides).where(eq(householdFxRateOverrides.householdId, householdId));
     await db.delete(holdings).where(eq(holdings.householdId, householdId));
     await db.delete(holdings).where(eq(holdings.householdId, otherHouseholdId));
     await db.delete(accounts).where(eq(accounts.householdId, householdId));
@@ -233,6 +245,7 @@ describe("Investments Module - Database Integration Tests", () => {
         .post("/api/investments/holdings")
         .set("Cookie", authCookie)
         .send({
+          operationId: randomUUID(), expectedCurrency: "USD",
           accountId: otherAccountId, // Other household's account
           securityId,
           quantity: "100",
@@ -257,6 +270,7 @@ describe("Investments Module - Database Integration Tests", () => {
         .post("/api/investments/holdings")
         .set("Cookie", authCookie)
         .send({
+          operationId: randomUUID(), expectedCurrency: "USD",
           accountId, // Own household's account
           securityId,
           quantity: "50",
@@ -307,6 +321,7 @@ describe("Investments Module - Database Integration Tests", () => {
         .post("/api/investments/holdings")
         .set("Cookie", otherAuthCookie)
         .send({
+          operationId: randomUUID(), expectedCurrency: "USD",
           accountId: otherAccountId,
           securityId,
           quantity: "25",

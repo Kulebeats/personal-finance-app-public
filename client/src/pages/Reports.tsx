@@ -1,13 +1,7 @@
-/**
- * Reports Page
- *
- * Main reports dashboard with multiple tabs and visualizations.
- * Uses extracted feature module hooks and components.
- *
- * LOC target: <300
- */
-
+import { downloadProtectedResource } from "@/lib/protected-media";
+import { captureOperationLifetime } from "@/lib/operation-lifetime";
 import { useState, useMemo, useEffect, Suspense, lazy } from "react";
+import { useCalendarYearMonth } from "@/lib/calendarZone";
 import { useLocation } from "wouter";
 import { Card } from "@/components/ui/card";
 import { Loader2 } from "lucide-react";
@@ -26,6 +20,7 @@ import {
   useCurrentYearRange,
 } from "@/hooks/use-reports";
 import { toast } from "@/hooks/use-toast";
+import { Button } from "@/components/ui/button";
 
 // Feature module imports
 import {
@@ -74,16 +69,20 @@ export default function Reports() {
     hasCompletedSetup,
     completeOnboarding,
     isLoading: onboardingLoading,
+    error: onboardingError,
+    refetch: refetchOnboarding,
   } = useWidgetOnboarding();
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   // Date range
   const { from, to, year } = useCurrentYearRange();
   const dateRange = useMemo(() => ({ from, to }), [from, to]);
-  const availableYears = useMemo(() => {
-    const currentYear = new Date().getFullYear();
-    return Array.from({ length: 5 }, (_, i) => currentYear - 3 + i);
-  }, []);
+  // Years around the household calendar's year, never the browser's (NEW-15).
+  const { year: calendarYear } = useCalendarYearMonth();
+  const availableYears = useMemo(
+    () => Array.from({ length: 5 }, (_, i) => calendarYear - 3 + i),
+    [calendarYear],
+  );
 
   // Data hooks
   const reportsData = useReportsData({
@@ -100,9 +99,9 @@ export default function Reports() {
 
   // Effects
   useEffect(() => {
-    if (!onboardingLoading && !hasCompletedSetup) setShowOnboarding(true);
-    else if (hasCompletedSetup) setShowOnboarding(false);
-  }, [hasCompletedSetup, onboardingLoading]);
+    if (!onboardingLoading && !onboardingError && hasCompletedSetup === false) setShowOnboarding(true);
+    else setShowOnboarding(false);
+  }, [hasCompletedSetup, onboardingLoading, onboardingError]);
 
   // Derive last updated timestamp
   const lastUpdated = useMemo(() => {
@@ -169,6 +168,7 @@ export default function Reports() {
   };
 
   const handleExport = async () => {
+    const operation = captureOperationLifetime();
     let reportType: "spending" | "cashflow" | "networth" | "transactions" =
       "cashflow";
     let payload: Record<string, string> = {};
@@ -210,7 +210,7 @@ export default function Reports() {
         format: "csv",
         ...payload,
       });
-      window.location.href = getReportsExportDownloadUrl(exportId);
+      await downloadProtectedResource(getReportsExportDownloadUrl(exportId), undefined, operation);
     } catch (error) {
       // FIX UX-REPORTS-EXPORT-001: Add toast notification for export failures
       console.error(error);
@@ -230,12 +230,13 @@ export default function Reports() {
       <WidgetOnboardingModal
         open={showOnboarding}
         onOpenChange={setShowOnboarding}
-        onComplete={(prefs) => {
-          completeOnboarding(prefs);
-          setShowOnboarding(false);
-        }}
+        onComplete={completeOnboarding}
       />
       <div className="space-y-6">
+        {(onboardingError || (!onboardingLoading && hasCompletedSetup === undefined)) && <div>
+          <p role="alert">Dashboard preferences could not be loaded. {onboardingError?.message ?? "Setup status is unavailable. Please retry."}</p>
+          <Button variant="outline" onClick={() => { void refetchOnboarding(); }}>Retry Loading Preferences</Button>
+        </div>}
         <ReportHeader
           activeTab={activeTab}
           onTabChange={setActiveTab}
@@ -269,13 +270,7 @@ export default function Reports() {
         )}
 
         {activeTab !== "annual" && activeTab !== "merchants" && (
-          <SummaryCards
-            income={reportsData.totals.income}
-            expenses={reportsData.totals.expenses}
-            savings={reportsData.totals.savings}
-            savingsRate={reportsData.totals.savingsRate}
-            currency={reportsData.currency}
-          />
+          <SummaryCards totals={reportsData.totals} />
         )}
 
         {activeTab === "annual" ? (
@@ -382,6 +377,7 @@ export default function Reports() {
                     <NetWorthSection
                       data={reportsData.netWorthLineData}
                       isLoading={reportsData.isLoading.netWorth}
+                      currency={reportsData.currency}
                     />
                   )}
                   {activeTab === "savings" && (

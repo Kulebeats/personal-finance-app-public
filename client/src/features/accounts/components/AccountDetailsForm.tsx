@@ -353,7 +353,7 @@ export function AccountDetailsForm({
         <Button variant="outline" onClick={onCancel} disabled={isSaving}>
           Cancel
         </Button>
-        <Button onClick={onSave} disabled={isSaving}>
+        <Button onClick={onSave} disabled={isSaving || !currency}>
           {isSaving ? "Saving..." : "Save Account"}
         </Button>
       </div>

@@ -13,7 +13,6 @@
  */
 
 import { randomUUID } from "crypto";
-import * as fs from "fs/promises";
 import * as path from "path";
 import { Request, Response, NextFunction } from "express";
 import multer from "multer";
@@ -21,6 +20,7 @@ import { eq } from "drizzle-orm";
 import { users } from "@shared/schema";
 import { businessAuditService } from "../../services/BusinessAuditService";
 import { withTransaction } from "../../utils/withTransaction";
+import { lockLiveMembership } from "./settings.membership-lock";
 import { ValidationError, NotFoundError } from "../../core/errors";
 import { success } from "../../core/http";
 import {
@@ -28,6 +28,7 @@ import {
   sanitizeUploadExtension,
 } from "../../core/uploads";
 import { logger } from "../../utils/logger";
+import { discardUnlessCommitted, putUploadObject, removeUploadObject } from "../../core/storage/upload-objects";
 
 /** Matches the client-side size check in BannerUpload.tsx. */
 const MAX_BANNER_FILE_SIZE = 5 * 1024 * 1024;
@@ -109,12 +110,11 @@ async function removeBannerFile(
   bannerUrl: string,
   householdId: string,
 ): Promise<void> {
-  const filePath = resolveOwnedBannerPath(bannerUrl, householdId);
-  if (!filePath) {
+  if (!resolveOwnedBannerPath(bannerUrl, householdId)) {
     return;
   }
   try {
-    await fs.unlink(filePath);
+    await removeUploadObject(bannerUrl);
   } catch (error) {
     logger.warn("Failed to remove old banner file", {
       error: (error as Error).message,
@@ -144,21 +144,10 @@ export const settingsBannerController = {
       );
 
       const storedFilename = `${randomUUID()}${ext}`;
-      const directory = path.join(BANNERS_ROOT, householdId);
-      const filePath = path.join(directory, storedFilename);
-
-      // SEC-PATH-002: Verify resolved path is within expected directory.
-      // (There is no user input in the path now, but keep the containment
-      // assertion as defense-in-depth.)
-      if (!path.resolve(filePath).startsWith(BANNERS_ROOT + path.sep)) {
-        throw new ValidationError("Invalid file path");
-      }
-
       const bannerUrl = `/uploads/banners/${householdId}/${storedFilename}`;
 
-      // Write the file first; if the transactional DB update fails we remove it.
-      await fs.mkdir(directory, { recursive: true });
-      await fs.writeFile(filePath, file.buffer);
+      // Store the bytes (OPS-001); if the transactional DB update fails we remove them.
+      await putUploadObject({ stored: bannerUrl, householdId, purpose: "banner", bytes: file.buffer, mediaType: file.mimetype, userId });
 
       // Rule 10: lock the user row FOR UPDATE so concurrent uploads/deletes
       // serialize — otherwise both read the same oldBannerUrl and the loser's
@@ -168,6 +157,10 @@ export const settingsBannerController = {
       let oldBannerUrl: string | null;
       try {
         oldBannerUrl = await withTransaction(async (tx) => {
+          // Live membership, under the lock erasure takes first (members, then the user
+          // row): an erasure that removed this member commits before the URL is published,
+          // and this upload then rolls back, so it never names bytes erasure deleted.
+          await lockLiveMembership(tx, householdId, userId);
           const [locked] = await tx
             .select({ bannerUrl: users.bannerUrl })
             .from(users)
@@ -202,8 +195,8 @@ export const settingsBannerController = {
           return locked.bannerUrl ?? null;
         });
       } catch (error) {
-        // DB update rolled back after the file write; don't leave the orphan.
-        await removeBannerFile(bannerUrl, householdId);
+        // The new file goes only if the update certainly rolled back.
+        await discardUnlessCommitted(bannerUrl, "banner", error);
         throw error;
       }
 

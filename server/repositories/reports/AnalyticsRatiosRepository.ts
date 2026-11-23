@@ -1,9 +1,8 @@
 import { db } from "../../db";
-import { sql, and, eq, isNull, desc, inArray } from "drizzle-orm";
+import { sql, and, eq, isNull, inArray, or } from "drizzle-orm";
 import { accounts, goals } from "@shared/schema";
-import type { MoneyDto } from "@shared/money";
 import { Money } from "../../core/money";
-import Decimal from "decimal.js";
+import { CalculationError } from "../../core/calculations/errors";
 import {
   moneyFromDto,
   moneyFromValue,
@@ -11,13 +10,88 @@ import {
   ratioOf,
   toMoneyDtoSafe,
 } from "./moneyUtils";
-import { LIABILITY_ACCOUNT_TYPES } from "./constants";
+import { LIABILITY_ACCOUNT_TYPES, LIQUID_ACCOUNT_TYPES, type AccountType } from "./constants";
+import { owedDebt } from "../../core/money/wealth-totals";
+import { buildFxRateExpr } from "./fxRateExpr";
+import { visibleGoalProgressSources } from "../../core/authz/goal-progress-visibility";
+import { isHouseholdRole } from "../../core/authz/capabilities";
+import { householdRepository } from "../HouseholdRepository";
 import type { CashflowReportRepository } from "./CashflowReportRepository";
 
 export type AnalyticsRatiosContext = {
   getHouseholdCurrency: (householdId: string) => Promise<string>;
   cashflow: CashflowReportRepository;
 };
+
+type BalanceQuery = { scope?: string; userId?: string };
+
+interface BaseBalance {
+  id: string;
+  name: string;
+  type: AccountType;
+  /** The account balance converted to the household base currency. */
+  balance: Money;
+}
+
+/**
+ * NEW-02: the reader's visible accounts of these types, each balance converted
+ * to the household base currency at today's rate (balances are current): the
+ * household's own rate valid today, else the latest shared rate on or before
+ * today. Another member's private account is never read. A visible account
+ * with no rate fails closed with MISSING_FX_RATE - never a rate of 1, never a
+ * silent skip, never a sum of mixed currencies.
+ */
+async function readBaseBalances(
+  householdId: string,
+  baseCurrency: string,
+  types: AccountType[],
+  { scope = "household", userId }: BalanceQuery,
+): Promise<BaseBalance[]> {
+  const asOf = sql`(transaction_timestamp() AT TIME ZONE 'UTC')::date`;
+  const currency = sql<string>`COALESCE(${accounts.currency}, ${baseCurrency}::text)`;
+  const rate = buildFxRateExpr(currency, baseCurrency, asOf, { householdId, nullOnMissing: true });
+  const rows = await db
+    .select({
+      id: accounts.id,
+      name: accounts.name,
+      type: accounts.type,
+      currency,
+      asOf: sql<string>`${asOf}::text`,
+      baseBalance: sql<string | null>`(${accounts.balance}::numeric * ${rate})::text`,
+    })
+    .from(accounts)
+    .where(
+      and(
+        eq(accounts.householdId, householdId),
+        isNull(accounts.deletedAt),
+        inArray(accounts.type, types),
+        scope === "mine" && userId ? eq(accounts.ownerUserId, userId) : sql`1=1`,
+        userId
+          ? or(eq(accounts.isPrivate, false), eq(accounts.ownerUserId, userId))
+          : eq(accounts.isPrivate, false),
+      )
+    );
+
+  return rows.map((row) => {
+    if (row.baseBalance === null) {
+      throw new CalculationError(
+        "MISSING_FX_RATE",
+        { from: row.currency, to: baseCurrency, date: row.asOf },
+        `Exchange rate unavailable for ${row.currency} -> ${baseCurrency} on ${row.asOf}`,
+      );
+    }
+    return {
+      id: row.id,
+      name: row.name,
+      type: row.type,
+      balance: new Money(row.baseBalance, baseCurrency),
+    };
+  });
+}
+
+// NEW-05: debt is what is owed, max(balance, 0); an overpaid card is not debt.
+const sumOwedDebt = (rows: BaseBalance[], currency: string): Money =>
+  rows.reduce((sum, row) => sum.add(owedDebt(row.balance)), Money.zero(currency));
 
 export async function getFinancialRatios(
   ctx: AnalyticsRatiosContext,
@@ -36,50 +110,23 @@ export async function getFinancialRatios(
     userId,
   });
 
-  const monthCount = cashflowData.series.length || 1;
+  // NEW-34: average over the months that have started, adding only their amounts.
+  const monthCount = Math.max(cashflowData.range.elapsedPeriods ?? cashflowData.series.length, 1);
+  const started = cashflowData.elapsedTotals ?? cashflowData.totals;
   const incomeTotal = moneyFromDto(cashflowData.totals.income, currency);
   const expensesTotal = moneyFromDto(cashflowData.totals.expenses, currency);
   const savingsTotal = moneyFromDto(cashflowData.totals.savings, currency);
-  const monthlyIncome = incomeTotal.divide(monthCount);
-  const monthlyExpenses = expensesTotal.divide(monthCount);
+  const monthlyIncome = moneyFromDto(started.income, currency).divide(monthCount);
+  const monthlyExpenses = moneyFromDto(started.expenses, currency).divide(monthCount);
 
-  const liquidAccounts = await db
-    .select({ balance: accounts.balance })
-    .from(accounts)
-    .where(
-      and(
-        eq(accounts.householdId, householdId),
-        isNull(accounts.deletedAt),
-        sql`${accounts.type} IN ('checking', 'savings', 'cash', 'mobile_money')`,
-        scope === "mine" && userId
-          ? eq(accounts.ownerUserId, userId)
-          : sql`1=1`
-      )
-    );
-
+  const liquidAccounts = await readBaseBalances(householdId, currency, LIQUID_ACCOUNT_TYPES, query);
   const liquidAssets = liquidAccounts.reduce(
-    (sum, a) => sum.add(moneyFromValue(a.balance, currency)),
+    (sum, a) => sum.add(a.balance),
     Money.zero(currency)
   );
 
-  const liabilityAccounts = await db
-    .select({ balance: accounts.balance })
-    .from(accounts)
-    .where(
-      and(
-        eq(accounts.householdId, householdId),
-        isNull(accounts.deletedAt),
-        inArray(accounts.type, LIABILITY_ACCOUNT_TYPES),
-        scope === "mine" && userId
-          ? eq(accounts.ownerUserId, userId)
-          : sql`1=1`
-      )
-    );
-
-  const currentLiabilities = liabilityAccounts.reduce(
-    (sum, a) => sum.add(moneyFromValue(a.balance, currency).abs()),
-    Money.zero(currency)
-  );
+  const liabilityAccounts = await readBaseBalances(householdId, currency, LIABILITY_ACCOUNT_TYPES, query);
+  const currentLiabilities = sumOwedDebt(liabilityAccounts, currency);
 
   const monthlyDebt = currentLiabilities.divide(12);
   const dtiValue = percentOf(monthlyDebt, monthlyIncome, 2);
@@ -181,30 +228,13 @@ export async function getDebtAnalysis(
   const currency = await ctx.getHouseholdCurrency(householdId);
   const toMoneyValue = (value: Money) => toMoneyDtoSafe(value, currency);
 
-  const debtAccounts = await db
-    .select({
-      id: accounts.id,
-      name: accounts.name,
-      type: accounts.type,
-      balance: accounts.balance,
-    })
-    .from(accounts)
-    .where(
-      and(
-        eq(accounts.householdId, householdId),
-        isNull(accounts.deletedAt),
-        inArray(accounts.type, LIABILITY_ACCOUNT_TYPES),
-        scope === "mine" && userId
-          ? eq(accounts.ownerUserId, userId)
-          : sql`1=1`
-      )
-    )
-    .orderBy(desc(accounts.balance));
+  // Largest converted debt first; native balances in different currencies don't order.
+  // Only accounts that owe money are debt accounts (NEW-05).
+  const debtAccounts = (await readBaseBalances(householdId, currency, LIABILITY_ACCOUNT_TYPES, query))
+    .filter((account) => account.balance.isPositive())
+    .sort((a, b) => b.balance.amount.comparedTo(a.balance.amount));
 
-  const totalDebt = debtAccounts.reduce(
-    (sum, a) => sum.add(moneyFromValue(a.balance, currency).abs()),
-    Money.zero(currency)
-  );
+  const totalDebt = sumOwedDebt(debtAccounts, currency);
 
   const byType = new Map<string, { balance: Money; accounts: number }>();
   for (const acct of debtAccounts) {
@@ -212,9 +242,7 @@ export async function getDebtAnalysis(
       balance: Money.zero(currency),
       accounts: 0,
     };
-    existing.balance = existing.balance.add(
-      moneyFromValue(acct.balance, currency).abs()
-    );
+    existing.balance = existing.balance.add(acct.balance);
     existing.accounts += 1;
     byType.set(acct.type, existing);
   }
@@ -246,10 +274,29 @@ export async function getDebtAnalysis(
     topDebtAccounts: debtAccounts.slice(0, 5).map((a) => ({
       id: a.id,
       name: a.name,
-      balance: toMoneyValue(moneyFromValue(a.balance, currency).abs()),
+      balance: toMoneyValue(a.balance),
       type: a.type,
     })),
   };
+}
+
+/**
+ * The reader's verdict on each goal's progress, read with the goal itself
+ * (FIN-01). No reader, or one who is no longer a member, sees no progress.
+ */
+async function goalProgressVerdict(householdId: string, userId: string | undefined) {
+  const membership = userId ? await householdRepository.findMember(householdId, userId) : undefined;
+  if (!userId || !membership || !isHouseholdRole(membership.role)) return sql<boolean>`false`;
+  const reader = { householdId, userId, role: membership.role };
+  return sql<boolean>`coalesce((${visibleGoalProgressSources(reader)}), false)`;
+}
+
+function payDownProgress(original: Money, outstanding: Money): number {
+  if (!original.amount.isFinite() || original.isNegativeOrZero() || !outstanding.amount.isFinite() || outstanding.gte(original)) {
+    return 0;
+  }
+  if (outstanding.isNegativeOrZero()) return 100;
+  return percentOf(original.subtract(outstanding), original);
 }
 
 export async function getGoalsProgress(
@@ -259,7 +306,6 @@ export async function getGoalsProgress(
 ) {
   const { scope = "household", userId } = query;
   const currency = await ctx.getHouseholdCurrency(householdId);
-  const toMoneyValue = (value: Money) => toMoneyDtoSafe(value, currency);
 
   const goalsResult = await db
     .select({
@@ -268,8 +314,11 @@ export async function getGoalsProgress(
       type: goals.type,
       targetAmount: goals.targetAmount,
       currentAmount: goals.currentAmount,
+      originalBalance: goals.originalBalance,
+      currency: goals.currency,
       targetDate: goals.targetDate,
       status: goals.status,
+      progressVisible: await goalProgressVerdict(householdId, userId),
     })
     .from(goals)
     .where(
@@ -281,18 +330,26 @@ export async function getGoalsProgress(
     );
 
   const goalsList = goalsResult.map((g) => {
-    const target = moneyFromValue(g.targetAmount, currency);
-    const current = moneyFromValue(g.currentAmount, currency);
-    const progress = target.amount.isZero()
-      ? 0
-      : new Decimal(current.amount)
-          .div(target.amount)
-          .times(100)
-          .toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
-          .toNumber();
+    const type = g.type as "save_up" | "pay_down" | "investment";
+    if (g.progressVisible !== true) {
+      // Nothing derived from hidden progress: no amount, percent, status or
+      // requirement, and no debt target (it is the private debt's balance).
+      return {
+        id: g.id, name: g.name, type,
+        targetAmount: type === "pay_down" ? null : toMoneyDtoSafe(moneyFromValue(g.targetAmount, currency), currency),
+        currentAmount: null, progress: null, projectedCompletion: null, onTrack: null, monthlyRequired: null,
+        progressAvailability: "unavailable" as const,
+      };
+    }
+    const unit = type === "pay_down" ? g.currency : currency;
+    const target = moneyFromValue(g.targetAmount, unit);
+    const current = moneyFromValue(g.currentAmount, unit);
+    const progress = type === "pay_down"
+      ? payDownProgress(moneyFromValue(g.originalBalance ?? g.targetAmount, unit), current)
+      : percentOf(current, target);
 
     let monthlyRequired: Money | null = null;
-    if (g.targetDate && target.gt(current)) {
+    if (type !== "pay_down" && g.targetDate && target.gt(current)) {
       const remaining = target.subtract(current);
       const targetDate = new Date(g.targetDate);
       const now = new Date();
@@ -307,21 +364,24 @@ export async function getGoalsProgress(
     return {
       id: g.id,
       name: g.name,
-      type: g.type as "save_up" | "pay_down" | "investment",
-      targetAmount: toMoneyValue(target),
-      currentAmount: toMoneyValue(current),
+      type,
+      targetAmount: toMoneyDtoSafe(target, unit),
+      currentAmount: toMoneyDtoSafe(current, unit),
       progress,
       projectedCompletion: null as string | null,
       onTrack: g.status === "on_track" || g.status === "completed",
-      monthlyRequired: monthlyRequired ? toMoneyValue(monthlyRequired) : null,
+      ...(type === "pay_down" ? {} : { monthlyRequired: monthlyRequired ? toMoneyDtoSafe(monthlyRequired, unit) : null }),
+      progressAvailability: "available" as const,
     };
   });
 
+  // A goal whose progress is hidden is listed but counted in no status bucket.
+  const judged = goalsList.flatMap((g) => g.progress === null ? [] : [{ onTrack: g.onTrack === true, progress: g.progress }]);
   const summary = {
     totalGoals: goalsList.length,
-    onTrackCount: goalsList.filter((g) => g.onTrack).length,
-    behindCount: goalsList.filter((g) => !g.onTrack && g.progress < 100).length,
-    completedCount: goalsList.filter((g) => g.progress >= 100).length,
+    onTrackCount: judged.filter((g) => g.onTrack).length,
+    behindCount: judged.filter((g) => !g.onTrack && g.progress < 100).length,
+    completedCount: judged.filter((g) => g.progress >= 100).length,
   };
 
   return { goals: goalsList, summary };

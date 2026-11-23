@@ -1,263 +1,103 @@
-/**
- * Health Endpoints Integration Tests
- *
- * Tests for /health/live, /health/ready, /health/startup endpoints
- */
-
+/** Owned HTTP fixtures: real Express handlers, injected dependencies, no database. */
 import request from "supertest";
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import express, { Express } from "express";
-import healthRoutes from "../health.routes";
-import { db } from "../../../db";
-import { cacheStore } from "../../../core/cache/store";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import express from "express";
+import { performance } from "node:perf_hooks";
 
-// Create test app
-function createTestApp(): Express {
+vi.mock("../../../db", () => ({ pool: { query: vi.fn() } }));
+vi.mock("../../../config/redis", () => ({ redis: null, productionRedis: null, assertRequiredJobCapabilities: vi.fn() }));
+import { createHealthController } from "../health.controller";
+
+// Detail assertions read /health/ready as the operator; the public body is the status only.
+const OPERATOR_SECRET = "synthetic-operator-secret";
+const OPERATOR = { Authorization: `Bearer ${OPERATOR_SECRET}` };
+beforeEach(() => { vi.stubEnv("CRON_SECRET", OPERATOR_SECRET); });
+afterEach(() => { vi.unstubAllEnvs(); });
+
+function fixture() {
+  const database = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+  const cache = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+  const scheduledJobs = async () => ({ status: "healthy" as const, schedulerEnabled: false, jobs: [] });
+  const controller = createHealthController({ database, cache, scheduledJobs });
   const app = express();
-  app.use(express.json());
-  app.use("/health", healthRoutes);
-  return app;
+  app.get("/health/live", controller.getLive);
+  app.get("/health/ready", controller.getReady);
+  app.get("/health/startup", controller.getStartup);
+  return { app, database, cache };
 }
 
-describe("Health Endpoints Integration Tests", () => {
-  let app: Express;
-
-  beforeAll(() => {
-    app = createTestApp();
+describe("Health HTTP dependency contract", () => {
+  it("returns only public status for liveness without probing dependencies", async () => {
+    const { app, database, cache } = fixture();
+    await request(app).get("/health/live").expect(200, { status: "healthy" });
+    expect(database).not.toHaveBeenCalled();
+    expect(cache).not.toHaveBeenCalled();
   });
 
-  afterAll(() => {
-    vi.restoreAllMocks();
-  });
-
-  describe("GET /health/live", () => {
-    it("should return healthy status with uptime", async () => {
-      const response = await request(app).get("/health/live");
-
-      expect(response.status).toBe(200);
-      expect(response.body).toHaveProperty("status", "healthy");
-      expect(response.body).toHaveProperty("uptime");
-      expect(typeof response.body.uptime).toBe("number");
-      expect(response.body.uptime).toBeGreaterThan(0);
-    });
-
-    it("should always succeed even if dependencies are down", async () => {
-      // Liveness probe should succeed regardless of dependencies
-      const response = await request(app).get("/health/live");
-
-      expect(response.status).toBe(200);
-      expect(response.body.status).toBe("healthy");
-    });
-  });
-
-  describe("GET /health/ready", () => {
-    it("should return healthy status when all dependencies are up", async () => {
-      const response = await request(app).get("/health/ready");
-
-      expect(response.status).toBe(200);
-      expect(response.body).toHaveProperty("status", "healthy");
-      expect(response.body).toHaveProperty("checks");
-      expect(response.body).toHaveProperty("version");
-      expect(response.body).toHaveProperty("uptime");
-
-      // Check database health
-      expect(response.body.checks).toHaveProperty("database");
-      expect(response.body.checks.database.status).toBe("healthy");
-      expect(response.body.checks.database).toHaveProperty("latency");
-      expect(typeof response.body.checks.database.latency).toBe("number");
-
-      // Check cache health
-      expect(response.body.checks).toHaveProperty("cache");
-      expect(response.body.checks.cache.status).toBe("healthy");
-    });
-
-    it("should return unhealthy status when database is down", async () => {
-      // Mock database failure
-      const originalExecute = db.execute.bind(db);
-      vi.spyOn(db, "execute").mockRejectedValueOnce(
-        new Error("Connection refused")
-      );
-
-      const response = await request(app).get("/health/ready");
-
-      expect(response.status).toBe(503);
-      expect(response.body.status).toBe("unhealthy");
-      expect(response.body.checks.database.status).toBe("unhealthy");
-      expect(response.body.checks.database.error).toBe("Connection refused");
-
-      // Restore original
-      db.execute = originalExecute;
-    });
-
-    it("should handle cache failure gracefully", async () => {
-      // Mock cache failure
-      const originalGetStats = cacheStore.getStats.bind(cacheStore);
-      vi.spyOn(cacheStore, "getStats").mockImplementationOnce(() => {
-        throw new Error("Cache unavailable");
+  it("readiness and startup perform dependency and required-job probes", async () => {
+    const { app, database, cache } = fixture();
+    for (const endpoint of ["ready", "startup"]) {
+      await request(app).get(`/health/${endpoint}`).set(OPERATOR).expect(200, {
+        status: "healthy", revision: null, checks: {
+          database: { status: "healthy" },
+          cache: { status: "healthy" },
+          requiredJobs: { status: "healthy" },
+        },
+        scheduledJobs: { status: "healthy", schedulerEnabled: false, jobs: [] },
       });
-
-      const response = await request(app).get("/health/ready");
-
-      // Cache failure should not make the overall health check fail
-      // (it's not critical, we degrade gracefully)
-      expect(response.status).toBe(200);
-      expect(response.body.checks.cache.status).toBe("unhealthy");
-      expect(response.body.checks.cache.error).toBe("Cache unavailable");
-
-      // Restore original
-      cacheStore.getStats = originalGetStats;
-    });
-
-    it("should include version information", async () => {
-      const response = await request(app).get("/health/ready");
-
-      expect(response.status).toBe(200);
-      expect(response.body).toHaveProperty("version");
-      expect(typeof response.body.version).toBe("string");
-    });
-
-    it("should include uptime in readiness check", async () => {
-      const response = await request(app).get("/health/ready");
-
-      expect(response.status).toBe(200);
-      expect(response.body).toHaveProperty("uptime");
-      expect(typeof response.body.uptime).toBe("number");
-      expect(response.body.uptime).toBeGreaterThan(0);
-    });
-
-    it("should return unhealthy while the app is draining for shutdown", async () => {
-      app.locals.isShuttingDown = true;
-
-      const response = await request(app).get("/health/ready");
-
-      expect(response.status).toBe(503);
-      expect(response.body.status).toBe("unhealthy");
-      expect(response.body.checks.shutdown.status).toBe("unhealthy");
-      expect(response.body.checks.shutdown.error).toBe("shutting_down");
-
-      app.locals.isShuttingDown = false;
-    });
-
-    it("should report latency for database check", async () => {
-      const response = await request(app).get("/health/ready");
-
-      expect(response.status).toBe(200);
-      expect(response.body.checks.database).toHaveProperty("latency");
-      expect(typeof response.body.checks.database.latency).toBe("number");
-      expect(response.body.checks.database.latency).toBeGreaterThanOrEqual(0);
-    });
-
-    it("should report latency for cache check", async () => {
-      const response = await request(app).get("/health/ready");
-
-      expect(response.status).toBe(200);
-      expect(response.body.checks.cache).toHaveProperty("latency");
-      expect(typeof response.body.checks.cache.latency).toBe("number");
-      expect(response.body.checks.cache.latency).toBeGreaterThanOrEqual(0);
-    });
+    }
+    expect(database).toHaveBeenCalledTimes(2);
+    expect(cache).toHaveBeenCalledTimes(2);
   });
 
-  describe("GET /health/startup", () => {
-    it("should return healthy status on successful startup", async () => {
-      const response = await request(app).get("/health/startup");
-
-      expect(response.status).toBe(200);
-      expect(response.body).toHaveProperty("status", "healthy");
-      expect(response.body).toHaveProperty("checks");
-      expect(response.body).toHaveProperty("version");
-      expect(response.body).toHaveProperty("uptime");
-    });
-
-    it("should return unhealthy status if dependencies are not ready", async () => {
-      // Mock database failure
-      const originalExecute = db.execute.bind(db);
-      vi.spyOn(db, "execute").mockRejectedValueOnce(
-        new Error("Database not ready")
-      );
-
-      const response = await request(app).get("/health/startup");
-
-      expect(response.status).toBe(503);
-      expect(response.body.status).toBe("unhealthy");
-      expect(response.body.checks.database.status).toBe("unhealthy");
-
-      // Restore original
-      db.execute = originalExecute;
-    });
-
-    it("should include all required health check information", async () => {
-      const response = await request(app).get("/health/startup");
-
-      expect(response.status).toBe(200);
-      expect(response.body).toHaveProperty("status");
-      expect(response.body).toHaveProperty("checks");
-      expect(response.body.checks).toHaveProperty("database");
-      expect(response.body.checks).toHaveProperty("cache");
-      expect(response.body).toHaveProperty("version");
-      expect(response.body).toHaveProperty("uptime");
-    });
+  it.each(["database", "cache"] as const)("%s failure makes readiness unavailable without error text", async (dependency) => {
+    const state = fixture();
+    state[dependency].mockRejectedValue(new Error("private target and financial payload"));
+    const response = await request(state.app).get("/health/ready").set(OPERATOR).expect(503);
+    expect(response.body.checks[dependency]).toEqual({ status: "unhealthy" });
+    expect(response.text).not.toMatch(/private|payload|target|latency|uptime|version|error/);
+    await request(state.app).get("/health/live").expect(200);
   });
 
-  describe("Health Check Response Structure", () => {
-    it("should have consistent response structure across all endpoints", async () => {
-      const liveResponse = await request(app).get("/health/live");
-      const readyResponse = await request(app).get("/health/ready");
-      const startupResponse = await request(app).get("/health/startup");
-
-      // All should have status
-      expect(liveResponse.body).toHaveProperty("status");
-      expect(readyResponse.body).toHaveProperty("status");
-      expect(startupResponse.body).toHaveProperty("status");
-
-      // Ready and startup should have detailed checks
-      expect(readyResponse.body).toHaveProperty("checks");
-      expect(startupResponse.body).toHaveProperty("checks");
-
-      // Ready and startup should have version and uptime
-      expect(readyResponse.body).toHaveProperty("version");
-      expect(readyResponse.body).toHaveProperty("uptime");
-      expect(startupResponse.body).toHaveProperty("version");
-      expect(startupResponse.body).toHaveProperty("uptime");
-    });
-  });
-
-  describe("Error Scenarios", () => {
-    it("should handle multiple dependency failures", async () => {
-      // Mock both database and cache failures
-      const originalExecute = db.execute.bind(db);
-      const originalGetStats = cacheStore.getStats.bind(cacheStore);
-
-      vi.spyOn(db, "execute").mockRejectedValueOnce(
-        new Error("Database error")
-      );
-      vi.spyOn(cacheStore, "getStats").mockImplementationOnce(() => {
-        throw new Error("Cache error");
+  it("does not probe dependencies while draining and cannot report startup ready", async () => {
+    const { app, database, cache } = fixture();
+    app.locals.isShuttingDown = true;
+    for (const endpoint of ["ready", "startup"]) {
+      await request(app).get(`/health/${endpoint}`).set(OPERATOR).expect(503, {
+        status: "unhealthy", checks: { shutdown: { status: "unhealthy" } },
       });
+    }
+    expect(database).not.toHaveBeenCalled();
+    expect(cache).not.toHaveBeenCalled();
+  });
 
-      const response = await request(app).get("/health/ready");
+  it("rechecks shutdown after a dependency was pending", async () => {
+    const { app, database } = fixture();
+    database.mockImplementation(async () => { app.locals.isShuttingDown = true; });
+    const response = await request(app).get("/health/ready").set(OPERATOR).expect(503);
+    expect(response.body.checks.shutdown).toEqual({ status: "unhealthy" });
+  });
 
-      expect(response.status).toBe(503);
-      expect(response.body.status).toBe("unhealthy");
-      expect(response.body.checks.database.status).toBe("unhealthy");
-      expect(response.body.checks.cache.status).toBe("unhealthy");
+  it("hanging dependencies return503 within2seconds and concurrent requests share work", async () => {
+    const { app, database, cache } = fixture();
+    database.mockImplementation(() => new Promise(() => {}));
+    cache.mockImplementation(() => new Promise(() => {}));
+    const started = performance.now();
+    const responses = await Promise.all([
+      request(app).get("/health/ready"), request(app).get("/health/ready"),
+    ]);
+    expect(performance.now() - started).toBeLessThan(2000);
+    for (const response of responses) expect(response.status).toBe(503);
+    expect(database).toHaveBeenCalledOnce();
+    expect(cache).toHaveBeenCalledOnce();
+    await request(app).get("/health/ready").expect(503);
+    expect(database).toHaveBeenCalledOnce();
+  });
 
-      // Restore originals
-      db.execute = originalExecute;
-      cacheStore.getStats = originalGetStats;
-    });
-
-    it("should handle unexpected errors in health checks", async () => {
-      // Mock database to throw non-Error object
-      const originalExecute = db.execute.bind(db);
-      vi.spyOn(db, "execute").mockRejectedValueOnce("Unexpected error");
-
-      const response = await request(app).get("/health/ready");
-
-      expect(response.status).toBe(503);
-      expect(response.body.checks.database.status).toBe("unhealthy");
-
-      // Restore original
-      db.execute = originalExecute;
-    });
+  it("recovers after a failed dependency returns", async () => {
+    const { app, cache } = fixture();
+    cache.mockRejectedValueOnce(new Error("unavailable"));
+    await request(app).get("/health/ready").expect(503);
+    await request(app).get("/health/ready").expect(200);
   });
 });

@@ -1,7 +1,9 @@
 import React from "react";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent, within } from "@testing-library/react";
 import { vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { BudgetForecastData } from "@/hooks/useBudgets";
+import { activateOperationLifetime, createOperationLifetime, retireOperationLifetime } from "@/lib/operation-lifetime";
 
 const mockUseBudgetProgress = vi.fn();
 const mockUseBudgetSettings = vi.fn();
@@ -13,6 +15,7 @@ const mockUseCreateBudget = vi.fn();
 const mockUseBudgetForecast = vi.fn();
 const mockUseUpdateBudgetForecast = vi.fn();
 const mockUseMoveBudgetAmount = vi.fn();
+const mockEnsureFlexBudget = vi.fn();
 
 const mockUseCategories = vi.fn();
 const mockUseGoals = vi.fn();
@@ -34,6 +37,11 @@ vi.mock(
 
 vi.mock("@/hooks/use-mobile", () => ({
   useIsMobile: () => false,
+}));
+
+// These existing editor tests do not authorize a preview request.
+vi.mock("@/contexts/SessionContext", () => ({
+  useSession: () => ({ status: null, lifetime: null, loading: true }),
 }));
 
 vi.mock("@/hooks/useBudgets", () => ({
@@ -61,10 +69,12 @@ vi.mock("@/hooks/useBudgets", () => ({
   useUpdateBudgetForecast: (...args: any[]) =>
     mockUseUpdateBudgetForecast(...args),
   useMoveBudgetAmount: (...args: any[]) => mockUseMoveBudgetAmount(...args),
+  ensureFlexBudget: () => mockEnsureFlexBudget(),
 }));
 
 vi.mock("@/hooks/use-settings", () => ({
   useCategories: (...args: any[]) => mockUseCategories(...args),
+  useHousehold: () => ({ data: { household: { id: "house-1", currency: "ZMW" }, preferences: null } }),
   useDisplaySettings: () => ({
     data: { currency: "ZMW", numberFormat: "US" },
     isLoading: false,
@@ -80,6 +90,7 @@ const budgetProgress = [
   {
     id: "flex-budget",
     householdId: "house-1",
+    currency: "ZMW",
     name: "Flexible Budget",
     categoryId: null,
     categoryGroupId: null,
@@ -97,6 +108,7 @@ const budgetProgress = [
   {
     id: "budget-food",
     householdId: "house-1",
+    currency: "ZMW",
     name: "Food",
     categoryId: "cat-food",
     categoryGroupId: null,
@@ -114,6 +126,7 @@ const budgetProgress = [
   {
     id: "budget-rent",
     householdId: "house-1",
+    currency: "ZMW",
     name: "Rent",
     categoryId: "cat-rent",
     categoryGroupId: null,
@@ -130,7 +143,7 @@ const budgetProgress = [
   },
 ];
 
-const forecastData = {
+const forecastData: BudgetForecastData = {
   range: [
     { year: 2025, month: 6 },
     { year: 2025, month: 7 },
@@ -142,7 +155,7 @@ const forecastData = {
       name: "Food",
       categoryId: "cat-food",
       categoryGroupId: null,
-      amount: "150.00",
+      amount: { amount: "150.00", currency: "ZMW" },
       period: "monthly",
       rolloverEnabled: false,
       isActive: true,
@@ -150,8 +163,8 @@ const forecastData = {
       createdAt: "",
       updatedAt: "",
       periods: [
-        { year: 2025, month: 6, amount: "150.00" },
-        { year: 2025, month: 7, amount: "200.00" },
+        { year: 2025, month: 6, amount: { amount: "150.00", currency: "ZMW" } },
+        { year: 2025, month: 7, amount: { amount: "200.00", currency: "ZMW" } },
       ],
     },
   ],
@@ -191,7 +204,7 @@ const categories = [
 ];
 
 describe("Budget page", () => {
-  const renderBudget = async () => {
+  const renderBudget = async (seed?: (queryClient: QueryClient) => void) => {
     const Budget = (await import("@/pages/Budget")).default;
     const { SettingsProvider } = await import("@/contexts/SettingsContext");
     // BudgetDetailModal's useBudgetCategoryHistory hook calls the real
@@ -201,13 +214,16 @@ describe("Budget page", () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
-    return render(
+    seed?.(queryClient);
+    const tree = () => (
       <QueryClientProvider client={queryClient}>
         <SettingsProvider>
           <Budget />
         </SettingsProvider>
       </QueryClientProvider>
     );
+    const view = render(tree());
+    return { ...view, refreshBudget: () => view.rerender(tree()) };
   };
 
   const RealDate = Date;
@@ -278,8 +294,105 @@ describe("Budget page", () => {
   });
 
   afterEach(() => {
+    retireOperationLifetime();
     vi.stubGlobal("Date", RealDate);
     vi.clearAllMocks();
+  });
+
+  // C3-10: a budget the server could not report is named with its reason,
+  // never left looking unbudgeted.
+  it("names a budget the server reported unavailable this month, with its reason", async () => {
+    const { storeUnavailableBudgets } = await import("@/hooks/useUnavailableBudgets");
+    await renderBudget(queryClient => storeUnavailableBudgets(queryClient, 2025, 6, { unavailableBudgets: [{
+      id: "budget-travel", name: "Travel", categoryId: "cat-travel", categoryGroupId: null, currency: "USD",
+      reason: { code: "BUDGET_CURRENCY_MISMATCH", message: "This budget's limit is in USD but the household reports in ZMW." } }] }));
+
+    const notice = await screen.findByRole("status", { name: "Budgets not shown this month" });
+    expect(notice).toHaveTextContent("1 budget is not shown this month");
+    expect(notice).toHaveTextContent("Travel: This budget's limit is in USD but the household reports in ZMW.");
+  });
+
+  it("shows no unavailable-budget notice when every budget is reported", async () => {
+    await renderBudget();
+    await screen.findByRole("button", { name: /settings/i });
+    expect(screen.queryByRole("status", { name: "Budgets not shown this month" })).not.toBeInTheDocument();
+  });
+
+  it("shows a withheld Flex limit from progress metadata without hiding exact reported spending", async () => {
+    const { storeUnavailableBudgets } = await import("@/hooks/useUnavailableBudgets");
+    const { storeUnbudgetedSpend } = await import("@/hooks/useUnbudgetedSpend");
+    activateOperationLifetime(createOperationLifetime({ subject: "synthetic-owner", household: "house-1" }));
+    const zmw = (amount: string) => ({ amount, currency: "ZMW" });
+    const incomeGroup = { ...categoryGroups[0], id: "group-income", name: "Salary", type: "income", budgetMode: "by_group" };
+    mockUseCategories.mockReturnValue({ data: { categories, groups: [...categoryGroups, incomeGroup] }, isLoading: false });
+    mockUseBudgetProgress.mockReturnValue({ data: [
+      { ...budgetProgress[1], id: "legacy-variable", categoryId: "cat-banking-fees",
+        amount: zmw("150.00"), spent: zmw("40.00"), remaining: zmw("110.00") },
+      { ...budgetProgress[1], id: "income", categoryId: null, categoryGroupId: incomeGroup.id,
+        amount: zmw("500.00"), spent: zmw("460.00"), remaining: zmw("40.00") },
+    ], isLoading: false, error: null });
+    let clearWithheld!: () => void;
+    await renderBudget(queryClient => {
+      clearWithheld = () => storeUnavailableBudgets(queryClient, 2025, 6, {});
+      storeUnavailableBudgets(queryClient, 2025, 6, { unavailableBudgets: [{
+        id: "withheld-flex", name: "Flexible Budget", categoryId: null, categoryGroupId: null, currency: "USD",
+        reason: { code: "BUDGET_CURRENCY_MISMATCH", message: "Flexible limit is in USD." },
+      }] });
+      storeUnbudgetedSpend(queryClient, 2025, 6, { unbudgetedSpent: { expense: zmw("2.50") } });
+    });
+    const flex = within((await screen.findByRole("button", { name: "Flexible budget group, expanded" })).parentElement!);
+    const summaryHeader = within(screen.getByText("Left to budget").parentElement!);
+    expect(flex.getByText("Unavailable")).toBeVisible();
+    expect(flex.getByText("K40.00")).toBeVisible();
+    expect(flex.queryByText("At least K40.00")).not.toBeInTheDocument();
+    expect(flex.getByText("Incomplete")).toBeVisible();
+    expect(flex.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(summaryHeader.getByText("Unavailable")).toBeVisible();
+    expect(screen.getByText("K42.50 spent")).toBeVisible();
+    expect(screen.queryByRole("progressbar", { name: /Expenses progress/ })).not.toBeInTheDocument();
+    expect(mockEnsureFlexBudget).not.toHaveBeenCalled();
+    for (const call of [...mockUseCreateBudget.mock.results, ...mockUseUpdateBudget.mock.results]) {
+      expect(call.value.mutate).not.toHaveBeenCalled();
+    }
+    await act(clearWithheld);
+    expect(await screen.findByRole("textbox", { name: "Budget amount for Flexible group" })).toHaveValue("150");
+  });
+
+  it("waits for confirmed Flex settings and disables the inline editor until the admitted write settles", async () => {
+    activateOperationLifetime(createOperationLifetime({ subject: "synthetic-owner", household: "house-1" }));
+    const money = (amount: string | number) => ({ amount: String(amount), currency: "ZMW" });
+    mockUseBudgetProgress.mockReturnValue({ data: budgetProgress.map(row => ({ ...row,
+      amount: money(row.amount), spent: money(row.spent), remaining: money(row.remaining) })), isLoading: false, error: null });
+    mockUseBudgetSettings.mockReturnValue({ data: undefined, isLoading: true });
+    let finish!: () => void;
+    const write = new Promise<void>(resolve => { finish = resolve; });
+    const update = vi.fn().mockReturnValue(write);
+    mockUseUpdateBudget.mockReturnValue({ mutateAsync: update, mutate: vi.fn(), isPending: false });
+    const view = await renderBudget();
+    const inputName = { name: "Budget amount for Flexible group" };
+    await screen.findByRole("button", { name: "Flexible budget group, expanded" });
+    expect(screen.queryByRole("textbox", inputName)).not.toBeInTheDocument();
+
+    mockUseBudgetSettings.mockReturnValue({ data: { budgetSystem: "category", defaultApplyScope: "all_future" } });
+    view.refreshBudget();
+    expect(screen.queryByRole("textbox", inputName)).not.toBeInTheDocument();
+    expect(update).not.toHaveBeenCalled();
+    expect(mockEnsureFlexBudget).not.toHaveBeenCalled();
+
+    mockUseBudgetSettings.mockReturnValue({ data: { budgetSystem: "flex", defaultApplyScope: "all_future" } });
+    view.refreshBudget();
+    const input = await screen.findByRole("textbox", inputName);
+    expect(input).toBeEnabled();
+    expect(input).toHaveValue("500");
+    fireEvent.change(input, { target: { value: "620.50" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(update).toHaveBeenCalledOnce();
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ id: "flex-budget", data: { amount: money("620.50") } }));
+    expect(input).toBeDisabled();
+    expect(screen.getByText("Saving flexible budget…")).toBeVisible();
+    await act(async () => { finish(); await write; });
+    expect(input).toBeEnabled();
+    expect(mockEnsureFlexBudget).not.toHaveBeenCalled();
   });
 
   it("saves budget settings selections", async () => {
@@ -302,7 +415,7 @@ describe("Budget page", () => {
     await renderBudget();
 
     fireEvent.click(screen.getByRole("button", { name: /forecast/i }));
-    fireEvent.click(screen.getByRole("button", { name: /(?:K|\$)150/ }));
+    fireEvent.click(screen.getByRole("button", { name: "ZMW 150.00" }));
     await screen.findByText("Edit Forecast");
 
     const amountInput = screen.getByLabelText("Budget Amount");
@@ -331,6 +444,10 @@ describe("Budget page", () => {
     mockUseBudgetSettings.mockReturnValue({
       data: { budgetSystem: "category", defaultApplyScope: "all_future" },
     });
+    mockUseBudgetProgress.mockReturnValue({ data: [...budgetProgress, {
+      ...budgetProgress[1], id: "budget-banking-fees", name: "Banking Fees", categoryId: "cat-banking-fees",
+      amount: { amount: "1.00", currency: "ZMW" }, spent: { amount: "3.00", currency: "ZMW" }, remaining: { amount: "-2.00", currency: "ZMW" },
+    }], isLoading: false, error: null });
     await renderBudget();
     await screen.findByDisplayValue("Banking Fees");
 

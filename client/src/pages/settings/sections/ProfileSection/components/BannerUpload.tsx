@@ -1,6 +1,10 @@
+import { userErrorMessage } from "@/lib/errorCopy";
 import React, { useState, useRef } from "react";
+import { isProtectedMediaSource } from "@/lib/protected-media";
+import { useHouseholdAssetsAllowed } from "@/contexts/SessionContext";
 import { ImagePlus, Trash2, X, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ConfirmActionDialog } from "@/components/ConfirmActionDialog";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { useFormContext } from "react-hook-form";
@@ -39,11 +43,13 @@ export function BannerUpload({
   bannerUrl: initialBannerUrl,
   userName,
 }: BannerUploadProps) {
+  const householdAssetsAllowed = useHouseholdAssetsAllowed();
   const { setValue, watch } = useFormContext();
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showModal, setShowModal] = useState(false);
+  const [isRemoveConfirmOpen, setIsRemoveConfirmOpen] = useState(false);
 
   const formValue = watch("bannerUrl");
   const bannerUrl = formValue || initialBannerUrl;
@@ -63,7 +69,7 @@ export function BannerUpload({
     onError: (error: Error) => {
       toast({
         title: "Upload failed",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -84,7 +90,7 @@ export function BannerUpload({
     onError: (error: Error) => {
       toast({
         title: "Delete failed",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -121,6 +127,16 @@ export function BannerUpload({
     return gradients[hash % gradients.length];
   };
 
+  if (!householdAssetsAllowed) {
+    return (
+      <div className="w-full h-64 rounded-xl overflow-hidden bg-muted">
+        {bannerUrl && !isProtectedMediaSource(bannerUrl)
+          ? <ProtectedImage src={bannerUrl} alt="Profile banner" className="w-full h-full object-cover" />
+          : <div className={`w-full h-full bg-linear-to-r ${getDefaultGradient(userName || "")}`} />}
+      </div>
+    );
+  }
+
   return (
     <>
       <input
@@ -138,7 +154,7 @@ export function BannerUpload({
         onClick={() => setShowModal(true)}
       >
         {bannerUrl ? (
-          <img
+          <ProtectedImage
             src={bannerUrl}
             alt="Profile banner"
             className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105"
@@ -186,7 +202,7 @@ export function BannerUpload({
             <div className="p-4">
               <div className="w-full h-40 rounded-lg overflow-hidden">
                 {bannerUrl ? (
-                  <img
+                  <ProtectedImage
                     src={bannerUrl}
                     alt="Banner preview"
                     className="w-full h-full object-cover"
@@ -228,15 +244,7 @@ export function BannerUpload({
                 <Button
                   variant="outline"
                   className="w-full text-destructive hover:text-destructive hover:bg-destructive/10"
-                  onClick={() => {
-                    if (
-                      confirm(
-                        "Are you sure you want to remove your cover photo?"
-                      )
-                    ) {
-                      deleteBanner.mutate();
-                    }
-                  }}
+                  onClick={() => setIsRemoveConfirmOpen(true)}
                   disabled={deleteBanner.isPending}
                 >
                   {deleteBanner.isPending ? (
@@ -253,9 +261,19 @@ export function BannerUpload({
                 </Button>
               )}
             </div>
+            {/* Inside the card, whose stopPropagation keeps dialog clicks from closing the modal. */}
+            <ConfirmActionDialog
+              open={isRemoveConfirmOpen}
+              onOpenChange={setIsRemoveConfirmOpen}
+              title="Remove cover photo?"
+              description="Your profile goes back to the default cover. You can upload a new photo at any time."
+              confirmLabel="Remove photo"
+              onConfirm={() => deleteBanner.mutate()}
+            />
           </div>
         </div>
       )}
     </>
   );
 }
+import { ProtectedImage } from "@/components/session/ProtectedImage";

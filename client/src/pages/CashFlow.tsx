@@ -53,7 +53,7 @@ export default function CashFlow() {
     barChartData,
     sankeyChartData,
     totals,
-    actualPeriods,
+    averageSavings,
     periodLabel,
     cashflowData,
     interval,
@@ -83,6 +83,7 @@ export default function CashFlow() {
   // Forecast is chart-only and is intentionally NOT exported — a CSV of projected
   // numbers reads as real history, so the export always carries actuals only.
   const handleExport = useCallback(async () => {
+    const operation = captureOperationLifetime();
     setIsExporting(true);
     try {
       const exportId = await requestReportExport({
@@ -95,7 +96,7 @@ export default function CashFlow() {
         includeTransfers: filters.includeTransfers,
         scope: filters.scope,
       });
-      window.location.href = getReportsExportDownloadUrl(exportId);
+      await downloadProtectedResource(getReportsExportDownloadUrl(exportId), undefined, operation);
 
       toast({
         title: "Export complete",
@@ -199,7 +200,7 @@ export default function CashFlow() {
         {/* Summary Cards */}
         <CashFlowSummary
           totals={totals}
-          actualPeriods={actualPeriods}
+          averageSavings={averageSavings}
           periodLabel={periodLabel}
           formatCurrency={formatCurrency}
         />
@@ -247,3 +248,5 @@ export default function CashFlow() {
     </Layout>
   );
 }
+import { downloadProtectedResource } from "@/lib/protected-media";
+import { captureOperationLifetime } from "@/lib/operation-lifetime";

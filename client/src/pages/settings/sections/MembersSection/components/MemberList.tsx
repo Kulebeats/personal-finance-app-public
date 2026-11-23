@@ -6,7 +6,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -25,7 +25,9 @@ import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "date-fns";
 import { useUpdateMemberRole, useRemoveMember } from "@/hooks/use-settings";
 import type { HouseholdMember } from "@/hooks/use-settings";
+import type { HouseholdRole } from "@shared/household-members";
 import { useToast } from "@/hooks/use-toast";
+import { TransferOwnershipAction } from "./TransferOwnershipAction";
 
 interface MemberListProps {
   members: HouseholdMember[];
@@ -45,7 +47,7 @@ const roleLabels = {
   admin: "Admin",
   member: "Member",
   view_only: "View Only",
-  professional: "Professional",
+  professional: "Professional (read-only)",
 };
 
 const roleColors = {
@@ -71,6 +73,8 @@ export function MemberList({ members, currentUserId }: MemberListProps) {
   const currentUserRole = members.find((m) => m.userId === currentUserId)?.role;
   const canManageRoles =
     currentUserRole === "owner" || currentUserRole === "admin";
+  // Spec §A3: granting or removing admin is owner-only.
+  const isActorOwner = currentUserRole === "owner";
 
   // Cleanup timer on unmount
   useEffect(() => {
@@ -81,7 +85,7 @@ export function MemberList({ members, currentUserId }: MemberListProps) {
     };
   }, []);
 
-  const handleRoleChange = (userId: string, newRole: string) => {
+  const handleRoleChange = (userId: string, newRole: HouseholdRole) => {
     updateRole.mutate({ userId, role: newRole });
   };
 
@@ -141,8 +145,8 @@ export function MemberList({ members, currentUserId }: MemberListProps) {
     });
   };
 
-  const getInitials = (name: string | null, email: string) => {
-    if (name) {
+  const getInitials = (name: string, email: string) => {
+    if (name.trim()) {
       return name
         .split(" ")
         .map((n) => n[0])
@@ -177,33 +181,25 @@ export function MemberList({ members, currentUserId }: MemberListProps) {
         const Icon = roleIcons[member.role as keyof typeof roleIcons];
         const isCurrentUser = member.userId === currentUserId;
         const isOwner = member.role === "owner";
-        const canEditRole = canManageRoles && !isCurrentUser && !isOwner;
-        const canRemove = canManageRoles && !isCurrentUser && !isOwner;
+        const canEditRole =
+          canManageRoles && !isCurrentUser && !isOwner && (isActorOwner || member.role !== "admin");
+        const canRemove = canEditRole;
 
         return (
           <div
-            key={member.id}
+            key={member.userId}
             className="flex items-center gap-4 p-4 rounded-lg border bg-card hover:bg-accent/50 transition-colors"
           >
             <Avatar className="h-12 w-12">
-              <AvatarImage
-                src={member.user?.profilePictureUrl || undefined}
-                alt={member.user?.fullName || member.user?.username}
-              />
               <AvatarFallback className="bg-primary/10 text-primary font-semibold">
-                {getInitials(
-                  member.user?.fullName || null,
-                  member.user?.email || "",
-                )}
+                {getInitials(member.name, member.email ?? "")}
               </AvatarFallback>
             </Avatar>
 
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
                 <p className="font-medium truncate">
-                  {member.user?.fullName ||
-                    member.user?.username ||
-                    "Unknown User"}
+                  {member.name}
                 </p>
                 {isCurrentUser && (
                   <Badge variant="outline" className="text-xs">
@@ -213,7 +209,7 @@ export function MemberList({ members, currentUserId }: MemberListProps) {
               </div>
               {(canManageRoles || isCurrentUser) && (
                 <p className="text-sm text-muted-foreground truncate">
-                  {member.user?.email}
+                  {member.email}
                 </p>
               )}
               <div className="flex items-center gap-2 mt-1">
@@ -229,9 +225,9 @@ export function MemberList({ members, currentUserId }: MemberListProps) {
                 </Badge>
                 <span className="text-xs text-muted-foreground">
                   Joined{" "}
-                  {formatDistanceToNow(new Date(member.joinedAt), {
-                    addSuffix: true,
-                  })}
+                  {member.joinedAt
+                    ? formatDistanceToNow(new Date(member.joinedAt), { addSuffix: true })
+                    : "recently"}
                 </span>
               </div>
             </div>
@@ -241,20 +237,22 @@ export function MemberList({ members, currentUserId }: MemberListProps) {
                 <Select
                   value={member.role}
                   onValueChange={(role) =>
-                    handleRoleChange(member.userId, role)
+                    handleRoleChange(member.userId, role as HouseholdRole)
                   }
                   disabled={updateRole.isPending}
                 >
-                  <SelectTrigger className="w-[140px]" aria-label={`Change role for ${member.user?.fullName || member.user?.username || 'member'}`}>
+                  <SelectTrigger className="w-[140px]" aria-label={`Change role for ${member.name}`}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="admin">
-                      <div className="flex items-center gap-2">
-                        <Shield className="w-4 h-4" />
-                        <span>Admin</span>
-                      </div>
-                    </SelectItem>
+                    {isActorOwner && (
+                      <SelectItem value="admin">
+                        <div className="flex items-center gap-2">
+                          <Shield className="w-4 h-4" />
+                          <span>Admin</span>
+                        </div>
+                      </SelectItem>
+                    )}
                     <SelectItem value="member">
                       <div className="flex items-center gap-2">
                         <Briefcase className="w-4 h-4" />
@@ -270,7 +268,7 @@ export function MemberList({ members, currentUserId }: MemberListProps) {
                     <SelectItem value="professional">
                       <div className="flex items-center gap-2">
                         <Briefcase className="w-4 h-4" />
-                        <span>Professional</span>
+                        <span>{roleLabels.professional}</span>
                       </div>
                     </SelectItem>
                   </SelectContent>
@@ -285,23 +283,22 @@ export function MemberList({ members, currentUserId }: MemberListProps) {
                 </div>
               )}
 
+              {isActorOwner && !isCurrentUser && (
+                <TransferOwnershipAction memberUserId={member.userId} memberName={member.name} />
+              )}
+
               {canRemove && (
                 <Button
                   variant="ghost"
                   size="sm"
                   onClick={() =>
-                    handleRemoveMember(
-                      member.userId,
-                      member.user?.fullName ||
-                        member.user?.username ||
-                        "this member",
-                    )
+                    handleRemoveMember(member.userId, member.name)
                   }
                   disabled={
                     removeMember.isPending && removingMemberId === member.userId
                   }
                   className="text-destructive hover:text-destructive"
-                  aria-label={`Remove ${member.user?.fullName || member.user?.username || 'member'} from household`}
+                  aria-label={`Remove ${member.name} from household`}
                 >
                   <Trash2 className="w-4 h-4" aria-hidden="true" />
                 </Button>

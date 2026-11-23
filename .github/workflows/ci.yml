@@ -4,10 +4,31 @@
 # ephemeral Postgres on every PR and push to main.
 #
 # Adjust the env names and npm script names to match the repo if they differ.
+#
+# Draft / ready policy (owner, 16 Nov 2026 — Actions minutes are metered on this
+# private repo, and most minutes went on full runs of unfinished draft work):
+#   - DRAFT pull request: only `quick` runs. It installs, runs `npm run check`,
+#     then ONLY the test files the PR adds or modifies (server ones against a
+#     disposable Postgres, client ones with the client config). `verify` and
+#     `e2e` show as skipped. Open lane PRs as drafts; `quick` is the runner
+#     while building.
+#   - READY pull request (marking a draft ready fires `ready_for_review`), every
+#     later push to a non-draft PR, and every push to main: `verify` and `e2e`
+#     run exactly as before and `quick` is skipped.
+#   - A pull request INTO main, draft or not (the integration -> main PR): it is
+#     the release gate, so `verify` and `e2e` always run and `quick` is skipped.
+#     Its diff (~2,000 files) made `quick` run nearly every server test file
+#     and hit its 15-minute cap on every push, while the draft rule kept
+#     `verify` and `e2e` skipped, so integration heads got no real CI at all.
+#   - A draft whose changed server test files exceed QUICK_SERVER_TEST_LIMIT:
+#     `quick` skips its changed-server-tests step (with a notice) rather than
+#     time out; `verify` runs the whole server suite once the PR is ready.
 name: CI
 
 on:
   pull_request:
+    # The defaults plus ready_for_review, so marking a draft ready starts the full run.
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -39,41 +60,158 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
-  verify:
+  quick:
+    # Draft pull requests not into main; see the policy at the top of this file.
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft && github.base_ref != 'main'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: ci
-          POSTGRES_PASSWORD: ci
-          POSTGRES_DB: pfa_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U ci"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    timeout-minutes: 15
 
     env:
-      DATABASE_URL: postgres://ci:ci@localhost:5432/pfa_test
+      # Above this many changed server test files, running them would not fit
+      # the 15-minute cap; verify runs the full suite instead (see the top).
+      QUICK_SERVER_TEST_LIMIT: 40
+      TEST_RUN_ID: ci${{ github.run_id }}a${{ github.run_attempt }}
+      TEST_DATABASE_URL: postgres://ci:ci@127.0.0.1:55432/pfa_ci_quick_ci${{ github.run_id }}a${{ github.run_attempt }}_test
+      TEST_DATABASE_ADMIN_URL: postgres://ci:ci@127.0.0.1:55432/postgres
+      NODE_ENV: test
+      GEMINI_API_KEY: ""
+      CRON_SECRET: test-cron-secret-not-for-production
+      SESSION_SECRET: test-session-secret-not-for-production-use
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The pull_request checkout is the merge commit; its first parent is
+          # the base tip, so depth 2 is enough to diff the PR against its base.
+          fetch-depth: 2
+
+      - name: Find test files this pull request adds or modifies
+        id: changed
+        run: |
+          if ! git rev-parse --verify --quiet HEAD^2 >/dev/null; then
+            echo "Expected the pull_request merge commit (two parents) at HEAD" >&2
+            exit 1
+          fi
+          # NUL-separated so no filename can word-split; renames count as added.
+          git diff -z --no-renames --name-only --diff-filter=AM HEAD^1 HEAD > "$RUNNER_TEMP/changed.z"
+          : > "$RUNNER_TEMP/server-tests.z"
+          : > "$RUNNER_TEMP/client-tests.z"
+          while IFS= read -r -d '' file; do
+            case "$file" in
+              server/*.test.ts|server/*.test.tsx|server/*.spec.ts|server/*.spec.tsx)
+                printf '%s\0' "${file#server/}" >> "$RUNNER_TEMP/server-tests.z" ;;
+              client/*.test.ts|client/*.test.tsx|client/*.spec.ts|client/*.spec.tsx)
+                printf '%s\0' "$file" >> "$RUNNER_TEMP/client-tests.z" ;;
+            esac
+          done < "$RUNNER_TEMP/changed.z"
+          server_count=$(tr -cd '\0' < "$RUNNER_TEMP/server-tests.z" | wc -c)
+          client_count=$(tr -cd '\0' < "$RUNNER_TEMP/client-tests.z" | wc -c)
+          echo "Changed server test files: $server_count"; tr '\0' '\n' < "$RUNNER_TEMP/server-tests.z"
+          echo "Changed client test files: $client_count"; tr '\0' '\n' < "$RUNNER_TEMP/client-tests.z"
+          if [ "$server_count" -gt "$QUICK_SERVER_TEST_LIMIT" ]; then
+            echo "::notice title=Changed server tests skipped in quick::$server_count changed server test files exceed $QUICK_SERVER_TEST_LIMIT; verify runs the full server suite when this pull request is ready for review."
+            server_count=0
+          fi
+          echo "server=$server_count" >> "$GITHUB_OUTPUT"
+          echo "client=$client_count" >> "$GITHUB_OUTPUT"
+
+      - name: Start PostgreSQL 18 on the runner's loopback
+        # Same as verify. Only when a server test file changed.
+        if: steps.changed.outputs.server != '0'
+        run: |
+          docker run -d --name pfa-postgres --network host \
+            -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=postgres -e PGPORT=55432 \
+            postgres:18
+          for attempt in $(seq 1 30); do
+            if docker exec pfa-postgres pg_isready -U ci -h 127.0.0.1 -p 55432; then exit 0; fi
+            sleep 2
+          done
+          docker logs pfa-postgres
+          exit 1
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # Static: reads render.yaml, .replit and package.json; no network.
+      - name: Deploy readiness (static)
+        run: npm run deploy:verify
+
+      - name: Type check (must be clean)
+        run: npm run check
+
+      - name: Declare and bootstrap disposable server test target
+        if: steps.changed.outputs.server != '0'
+        run: |
+          export TEST_TARGET_MANIFEST="$RUNNER_TEMP/pfa-quick-target.json"
+          echo "TEST_TARGET_MANIFEST=$TEST_TARGET_MANIFEST" >> "$GITHUB_ENV"
+          node scripts/create-test-target.mjs "$TEST_TARGET_MANIFEST"
+          npm run db:test:setup
+
+      - name: Changed server tests (real Postgres)
+        # vitest --server runs from server/, so the paths are relative to it.
+        if: steps.changed.outputs.server != '0'
+        run: |
+          mapfile -d '' -t files < "$RUNNER_TEMP/server-tests.z"
+          node scripts/check-runtime.mjs
+          node scripts/run-protected-tests.mjs database vitest --server run --passWithNoTests "${files[@]}"
+
+      - name: Changed client tests
+        if: steps.changed.outputs.client != '0'
+        run: |
+          mapfile -d '' -t files < "$RUNNER_TEMP/client-tests.z"
+          node scripts/check-runtime.mjs
+          node scripts/run-protected-tests.mjs unit vitest run --config client/vitest.config.ts --passWithNoTests "${files[@]}"
+
+  verify:
+    # Skipped on draft pull requests (`quick` runs instead), except a pull
+    # request into main, which always gets the full run; unchanged otherwise.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft || github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    # The server suite alone takes about 23 minutes on this branch (6,131 tests
+    # with coverage), so 30 minutes cancelled the job during the client tests.
+    # 20-11-2026: green runs took 55-59 min (server 39-48, client 9-12) and one hit 60, so 90.
+    timeout-minutes: 90
+
+    env:
+      TEST_RUN_ID: ci${{ github.run_id }}a${{ github.run_attempt }}
+      TEST_DATABASE_URL: postgres://ci:ci@127.0.0.1:55432/pfa_ci_verify_ci${{ github.run_id }}a${{ github.run_attempt }}_test
+      TEST_DATABASE_ADMIN_URL: postgres://ci:ci@127.0.0.1:55432/postgres
       NODE_ENV: test
       # Provide test-only placeholders so startup env validation does not fail-open.
       # SESSION_SECRET must be >=32 chars (validateEnv/SCP-324), else app.ts throws at
       # import and every test that loads it via __tests__/fixtures.ts fails to collect.
-      GEMINI_API_KEY: test-key-not-used
+      GEMINI_API_KEY: ""
       CRON_SECRET: test-cron-secret-not-for-production
       SESSION_SECRET: test-session-secret-not-for-production-use
 
     steps:
       - uses: actions/checkout@v7
 
+      - name: Start PostgreSQL 18 on the runner's loopback
+        # The test-target guard only accepts a server that itself reports a
+        # loopback address. A service container published on 127.0.0.1 reports
+        # its bridge address, so run the same image on the host network instead.
+        # Port 55432, not 5432: the guard's own tests treat 5432 as a shared
+        # endpoint that test code must never reach.
+        run: |
+          docker run -d --name pfa-postgres --network host \
+            -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=postgres -e PGPORT=55432 \
+            postgres:18
+          for attempt in $(seq 1 30); do
+            if docker exec pfa-postgres pg_isready -U ci -h 127.0.0.1 -p 55432; then exit 0; fi
+            sleep 2
+          done
+          docker logs pfa-postgres
+          exit 1
+
       - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version-file: .node-version
           cache: npm
 
       - name: Install
@@ -86,13 +224,21 @@ jobs:
           node --test scripts/__tests__/production-audit.test.mjs
           node scripts/check-production-audit.mjs
 
+      - name: Runtime and native dependency compatibility
+        run: npm run test:runtime && npm run test:dependencies && npm run test:targets && npm run test:limiters
+
+      - name: Deploy readiness (static)
+        run: npm run deploy:verify
+
       - name: Type check (must be clean)
         run: npm run check
 
-      - name: Apply versioned migrations to the test DB
-        # CI and production must exercise the same migration history. `db:push`
-        # remains available for local schema exploration only.
-        run: npm run db:migrate
+      - name: Declare and bootstrap disposable server test target
+        run: |
+          export TEST_TARGET_MANIFEST="$RUNNER_TEMP/pfa-verify-target.json"
+          echo "TEST_TARGET_MANIFEST=$TEST_TARGET_MANIFEST" >> "$GITHUB_ENV"
+          node scripts/create-test-target.mjs "$TEST_TARGET_MANIFEST"
+          npm run db:test:setup
 
       - name: Server tests (real Postgres, coverage-gated)
         # --coverage is what arms vitest's coverage.thresholds; without it the
@@ -114,32 +260,24 @@ jobs:
     # Playwright 1.58 cannot install Chromium on ubuntu-26.04, which ubuntu-latest now selects.
     runs-on: ubuntu-24.04
     needs: verify
-    timeout-minutes: 20
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: ci
-          POSTGRES_PASSWORD: ci
-          POSTGRES_DB: pfa_e2e
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U ci"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    # Skipped on draft pull requests, like verify, except into main (the implicit success() still applies).
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft || github.base_ref == 'main'
+    # Smoke (~6 min) + the completion/journey gate on desktop and phone + the
+    # mutation check. Raised from 20 when the gate grew past the smoke list.
+    timeout-minutes: 50
 
     env:
-      DATABASE_URL: postgres://ci:ci@localhost:5432/pfa_e2e
+      TEST_RUN_ID: ci${{ github.run_id }}a${{ github.run_attempt }}
+      TEST_DATABASE_URL: postgres://ci:ci@127.0.0.1:55432/pfa_ci_e2e_ci${{ github.run_id }}a${{ github.run_attempt }}_test
+      TEST_DATABASE_ADMIN_URL: postgres://ci:ci@127.0.0.1:55432/postgres
+      TEST_SERVER_ORIGIN: http://127.0.0.1:5000
       NODE_ENV: test
       PORT: 5000
       CLIENT_URL: http://localhost:5000
       APP_URL: http://localhost:5000
       TRUST_PROXY: "false"
       SHUTDOWN_TIMEOUT_MS: 10000
-      GEMINI_API_KEY: test-key-not-used
+      GEMINI_API_KEY: ""
       CRON_SECRET: test-cron-secret-not-for-production
       SESSION_SECRET: test-session-secret-not-for-production-use
       SMTP_HOST: ""
@@ -152,9 +290,26 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Start PostgreSQL 18 on the runner's loopback
+        # The test-target guard only accepts a server that itself reports a
+        # loopback address. A service container published on 127.0.0.1 reports
+        # its bridge address, so run the same image on the host network instead.
+        # Port 55432, not 5432: the guard's own tests treat 5432 as a shared
+        # endpoint that test code must never reach.
+        run: |
+          docker run -d --name pfa-postgres --network host \
+            -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=postgres -e PGPORT=55432 \
+            postgres:18
+          for attempt in $(seq 1 30); do
+            if docker exec pfa-postgres pg_isready -U ci -h 127.0.0.1 -p 55432; then exit 0; fi
+            sleep 2
+          done
+          docker logs pfa-postgres
+          exit 1
+
       - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version-file: .node-version
           cache: npm
 
       - name: Install
@@ -163,8 +318,48 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Apply versioned migrations to the E2E DB
-        run: npm run db:migrate
+      - name: Declare and bootstrap disposable browser test target
+        run: |
+          export TEST_TARGET_MANIFEST="$RUNNER_TEMP/pfa-e2e-target.json"
+          echo "TEST_TARGET_MANIFEST=$TEST_TARGET_MANIFEST" >> "$GITHUB_ENV"
+          node scripts/create-test-target.mjs "$TEST_TARGET_MANIFEST"
+          npm run db:test:setup
 
       - name: Browser E2E smoke/regression gate
         run: npm run test:e2e:smoke
+
+      # The completion run below empties test-results/, so the smoke failures'
+      # screenshots are uploaded before it starts. PNG screenshots only: page
+      # snapshots and any trace are not uploaded.
+      - name: Upload smoke failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-smoke-failures-${{ github.run_attempt }}
+          path: test-results/**/*.png
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # QA-01 / R20.2: every completion-*.spec.ts and journey-*.spec.ts, matched by
+      # pattern in playwright.completion.config.ts (no hand-kept list), on desktop
+      # Chromium and the 375 px phone project. Runs even when smoke failed, so one
+      # run reports both.
+      - name: Browser E2E submit-and-read-back gate (desktop + phone)
+        if: ${{ !cancelled() }}
+        run: npm run test:e2e:completion
+
+      # R20.2: each mutant corrupts one write; it must fail in that write's
+      # declared read-back, or this step fails. Each spec's mutants keep their
+      # own output dir (test-results/mutants/<spec>).
+      - name: Browser E2E mutation check
+        run: npm run test:e2e:mutation
+
+      # PNG failure screenshots only (completion and mutant runs); synthetic data only.
+      - name: Upload Playwright failure screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-completion-failures-${{ github.run_attempt }}
+          path: test-results/**/*.png
+          retention-days: 7
+          if-no-files-found: ignore

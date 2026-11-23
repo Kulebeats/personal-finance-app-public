@@ -8,22 +8,26 @@
  */
 
 import { db } from "../../db";
-import { tags, transactionTags } from "@shared/schema";
+import type { TransactionType } from "../../utils/withTransaction";
+import { tags } from "@shared/schema";
 import { eq, and, inArray } from "drizzle-orm";
-import { ValidationError, NotFoundError } from "../../utils/errorHandler";
-import { logger } from "../../utils/logger";
-import { transactionRepository } from "../../repositories/TransactionRepository";
+import { ValidationError } from "../../utils/errorHandler";
+import { can } from "../../core/authz/capabilities";
+import { householdRepository } from "../../repositories/HouseholdRepository";
+import { tagWriteRepository } from "../../repositories/TagWriteRepository";
+import { ForbiddenError } from "../../core/errors";
 
 /**
  * R-10: Validate that all tag IDs belong to the specified household
  */
 export async function validateTagIds(
   tagIds: string[],
-  householdId: string
+  householdId: string,
+  executor: typeof db | TransactionType = db
 ): Promise<void> {
   if (!tagIds || tagIds.length === 0) return;
 
-  const validTags = await db
+  const validTags = await executor
     .select({ id: tags.id })
     .from(tags)
     .where(and(eq(tags.householdId, householdId), inArray(tags.id, tagIds)));
@@ -46,36 +50,13 @@ export async function addTagsToTransaction(
   transactionId: string,
   tagIds: string[],
   householdId: string,
-  userId: string
+  userId: string,
+  ipAddress?: string
 ): Promise<void> {
-  // Verify transaction exists and user has access
-  const transaction = await transactionRepository.findByIdWithVisibility(
-    transactionId,
-    householdId,
-    userId
-  );
-
-  if (!transaction) {
-    throw new NotFoundError("Transaction not found");
-  }
-
-  // Validate tags belong to household
-  await validateTagIds(tagIds, householdId);
-
-  // Insert tag links (ignore duplicates)
-  for (const tagId of tagIds) {
-    await db
-      .insert(transactionTags)
-      .values({
-        transactionId,
-        tagId,
-      })
-      .onConflictDoNothing();
-  }
-
-  logger.info("Tags added to transaction", {
-    householdId,
-    transactionId,
-    tagCount: tagIds.length,
-  });
+  const membership = await householdRepository.findMember(householdId, userId);
+  if (!membership || !can(membership.role, "financial.write")) throw new ForbiddenError("Financial write access required");
+  // The shared writer rechecks membership and visibility under locks, and commits
+  // links, exact counter deltas and audit together. Never bypass its conflict path.
+  await tagWriteRepository.write({ householdId, userId, role: membership.role },
+    { operation: "add", transactionId, tagIds }, ipAddress);
 }

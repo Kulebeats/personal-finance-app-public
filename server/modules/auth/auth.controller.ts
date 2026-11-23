@@ -111,7 +111,7 @@ export const authController = {
         throw new ValidationError("Invalid input", validation.error.errors);
       }
 
-      await authService.verifyEmail(validation.data.token);
+      await authService.verifyEmail(validation.data.token, req);
       return success(res, null, 200, { message: "Email verified successfully" });
     } catch (error) {
       next(error);
@@ -129,7 +129,7 @@ export const authController = {
       }
 
       await authService.resendVerification(validation.data.email);
-      return success(res, null, 200, { message: "Verification email sent" });
+      return success(res, null, 200, { message: "If verification is needed, a new link has been requested." });
     } catch (error) {
       next(error);
     }

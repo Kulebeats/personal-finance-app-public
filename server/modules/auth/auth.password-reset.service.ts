@@ -22,17 +22,18 @@
 import { Request } from "express";
 import { randomBytes } from "crypto";
 import { and, eq, isNull, ne } from "drizzle-orm";
-import { passwordResetTokens, users } from "@shared/schema";
+import { passwordResetTokens, users, securityAuditLogs } from "@shared/schema";
 import { userRepository } from "../../repositories/UserRepository";
 import { withTransaction } from "../../utils/withTransaction";
 import { hashPassword, validatePasswordComplexity } from "../../auth";
 import { sendPasswordResetEmail } from "../../services/emailService";
-import { auditService, AuditEventType } from "../../services/AuditService";
+import { AuditEventType } from "../../services/AuditService";
 import { revokeUserSessions } from "../../services/session-revocation";
-import { recordPasswordInHistory } from "./auth.password-history";
+import { assertPasswordNotReused, recordPasswordInHistory } from "./auth.password-history";
 import { logger } from "../../utils/logger";
 import { ValidationError } from "../../core/errors";
 import { sha256Hex } from "../../core/tokenHash";
+import { enqueueSecurityNotice } from "../../services/security-notice";
 
 /** Reset links are valid for 60 minutes. */
 export const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
@@ -80,7 +81,9 @@ export const authPasswordResetService = {
     const tokenHash = sha256Hex(rawToken);
     const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS);
 
-    await withTransaction(async (tx) => {
+    const issued = await withTransaction(async (tx) => {
+      const [current] = await tx.select().from(users).where(eq(users.id, user.id)).for("update");
+      if (!current || current.erasedAt || current.passwordHash.startsWith("!erased!") || current.email !== email || current.email !== user.email) return;
       // Invalidate any previous outstanding tokens for this user.
       await tx
         .update(passwordResetTokens)
@@ -98,25 +101,19 @@ export const authPasswordResetService = {
         expiresAt,
         requestIp: req.ip || null,
       });
+      await tx.insert(securityAuditLogs).values({ eventType: AuditEventType.PASSWORD_RESET_REQUEST, userId: current.id,
+        ipAddress, userAgent, details: { action: "password_reset_request" } });
+      return { recipient: current.email };
     });
-
-    // Audit the request - NEVER include the token or its hash.
-    await auditService.log({
-      eventType: AuditEventType.PASSWORD_RESET_REQUEST,
-      userId: user.id,
-      ipAddress,
-      userAgent,
-      details: { email: user.email },
-    });
+    if (!issued) return;
 
     try {
-      await sendPasswordResetEmail(user.email, rawToken);
-    } catch (error) {
+      await sendPasswordResetEmail(issued.recipient, rawToken);
+    } catch {
       // The response must stay generic; log the failure server-side only.
       logger.error(
         "Failed to send password reset email",
         { userId: user.id.substring(0, 8) + "..." },
-        error as Error,
       );
     }
   },
@@ -147,14 +144,19 @@ export const authPasswordResetService = {
     const tokenHash = sha256Hex(rawToken);
     const newPasswordHash = await hashPassword(newPassword);
 
-    const { userId, oldPasswordHash } = await withTransaction(async (tx) => {
-      // Lock the token row so a concurrent reset with the same token loses.
-      const [tokenRow] = await tx
+    const { userId } = await withTransaction(async (tx) => {
+      // Resolve the subject, then use the same user-first lock order as every
+      // other identity mutation before locking/consuming the token itself.
+      const [candidate] = await tx
         .select()
         .from(passwordResetTokens)
         .where(eq(passwordResetTokens.tokenHash, tokenHash))
-        .for("update")
         .limit(1);
+      if (!candidate) throw new ValidationError(GENERIC_TOKEN_ERROR);
+
+      const [user] = await tx.select().from(users).where(eq(users.id, candidate.userId)).for("update").limit(1);
+      if (!user || user.erasedAt || user.passwordHash.startsWith("!erased!")) throw new ValidationError(GENERIC_TOKEN_ERROR);
+      const [tokenRow] = await tx.select().from(passwordResetTokens).where(eq(passwordResetTokens.id, candidate.id)).for("update").limit(1);
 
       if (
         !tokenRow ||
@@ -165,15 +167,8 @@ export const authPasswordResetService = {
         throw new ValidationError(GENERIC_TOKEN_ERROR);
       }
 
-      const [user] = await tx
-        .select()
-        .from(users)
-        .where(eq(users.id, tokenRow.userId))
-        .for("update")
-        .limit(1);
-      if (!user) {
-        throw new ValidationError(GENERIC_TOKEN_ERROR);
-      }
+      await assertPasswordNotReused(tx, user, newPassword);
+      await recordPasswordInHistory(user.id, user.passwordHash, tx);
 
       // Consume this token and invalidate any other outstanding tokens.
       await tx
@@ -196,6 +191,7 @@ export const authPasswordResetService = {
         .update(users)
         .set({
           passwordHash: newPasswordHash,
+          ...(user.pendingEmail !== null ? { pendingEmail: null, emailVerificationToken: null, emailVerificationExpiry: null } : {}),
           failedLoginAttempts: 0,
           lockedUntil: null,
           lastFailedLoginAt: null,
@@ -211,19 +207,10 @@ export const authPasswordResetService = {
        * is not authenticated, so every session goes.
        */
       await revokeUserSessions(tx, user.id);
+      await enqueueSecurityNotice(tx, user, req, { eventType: "PASSWORD_RESET_COMPLETE", kind: "password_changed",
+        recipients: [user.email], action: "password_reset", sessionsRevoked: true });
 
-      return { userId: user.id, oldPasswordHash: user.passwordHash };
-    });
-
-    // Best-effort bookkeeping outside the critical transaction.
-    await recordPasswordInHistory(userId, oldPasswordHash);
-
-    await auditService.log({
-      eventType: AuditEventType.PASSWORD_RESET_COMPLETE,
-      userId,
-      ipAddress,
-      userAgent,
-      details: { sessionsRevoked: true },
+      return { userId: user.id };
     });
 
     logger.info("Password reset completed", {

@@ -51,6 +51,7 @@ export function RuleEditorModal({
     setApplyToPast,
     previewCount,
     isSaving,
+    saveError,
     enabledConditions,
     enabledActions,
     previewMutation,
@@ -152,10 +153,17 @@ export function RuleEditorModal({
 
         {/* Footer */}
         <div className="px-6 py-4 border-t flex items-center justify-between">
-          <div className="text-sm text-muted-foreground">
-            {enabledConditions.length} condition
-            {enabledConditions.length !== 1 ? "s" : ""}, {enabledActions.length}{" "}
-            action{enabledActions.length !== 1 ? "s" : ""}
+          <div className="space-y-1">
+            {saveError ? (
+              <p role="alert" className="text-sm text-destructive">
+                {saveError}
+              </p>
+            ) : null}
+            <div className="text-sm text-muted-foreground">
+              {enabledConditions.length} condition
+              {enabledConditions.length !== 1 ? "s" : ""}, {enabledActions.length}{" "}
+              action{enabledActions.length !== 1 ? "s" : ""}
+            </div>
           </div>
           <div className="flex gap-2">
             <Button variant="outline" onClick={handleClose}>

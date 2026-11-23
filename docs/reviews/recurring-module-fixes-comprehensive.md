@@ -897,7 +897,7 @@ server/repositories/
 5. ✅ Apply rate limiting to all routes → **ISSUE-REC-NEW-003**
 6. ✅ Remove 5 server-side `as any` casts → **ISSUE-REC-002**
 7. ✅ Fix 4 client-side `any` types → **ISSUE-REC-006, REC-012**
-8. ✅ Update [known-issues.md](c:/Users/kuwan/personal-finance-app/docs/issues/known-issues.md) with all issues
+8. ✅ Update [known-issues.md](c:/Users/USER/personal-finance-app/docs/issues/known-issues.md) with all issues
 
 **Estimated Effort:** 2-3 days
 

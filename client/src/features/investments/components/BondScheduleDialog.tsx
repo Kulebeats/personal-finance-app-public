@@ -1,6 +1,7 @@
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -32,7 +33,9 @@ import { GrzBond, useMarkGrzPaymentPaid } from "@/hooks/useGrzSecurities";
 import { useFormat } from "@/hooks/use-format";
 import { useAccounts } from "@/hooks/useAccounts";
 import { toMoneyNumber } from "@/lib/money";
+import { formatDisplayDate } from "@/lib/dates";
 import { useState } from "react";
+import { PrincipalReceiptAction } from "./PrincipalReceiptForm";
 
 interface BondScheduleDialogProps {
   bond: GrzBond | null;
@@ -79,13 +82,14 @@ export function BondScheduleDialog({
       <DialogContent className="sm:max-w-[700px] max-h-[80vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Payment Schedule: {bond.bondName}</DialogTitle>
+          <DialogDescription>Payment amounts are in ZMW.</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-4 text-sm">
             <div>
-              <span className="text-muted-foreground">Face Value:</span>{" "}
-              {formatCurrency(toMoneyNumber(bond.faceValue))}
+              <span className="text-muted-foreground">Face Value (ZMW):</span>{" "}
+              {formatCurrency(toMoneyNumber(bond.faceValue), "ZMW")}
             </div>
             <div>
               <span className="text-muted-foreground">Coupon Rate:</span>{" "}
@@ -93,14 +97,18 @@ export function BondScheduleDialog({
             </div>
           </div>
 
+          <p className="text-xs text-muted-foreground" data-testid="grz-wht-policy-label">
+            Withholding (WHT) uses a policy default, pending OI-03. It is not a statement of current tax law.
+          </p>
+
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>Date</TableHead>
                 <TableHead>Type</TableHead>
-                <TableHead className="text-right">Gross</TableHead>
-                <TableHead className="text-right">WHT</TableHead>
-                <TableHead className="text-right">Net</TableHead>
+                <TableHead className="text-right">Gross (ZMW)</TableHead>
+                <TableHead className="text-right">WHT (ZMW)</TableHead>
+                <TableHead className="text-right">Net (ZMW)</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="text-right">Action</TableHead>
               </TableRow>
@@ -109,13 +117,11 @@ export function BondScheduleDialog({
               {sortedPayments?.map((payment) => (
                 <TableRow key={payment.id}>
                   <TableCell>
-                    {new Date(payment.paymentDate).toLocaleDateString()}
+                    {formatDisplayDate(payment.paymentDate)}
                     {payment.actualPaymentDate && (
                       <div className="text-xs text-muted-foreground">
                         Paid:{" "}
-                        {new Date(
-                          payment.actualPaymentDate
-                        ).toLocaleDateString()}
+                        {formatDisplayDate(payment.actualPaymentDate)}
                       </div>
                     )}
                   </TableCell>
@@ -123,13 +129,13 @@ export function BondScheduleDialog({
                     {payment.paymentType}
                   </TableCell>
                   <TableCell className="text-right">
-                    {formatCurrency(toMoneyNumber(payment.grossAmount))}
+                    {formatCurrency(toMoneyNumber(payment.grossAmount), "ZMW")}
                   </TableCell>
                   <TableCell className="text-right text-red-500">
-                    -{formatCurrency(toMoneyNumber(payment.withholdingTax))}
+                    {payment.withholdingTax ? `-${formatCurrency(toMoneyNumber(payment.withholdingTax), "ZMW")}` : "Not recorded"}
                   </TableCell>
                   <TableCell className="text-right font-medium">
-                    {formatCurrency(toMoneyNumber(payment.netAmount))}
+                    {formatCurrency(toMoneyNumber(payment.netAmount), "ZMW")}
                   </TableCell>
                   <TableCell>
                     <Badge
@@ -146,7 +152,9 @@ export function BondScheduleDialog({
                     </Badge>
                   </TableCell>
                   <TableCell className="text-right">
-                    {payment.status !== "paid" && (
+                    {payment.paymentType === "principal" && <PrincipalReceiptAction payment={payment} active={bond.status === "active"} />}
+                    {/* The server pays only a scheduled coupon of an active bond; a sale cancels later ones. */}
+                    {payment.status === "scheduled" && bond.status === "active" && payment.paymentType === "coupon" && (
                       <Popover
                         open={popoverOpen === payment.id}
                         onOpenChange={(isOpen) =>
@@ -165,7 +173,7 @@ export function BondScheduleDialog({
                             </h4>
                             <p className="text-sm text-muted-foreground">
                               Select account to deposit{" "}
-                              {formatCurrency(toMoneyNumber(payment.netAmount))}
+                              {formatCurrency(toMoneyNumber(payment.netAmount), "ZMW")}
                             </p>
                             <div className="grid gap-2">
                               <Label htmlFor="account">Account</Label>
@@ -180,7 +188,7 @@ export function BondScheduleDialog({
                                   {accounts?.map((acc) => (
                                     <SelectItem key={acc.id} value={acc.id}>
                                       {acc.name} (
-                                      {formatCurrency(toMoneyNumber(acc.balance))})
+                                      {formatCurrency(toMoneyNumber(acc.balance), acc.currency)})
                                     </SelectItem>
                                   ))}
                                 </SelectContent>

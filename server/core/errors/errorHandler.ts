@@ -11,6 +11,7 @@ import { Request, Response, NextFunction } from "express";
 import { ZodError } from "zod";
 import { HttpError } from "./HttpError";
 import { CalculationError } from "../calculations/errors";
+import { MISSING_FX_RATE_STATUS, logMissingFxRate, missingFxRateBody } from "./missingFxRate";
 import { logger } from "../../utils/logger";
 
 export function errorHandler(
@@ -25,6 +26,14 @@ export function errorHandler(
       logger.error("Non-operational error", { route: req.path }, err);
     }
     res.status(err.statusCode).json(err.toJSON());
+    return;
+  }
+
+  // R12: a missing exchange rate is missing financial data (422 naming the pair).
+  const missingRate = missingFxRateBody(err);
+  if (missingRate) {
+    logMissingFxRate(req, missingRate);
+    res.status(MISSING_FX_RATE_STATUS).json(missingRate);
     return;
   }
 

@@ -7,16 +7,24 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import Decimal from "decimal.js";
 import type { AttributionResult } from "@/hooks/useInvestments";
+import { moneyValueToDecimal } from "@/lib/money";
 
 interface FXAttributionTableProps {
   attribution: AttributionResult[];
-  formatCurrency: (value: number, currency?: string) => string;
+  /** Formats an attribution amount in its unit, FX_ATTRIBUTION_CURRENCY (A-31). */
+  formatAmount: (value: Decimal) => string;
+}
+
+/** Share of the absolute total gain, in whole percent (Decimal, half up). */
+function shareOf(part: Decimal, total: Decimal): number {
+  return part.dividedBy(total.abs()).times(100).toDecimalPlaces(0, Decimal.ROUND_HALF_UP).toNumber();
 }
 
 export function FXAttributionTable({
   attribution,
-  formatCurrency,
+  formatAmount,
 }: FXAttributionTableProps) {
   return (
     <Card>
@@ -36,7 +44,11 @@ export function FXAttributionTable({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {attribution.map((item) => (
+            {attribution.map((item) => {
+              const totalGain = moneyValueToDecimal(item.totalGain);
+              const assetReturn = moneyValueToDecimal(item.assetReturn);
+              const fxReturn = moneyValueToDecimal(item.fxReturn);
+              return (
               <TableRow key={item.holdingId}>
                 <TableCell className="font-medium">
                   {item.symbol}
@@ -47,38 +59,34 @@ export function FXAttributionTable({
                 <TableCell>{item.currency}</TableCell>
                 <TableCell
                   className={`text-right ${
-                    item.totalGain >= 0 ? "text-emerald-600" : "text-rose-600"
+                    totalGain.isNegative() ? "text-rose-600" : "text-emerald-600"
                   }`}
                 >
-                  {formatCurrency(item.totalGain)}
+                  {formatAmount(totalGain)}
                   <div className="text-xs text-muted-foreground">
                     {item.totalReturnPercent.toFixed(1)}%
                   </div>
                 </TableCell>
                 <TableCell className="text-right font-medium">
-                  {formatCurrency(item.assetReturn)}
+                  {formatAmount(assetReturn)}
                 </TableCell>
                 <TableCell
                   className={`text-right ${
-                    item.fxReturn >= 0 ? "text-emerald-600" : "text-rose-600"
+                    fxReturn.isNegative() ? "text-rose-600" : "text-emerald-600"
                   }`}
                 >
-                  {formatCurrency(item.fxReturn)}
+                  {formatAmount(fxReturn)}
                 </TableCell>
                 <TableCell className="text-right text-xs text-muted-foreground">
-                  {Math.abs(item.totalGain) > 0 ? (
+                  {!totalGain.isZero() ? (
                     <div className="flex justify-end gap-1">
                       <span className="text-blue-500" title="Asset">
-                        {Math.round(
-                          (item.assetReturn / Math.abs(item.totalGain)) * 100
-                        )}
+                        {shareOf(assetReturn, totalGain)}
                         %
                       </span>
                       /
                       <span className="text-amber-500" title="FX">
-                        {Math.round(
-                          (item.fxReturn / Math.abs(item.totalGain)) * 100
-                        )}
+                        {shareOf(fxReturn, totalGain)}
                         %
                       </span>
                     </div>
@@ -87,7 +95,8 @@ export function FXAttributionTable({
                   )}
                 </TableCell>
               </TableRow>
-            ))}
+              );
+            })}
           </TableBody>
         </Table>
       </CardContent>

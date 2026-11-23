@@ -15,7 +15,7 @@ This document provides a consolidated view of all implementation plans and their
 
 ### 1. current-implementation-plan.md
 **Status:** ✅ SUBSTANTIALLY COMPLETE
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/docs/architecture/current-implementation-plan.md`
+**File:** `/mnt/c/Users/USER/personal-finance-app/docs/architecture/current-implementation-plan.md`
 
 #### Completion Status
 - [x] **Phase 1: Core Correctness (P0)** - ✅ COMPLETE
@@ -46,7 +46,7 @@ This document provides a consolidated view of all implementation plans and their
 
 ### 2. PHASE5_implementation-plan.md
 **Status:** ✅ SUBSTANTIALLY COMPLETE
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/docs/architecture/PHASE5_implementation-plan.md`
+**File:** `/mnt/c/Users/USER/personal-finance-app/docs/architecture/PHASE5_implementation-plan.md`
 
 #### Page File Status (Original → Current LOC)
 | Page | Original | Current | Target | Status |
@@ -77,7 +77,7 @@ This document provides a consolidated view of all implementation plans and their
 
 ### 3. cashflow-implementation-plan.md
 **Status:** ✅ COMPLETE
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/docs/architecture/cashflow-implementation-plan.md`
+**File:** `/mnt/c/Users/USER/personal-finance-app/docs/architecture/cashflow-implementation-plan.md`
 
 #### All Phases Complete
 - [x] **Phase 1: Foundation Fixes** - All 7 fixes implemented
@@ -98,7 +98,7 @@ This document provides a consolidated view of all implementation plans and their
 
 ### 4. goals-3-implementation-plan.md
 **Status:** ✅ PHASE 1-2 COMPLETE, PHASE 3 SUBSTANTIALLY COMPLETE, PHASE 4-5 IN PLANNING
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/docs/architecture/goals-3-implementation-plan.md`
+**File:** `/mnt/c/Users/USER/personal-finance-app/docs/architecture/goals-3-implementation-plan.md`
 
 #### Phase Status
 - [x] **Phase 1: Core Save Up Goals** - ✅ COMPLETE
@@ -141,7 +141,7 @@ This document provides a consolidated view of all implementation plans and their
 
 ### 5. RECEIPT_SCANNING_implementation-plan.md
 **Status:** ✅ SUBSTANTIALLY COMPLETE
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/docs/architecture/RECEIPT_SCANNING_implementation-plan.md`
+**File:** `/mnt/c/Users/USER/personal-finance-app/docs/architecture/RECEIPT_SCANNING_implementation-plan.md`
 
 #### Phase Status
 - [x] **Phase 1: Database Schema Changes** - ✅ COMPLETE
@@ -179,7 +179,7 @@ This document provides a consolidated view of all implementation plans and their
 
 ### 6. RECURRING_TRANSACTIONS_implementation-plan.md
 **Status:** ✅ SUBSTANTIALLY COMPLETE
-**File:** `/mnt/c/Users/kuwan/personal-finance-app/docs/architecture/RECURRING_TRANSACTIONS_implementation-plan.md`
+**File:** `/mnt/c/Users/USER/personal-finance-app/docs/architecture/RECURRING_TRANSACTIONS_implementation-plan.md`
 
 #### Priority Status
 - [x] **Priority 1: Core Enhancements (Backend)** - ✅ COMPLETE
@@ -228,7 +228,7 @@ This document provides a consolidated view of all implementation plans and their
 ## Architecture Summary
 
 ### Server Architecture
-**Location:** `/mnt/c/Users/kuwan/personal-finance-app/server/modules/`
+**Location:** `/mnt/c/Users/USER/personal-finance-app/server/modules/`
 
 **Active Modules (20):**
 - accounts
@@ -258,7 +258,7 @@ All modules follow consistent pattern:
 - `__tests__/` - Test suites
 
 ### Client Architecture
-**Location:** `/mnt/c/Users/kuwan/personal-finance-app/client/src/features/`
+**Location:** `/mnt/c/Users/USER/personal-finance-app/client/src/features/`
 
 **Active Features (10):**
 - accounts

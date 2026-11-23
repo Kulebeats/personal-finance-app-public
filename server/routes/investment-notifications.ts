@@ -2,29 +2,22 @@ import { Router } from "express";
 import { db } from "../db";
 import {
   userNotificationPreferences,
-  investmentNotificationTypeEnum,
 } from "@shared/schema";
 import { eq, and, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { logger } from "../utils/logger";
-import { generalLimiter } from "../middleware/rateLimit";
 import { businessAuditService } from "../services/BusinessAuditService";
-import { householdRepository } from "../repositories/HouseholdRepository";
+import { resolveRequestHousehold } from "../core/authz/session-preconditions";
 import { requireAuth } from "../auth";
+import { INVESTMENT_NOTIFICATION_PREFERENCE_TYPES } from "@shared/notificationTypes";
+import { writeNotificationPreferences } from "../repositories/UserNotificationPreferences";
 
 const router = Router();
 
 // SEC-AUTH-001: Apply authentication and rate limiting to all routes
 router.use(requireAuth);
-router.use(generalLimiter);
 
-const INVESTMENT_NOTIFICATION_TYPES = [
-  "maturity_reminder",
-  "coupon_payment",
-  "price_alert",
-  "stale_price",
-  "auction_results",
-];
+const INVESTMENT_NOTIFICATION_TYPES = [...INVESTMENT_NOTIFICATION_PREFERENCE_TYPES];
 
 // GET /api/investments/notifications/preferences
 router.get("/preferences", async (req, res) => {
@@ -55,7 +48,7 @@ router.get("/preferences", async (req, res) => {
         inAppEnabled: existing?.inAppEnabled ?? true,
         emailEnabled: existing?.emailEnabled ?? true,
         pushEnabled: existing?.pushEnabled ?? false,
-        thresholdAmount: existing?.thresholdAmount || null,
+        thresholdAmount: existing?.thresholdAmount ?? null,
       };
     });
 
@@ -71,9 +64,7 @@ router.get("/preferences", async (req, res) => {
 });
 
 const updatePreferenceSchema = z.object({
-  notificationType: z.enum(
-    INVESTMENT_NOTIFICATION_TYPES as [string, ...string[]]
-  ),
+  notificationType: z.enum(INVESTMENT_NOTIFICATION_PREFERENCE_TYPES),
   inAppEnabled: z.boolean().optional(),
   emailEnabled: z.boolean().optional(),
   pushEnabled: z.boolean().optional(),
@@ -86,50 +77,27 @@ router.put("/preferences", async (req, res) => {
 
   try {
     const data = updatePreferenceSchema.parse(req.body);
+    const [{ previous, updated }] = await writeNotificationPreferences(req.user!.id, [{
+      ...data,
+      thresholdAmount: data.thresholdAmount === undefined
+        ? undefined
+        : data.thresholdAmount === null ? null : String(data.thresholdAmount),
+    }], { inAppEnabled: true, emailEnabled: true, pushEnabled: false });
 
-    const existing = await db
-      .select()
-      .from(userNotificationPreferences)
-      .where(
-        and(
-          eq(userNotificationPreferences.userId, req.user!.id),
-          eq(
-            userNotificationPreferences.notificationType,
-            data.notificationType
-          )
-        )
-      )
-      .limit(1);
-
-    if (existing.length > 0) {
-      // Update
-      const [updated] = await db
-        .update(userNotificationPreferences)
-        .set({
-          inAppEnabled: data.inAppEnabled,
-          emailEnabled: data.emailEnabled,
-          pushEnabled: data.pushEnabled,
-          thresholdAmount: data.thresholdAmount
-            ? String(data.thresholdAmount)
-            : null,
-          updatedAt: new Date(),
-        })
-        .where(eq(userNotificationPreferences.id, existing[0].id))
-        .returning();
-
-      // Audit logging (non-blocking)
-      try {
-        const household = await householdRepository.findByUserId(req.user!.id);
-        if (household) {
+    // Preserve the route's non-blocking audit semantics after its transaction commits.
+    try {
+      const household = await resolveRequestHousehold(req, req.user!.id);
+      if (household) {
+        if (previous) {
           await businessAuditService.logUpdate({
             householdId: household.id,
             userId: req.user!.id,
             entityType: "user",
-            entityId: existing[0].id,
+            entityId: previous.id,
             oldValue: {
-              inAppEnabled: existing[0].inAppEnabled,
-              emailEnabled: existing[0].emailEnabled,
-              pushEnabled: existing[0].pushEnabled,
+              inAppEnabled: previous.inAppEnabled,
+              emailEnabled: previous.emailEnabled,
+              pushEnabled: previous.pushEnabled,
             },
             newValue: {
               inAppEnabled: data.inAppEnabled,
@@ -139,37 +107,12 @@ router.put("/preferences", async (req, res) => {
             ipAddress: businessAuditService.getIpAddress(req),
             metadata: { action: "investment_notification_preference_update" },
           });
-        }
-      } catch {
-        // Non-blocking - audit failure shouldn't affect user flow
-      }
-
-      res.json(updated);
-    } else {
-      // Insert
-      const [inserted] = await db
-        .insert(userNotificationPreferences)
-        .values({
-          userId: req.user!.id,
-          notificationType: data.notificationType,
-          inAppEnabled: data.inAppEnabled ?? true,
-          emailEnabled: data.emailEnabled ?? true,
-          pushEnabled: data.pushEnabled ?? false,
-          thresholdAmount: data.thresholdAmount
-            ? String(data.thresholdAmount)
-            : null,
-        })
-        .returning();
-
-      // Audit logging (non-blocking)
-      try {
-        const household = await householdRepository.findByUserId(req.user!.id);
-        if (household) {
+        } else {
           await businessAuditService.logCreate({
             householdId: household.id,
             userId: req.user!.id,
             entityType: "user",
-            entityId: inserted.id,
+            entityId: updated.id,
             newValue: {
               notificationType: data.notificationType,
               inAppEnabled: data.inAppEnabled ?? true,
@@ -180,12 +123,12 @@ router.put("/preferences", async (req, res) => {
             metadata: { action: "investment_notification_preference_create" },
           });
         }
-      } catch {
-        // Non-blocking - audit failure shouldn't affect user flow
       }
-
-      res.json(inserted);
+    } catch {
+      // Non-blocking - audit failure shouldn't affect user flow
     }
+
+    res.json(updated);
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: error.errors });

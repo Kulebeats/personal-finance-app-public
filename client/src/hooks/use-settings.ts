@@ -1,10 +1,21 @@
+import { toastActionError } from "@/lib/actionErrorToast";
+import { protectedFetch } from "@/lib/protected-fetch";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useRef } from "react";
+import { userPreferencesEnvelopeSchema, userPreferencesPatchSchema, type UserPreferencesResponse, type UserPreferencesPatch } from "@shared/user-preferences";
 import { toast } from "sonner";
+import { announceRuleSave, type RuleApplyOutcome } from "@/lib/ruleApplyOutcome";
 import type { DashboardWidgetsPreferences } from "@shared/schema";
+import type { HouseholdMemberDto as HouseholdMember, HouseholdRole } from "@shared/household-members";
 // apiCall attaches x-csrf-token to every mutating request (and self-heals on a
 // stale token), so all mutations below MUST go through it — raw fetch 403s in
 // any real browser session (server/app.ts CSRF middleware).
 import { apiCall, securityApi } from "@/lib/api";
+import { throwIfResNotOk } from "@/lib/queryClient";
+import { invalidateSession } from "@/lib/session";
+import { assertOperationLifetime, captureOperationLifetime, type OperationLifetime } from "@/lib/operation-lifetime";
+import Decimal from "decimal.js";
+import type { MoneyDto } from "@shared/money";
 
 // V7 response envelope (server/core/http success()).
 interface Envelope<T> {
@@ -47,7 +58,6 @@ export interface UserProfile {
   employmentStatus: string | null;
   investmentGoal: string | null;
   riskTolerance: string | null;
-  salaryRangeEncrypted: string | null;
   // Metadata
   profileCompleteness: number;
   // Timestamps
@@ -57,43 +67,43 @@ export interface UserProfile {
 }
 
 export interface Address {
-  addressLine1: string;
+  addressLine1?: string;
   addressLine2?: string;
-  city: string;
+  city?: string;
   state?: string;
   postalCode?: string;
   country: string;
 }
 
+/**
+ * Exactly the keys PUT /api/settings/profile accepts
+ * (server/modules/settings/settings.profile.validation.ts). The server refuses
+ * any other key with a 400. Picture and banner are not saved through this
+ * endpoint; NRC is accepted only while NRC_FIELD_MODE is "editable".
+ */
 export interface UpdateProfileData {
   fullName?: string;
   firstName?: string;
   lastName?: string;
   displayName?: string;
-  birthday?: string;
+  birthday?: string | null;
   birthdayHideYear?: boolean;
-  gender?: string;
-  phoneNumber?: string;
-  phoneNumberMobile?: string;
-  phoneNumberWork?: string;
-  phoneNumberHome?: string;
-  address?: Address;
-  occupation?: string;
-  occupationCustom?: boolean;
-  company?: string;
   timezone?: string;
-  profilePictureUrl?: string | null;
-  bannerUrl?: string | null;
   bio?: string;
-  socialLinks?: Record<string, string>;
-  nrc?: string;
-  annualIncome?: string;
+  gender?: string;
+  phoneNumberMobile?: string | null;
+  phoneNumberWork?: string | null;
+  phoneNumberHome?: string | null;
+  occupation?: string;
+  address?: Address;
+  annualIncome?: string | null;
   incomeFrequency?: string;
   employmentStatus?: string;
   investmentGoal?: string;
   riskTolerance?: string;
-  salaryRangeEncrypted?: string;
-  profileCompleteness?: number;
+  /** "" clears the stored NRC. */
+  nrc?: string;
+  socialLinks?: Record<string, string | undefined>;
 }
 
 export interface DisplaySettings {
@@ -130,22 +140,11 @@ export interface UpdateDisplaySettingsData {
 
 // API functions
 async function fetchProfile(): Promise<UserProfile> {
-  const response = await fetch("/api/settings/profile", {
+  const response = await protectedFetch("/api/settings/profile", {
     credentials: "include",
   });
 
-  if (!response.ok) {
-    let errorBody: { error?: { message?: string } } | null = null;
-    try {
-      errorBody = await response.json();
-    } catch (error) {
-      errorBody = null;
-    }
-    const message = errorBody?.error?.message || "Failed to fetch profile";
-    const error = new Error(message) as Error & { status?: number };
-    error.status = response.status;
-    throw error;
-  }
+  await throwIfResNotOk(response);
 
   const data = await response.json();
   return data.data.profile;
@@ -179,18 +178,31 @@ async function deleteProfilePicture(): Promise<UserProfile> {
   return result.data.profile;
 }
 
+function displaySettingsResponse(value: unknown): DisplaySettings {
+  const envelope = value as Envelope<{ settings?: DisplaySettings }> | null;
+  const settings = envelope?.data?.settings;
+  const layout = settings?.dashboardWidgets;
+  const fields = ["theme", "currency", "locale", "timezone", "numberFormat", "dateFormat", "currencyPosition", "firstDayOfWeek", "viewMode"] as const;
+  if (envelope?.success !== true || !settings || typeof settings !== "object" || Array.isArray(settings) || typeof settings.userId !== "string" ||
+    fields.some(field => settings[field] != null && typeof settings[field] !== "string") ||
+    (layout != null && (typeof layout !== "object" || Array.isArray(layout) ||
+      ((Object.hasOwn(layout, "widgets") || Object.hasOwn(layout, "version")) &&
+        (!Number.isFinite(layout.version) || !Array.isArray(layout.widgets) ||
+          layout.widgets.some(widget => !widget || typeof widget !== "object" || typeof widget.id !== "string" || typeof widget.enabled !== "boolean" || (widget.label !== undefined && typeof widget.label !== "string"))))))) {
+    throw new Error("Invalid display settings response. Please retry.");
+  }
+  return settings;
+}
+
 async function fetchDisplaySettings(): Promise<DisplaySettings> {
-  const response = await fetch("/api/settings/display", {
+  const response = await protectedFetch("/api/settings/display", {
     credentials: "include",
   });
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Failed to fetch display settings");
-  }
+  await throwIfResNotOk(response);
 
   const data = await response.json();
-  return data.data.settings;
+  return displaySettingsResponse(data);
 }
 
 async function updateDisplaySettings(
@@ -200,7 +212,16 @@ async function updateDisplaySettings(
     "/settings/display",
     { method: "PUT", body: JSON.stringify(data) },
   );
-  return result.data.settings;
+  const settings = displaySettingsResponse(result);
+  if (data.dashboardWidgets) {
+    const stored = settings.dashboardWidgets;
+    const sent = data.dashboardWidgets;
+    if (!stored || stored.version !== sent.version || !Array.isArray(stored.widgets) || stored.widgets.length !== sent.widgets.length ||
+      !stored.widgets.every((widget, index) => widget.id === sent.widgets[index].id && widget.label === sent.widgets[index].label && widget.enabled === sent.widgets[index].enabled)) {
+      throw new Error("Dashboard layout was not acknowledged. Retry saving.");
+    }
+  }
+  return settings;
 }
 
 // Hooks
@@ -222,7 +243,7 @@ export function useUpdateProfile() {
       toast.success("Profile updated successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to update profile");
+      toastActionError("Failed to update profile", error);
     },
   });
 }
@@ -237,7 +258,7 @@ export function useUploadProfilePicture() {
       toast.success("Profile picture uploaded successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to upload profile picture");
+      toastActionError("Failed to upload profile picture", error);
     },
   });
 }
@@ -252,7 +273,7 @@ export function useDeleteProfilePicture() {
       toast.success("Profile picture removed");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to remove profile picture");
+      toastActionError("Failed to remove profile picture", error);
     },
   });
 }
@@ -275,7 +296,7 @@ export function useUpdateDisplaySettings() {
       toast.success("Display settings updated successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to update display settings");
+      toastActionError("Failed to update display settings", error);
     },
   });
 }
@@ -314,20 +335,68 @@ export interface UpdateNotificationPreferencesData {
   }>;
 }
 
+function notificationThresholdDecimal(value: unknown): Decimal | null {
+  if (typeof value !== "string" || !/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(value)) return null;
+  try {
+    const amount = new Decimal(value);
+    return amount.isFinite() ? amount : null;
+  } catch {
+    return null;
+  }
+}
+
+function isNotificationPreference(value: unknown): value is NotificationPreference {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  return ["id", "userId", "notificationType", "createdAt", "updatedAt"].every(field => {
+    const entry = row[field];
+    return typeof entry === "string" && entry.trim().length > 0;
+  }) && ["inAppEnabled", "emailEnabled", "pushEnabled"].every(field => typeof row[field] === "boolean")
+    && (row.thresholdAmount === null || notificationThresholdDecimal(row.thresholdAmount) !== null);
+}
+
+function validateNotificationAcknowledgement(
+  data: UpdateNotificationPreferencesData,
+  preferences: unknown,
+  subject?: string,
+): NotificationPreference[] {
+  const error = new Error("Invalid notification preferences response");
+  if (!Array.isArray(preferences)) throw error;
+  const byType = new Map<string, NotificationPreference>();
+  for (const row of preferences) {
+    if (!isNotificationPreference(row) || byType.has(row.notificationType)
+      || (subject !== undefined && row.userId !== subject)) throw error;
+    byType.set(row.notificationType, row);
+  }
+  for (const patch of data.preferences) {
+    const row = byType.get(patch.notificationType);
+    if (!row) throw error;
+    for (const field of ["inAppEnabled", "emailEnabled", "pushEnabled"] as const) {
+      if (patch[field] !== undefined && row[field] !== patch[field]) throw error;
+    }
+    if (patch.thresholdAmount !== undefined) {
+      if (patch.thresholdAmount === null) {
+        if (row.thresholdAmount !== null) throw error;
+      } else {
+        const submitted = notificationThresholdDecimal(patch.thresholdAmount);
+        const persisted = notificationThresholdDecimal(row.thresholdAmount);
+        if (!submitted || !persisted || !submitted.equals(persisted)) throw error;
+      }
+    }
+  }
+  return Array.from(byType.values());
+}
+
 // API functions for notifications
 async function fetchNotificationPreferences(): Promise<
   NotificationPreference[]
 > {
-  const response = await fetch("/api/settings/notifications", {
+  const response = await protectedFetch("/api/settings/notifications", {
     credentials: "include",
   });
+  await throwIfResNotOk(response);
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(
-      error.error?.message || "Failed to fetch notification preferences",
-    );
-  }
+
 
   const data = await response.json();
   return data.data.preferences;
@@ -335,11 +404,13 @@ async function fetchNotificationPreferences(): Promise<
 
 async function updateNotificationPreferences(
   data: UpdateNotificationPreferencesData,
+  operation: OperationLifetime | null = captureOperationLifetime(),
 ): Promise<NotificationPreference[]> {
   const result = await apiCall<
     Envelope<{ preferences: NotificationPreference[] }>
-  >("/settings/notifications", { method: "PUT", body: JSON.stringify(data) });
-  return result.data.preferences;
+  >("/settings/notifications", { method: "PUT", body: JSON.stringify(data) }, true, false, operation);
+  assertOperationLifetime(operation);
+  return validateNotificationAcknowledgement(data, result?.data?.preferences, operation?.expectations?.subject);
 }
 
 // Hooks for notifications
@@ -355,13 +426,21 @@ export function useUpdateNotificationPreferences() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: updateNotificationPreferences,
-    onSuccess: (data) => {
-      queryClient.setQueryData(["notificationPreferences"], data);
+    mutationFn: (data: UpdateNotificationPreferencesData) => updateNotificationPreferences(data),
+    onMutate: () => captureOperationLifetime(),
+    onSuccess: (data, _variables, operation) => {
+      if (captureOperationLifetime() !== operation) return;
+      assertOperationLifetime(operation);
+      queryClient.setQueryData<NotificationPreference[]>(["notificationPreferences"], previous => {
+        const merged = [...(previous ?? [])];
+        for (const row of data) {
+          const index = merged.findIndex(pref => pref.notificationType === row.notificationType);
+          if (index === -1) merged.push(row);
+          else merged[index] = row;
+        }
+        return merged;
+      });
       toast.success("Notification preferences updated successfully");
-    },
-    onError: (error: Error) => {
-      toast.error(error.message || "Failed to update notification preferences");
     },
   });
 }
@@ -388,9 +467,10 @@ export function useChangePassword() {
     mutationFn: changePassword,
     onSuccess: () => {
       toast.success("Password changed successfully");
+      invalidateSession();
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to change password");
+      toastActionError("Failed to change password", error);
     },
   });
 }
@@ -434,6 +514,8 @@ export interface Household {
   name: string;
   currency: string;
   fiscalYearStartMonth: number;
+  /** IANA zone the owner chose for the household calendar; null until set. */
+  timeZone?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -519,10 +601,11 @@ export function useCreateHousehold() {
     mutationFn: createHousehold,
     onSuccess: (data) => {
       queryClient.setQueryData(["household"], data);
+      invalidateSession();
       toast.success("Household created successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to create household");
+      toastActionError("Failed to create household", error);
     },
   });
 }
@@ -543,7 +626,7 @@ export function useUpdateHousehold() {
       toast.success("Household updated successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to update household");
+      toastActionError("Failed to update household", error);
     },
   });
 }
@@ -552,33 +635,16 @@ export function useUpdateHousehold() {
 // HOUSEHOLD MEMBERS
 // ============================================================================
 
-export interface HouseholdMember {
-  id: string;
-  householdId: string;
-  userId: string;
-  role: string;
-  joinedAt: string;
-  lastActiveAt: string | null;
-  user: {
-    id: string;
-    username: string;
-    email: string;
-    fullName: string | null;
-    profilePictureUrl: string | null;
-    lastLoginAt: string | null;
-  } | null;
-}
+// AH-05: the flat GET /api/household/members DTO, shared with the server.
+export type { HouseholdMemberDto as HouseholdMember } from "@shared/household-members";
 
 // API functions for members
 async function fetchHouseholdMembers(): Promise<HouseholdMember[]> {
-  const response = await fetch("/api/household/members", {
+  const response = await protectedFetch("/api/household/members", {
     credentials: "include",
   });
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Failed to fetch members");
-  }
+  await throwIfResNotOk(response);
 
   const data = await response.json();
   return data.data.members;
@@ -586,13 +652,12 @@ async function fetchHouseholdMembers(): Promise<HouseholdMember[]> {
 
 async function updateMemberRole(data: {
   userId: string;
-  role: string;
-}): Promise<HouseholdMember> {
-  const result = await apiCall<Envelope<{ member: HouseholdMember }>>(
+  role: HouseholdRole;
+}): Promise<void> {
+  await apiCall<Envelope<unknown>>(
     `/household/members/${data.userId}/role`,
     { method: "PUT", body: JSON.stringify({ role: data.role }) },
   );
-  return result.data.member;
 }
 
 async function removeMember(userId: string): Promise<void> {
@@ -642,13 +707,14 @@ export function useUpdateMemberRole() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["householdMembers"] });
       toast.success("Member role updated successfully");
+      invalidateSession();
     },
     onError: (error: Error, _variables, context) => {
       // Rollback to previous value on error
       if (context?.previousMembers) {
         queryClient.setQueryData(["householdMembers"], context.previousMembers);
       }
-      toast.error(error.message || "Failed to update member role");
+      toastActionError("Failed to update member role", error);
     },
   });
 }
@@ -679,13 +745,14 @@ export function useRemoveMember() {
     },
     onSuccess: () => {
       toast.success("Member removed successfully");
+      invalidateSession();
     },
     onError: (error: Error, _userId, context) => {
       // Rollback on error
       if (context?.previousMembers) {
         queryClient.setQueryData(["householdMembers"], context.previousMembers);
       }
-      toast.error(error.message || "Failed to remove member");
+      toastActionError("Failed to remove member", error);
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["householdMembers"] });
@@ -693,30 +760,7 @@ export function useRemoveMember() {
   });
 }
 
-async function addMember(data: {
-  emailOrUsername: string;
-  role: string;
-}): Promise<void> {
-  await apiCall<Envelope<unknown>>("/household/members", {
-    method: "POST",
-    body: JSON.stringify(data),
-  });
-}
-
-export function useAddMember() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: addMember,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["householdMembers"] });
-      toast.success("Member added successfully");
-    },
-    onError: (error: Error) => {
-      toast.error(error.message || "Failed to add member");
-    },
-  });
-}
+// Invite, transfer and leave: hooks/use-household-membership.ts.
 
 // ============================================================================
 // CATEGORIES
@@ -801,14 +845,12 @@ async function fetchCategories(params?: CategoriesQuery): Promise<{
     ? `/api/categories?${searchParams.toString()}`
     : "/api/categories";
 
-  const response = await fetch(url, {
+  const response = await protectedFetch(url, {
     credentials: "include",
   });
+  await throwIfResNotOk(response);
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Failed to fetch categories");
-  }
+
 
   const data = await response.json();
   return data.data;
@@ -865,7 +907,7 @@ export function useCreateCategory() {
       toast.success("Category created successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to create category");
+      toastActionError("Failed to create category", error);
     },
   });
 }
@@ -881,7 +923,7 @@ export function useUpdateCategory() {
       toast.success("Category updated successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to update category");
+      toastActionError("Failed to update category", error);
     },
   });
 }
@@ -896,7 +938,7 @@ export function useDeleteCategory() {
       toast.success("Category removed successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to remove category");
+      toastActionError("Failed to remove category", error);
     },
   });
 }
@@ -911,7 +953,7 @@ export function useReorderCategories() {
       toast.success("Categories reordered successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to reorder categories");
+      toastActionError("Failed to reorder categories", error);
     },
   });
 }
@@ -927,7 +969,7 @@ export function useSeedCategories() {
       toast.success("Default categories created successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to seed categories");
+      toastActionError("Failed to seed categories", error);
     },
   });
 }
@@ -1003,7 +1045,7 @@ export function useCreateCategoryGroup() {
       toast.success("Category group created successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to create category group");
+      toastActionError("Failed to create category group", error);
     },
   });
 }
@@ -1019,7 +1061,7 @@ export function useUpdateCategoryGroup() {
       toast.success("Category group updated successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to update category group");
+      toastActionError("Failed to update category group", error);
     },
   });
 }
@@ -1034,7 +1076,7 @@ export function useArchiveCategoryGroup() {
       toast.success("Category group archived successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to archive category group");
+      toastActionError("Failed to archive category group", error);
     },
   });
 }
@@ -1049,7 +1091,7 @@ export function useRestoreCategoryGroup() {
       toast.success("Category group restored successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to restore category group");
+      toastActionError("Failed to restore category group", error);
     },
   });
 }
@@ -1064,7 +1106,7 @@ export function useReorderCategoryGroups() {
       toast.success("Category groups reordered successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to reorder category groups");
+      toastActionError("Failed to reorder category groups", error);
     },
   });
 }
@@ -1124,11 +1166,12 @@ export interface MerchantDetailResponse {
   aliases: MerchantAlias[];
 }
 
+/** GET /merchants/:id/analytics. Amounts are in the household currency. */
 export interface MerchantAnalytics {
-  totalSpent: number;
+  totalSpent: MoneyDto;
   transactionCount: number;
-  averageTransaction: number;
-  trend: Array<{ period: string; total: number; count: number }>;
+  averageTransaction: MoneyDto;
+  trend: Array<{ period: string; total: MoneyDto; count: number }>;
 }
 
 export interface MerchantTransactionsResponse {
@@ -1137,11 +1180,13 @@ export interface MerchantTransactionsResponse {
     date: string;
     name: string;
     type: string;
-    amount: string;
+    /** In the household currency. */
+    amount: MoneyDto;
     isPending: boolean;
     notes?: string | null;
     accountId: string;
   }>;
+  /** `count` is the number of matching rows across all pages. */
   pagination: { limit: number; offset: number; count: number };
 }
 
@@ -1162,9 +1207,10 @@ export interface MerchantMergeHistoryItem {
 }
 
 async function fetchMerchants(): Promise<Merchant[]> {
-  const response = await fetch("/api/merchants", {
+  const response = await protectedFetch("/api/merchants", {
     credentials: "include",
   });
+  await throwIfResNotOk(response);
 
   const contentType = response.headers.get("content-type");
   if (!contentType || !contentType.includes("application/json")) {
@@ -1173,10 +1219,7 @@ async function fetchMerchants(): Promise<Merchant[]> {
     );
   }
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Failed to fetch merchants");
-  }
+
 
   const data = await response.json();
   return data.data?.merchants || [];
@@ -1191,14 +1234,12 @@ async function fetchMerchantAutocomplete(
     q: query,
     limit: String(limit),
   });
-  const response = await fetch(`/api/merchants/autocomplete?${params}`, {
+  const response = await protectedFetch(`/api/merchants/autocomplete?${params}`, {
     credentials: "include",
   });
+  await throwIfResNotOk(response);
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Failed to fetch merchants");
-  }
+
 
   const result = await response.json();
   return result.data?.merchants || [];
@@ -1207,28 +1248,24 @@ async function fetchMerchantAutocomplete(
 async function fetchMerchantDetails(
   id: string,
 ): Promise<MerchantDetailResponse> {
-  const response = await fetch(`/api/merchants/${id}`, {
+  const response = await protectedFetch(`/api/merchants/${id}`, {
     credentials: "include",
   });
+  await throwIfResNotOk(response);
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Failed to fetch merchant details");
-  }
+
 
   const result = await response.json();
   return result.data;
 }
 
 async function fetchMerchantDuplicates(): Promise<MerchantDuplicateGroup[]> {
-  const response = await fetch("/api/merchants/duplicates", {
+  const response = await protectedFetch("/api/merchants/duplicates", {
     credentials: "include",
   });
+  await throwIfResNotOk(response);
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Failed to fetch duplicates");
-  }
+
 
   const result = await response.json();
   return result.data?.groups || [];
@@ -1274,19 +1311,22 @@ async function updateMerchant(
   return result.data.merchant;
 }
 
+/** What DELETE /merchants/:id does: archive (merge has its own endpoint). */
+export interface MerchantArchiveResult {
+  merchant: Merchant;
+  action: "archive";
+  keptTransactionCount: number;
+}
+
 async function deleteMerchant(
   id: string,
-  options?: { action?: "soft" | "hard" | "merge"; mergeTargetId?: string },
-): Promise<{ deletedCount: number; affectedTransactions: number }> {
-  const query = new URLSearchParams();
-  if (options?.action) query.set("action", options.action);
-  if (options?.mergeTargetId) query.set("mergeTargetId", options.mergeTargetId);
-  const queryStr = query.toString();
-  const result = await apiCall<
-    Envelope<{ deletedCount: number; affectedTransactions: number }>
-  >(`/merchants/${id}${queryStr ? `?${queryStr}` : ""}`, {
-    method: "DELETE",
-  });
+  options?: { action?: "soft" },
+): Promise<MerchantArchiveResult> {
+  const query = options?.action ? `?action=${options.action}` : "";
+  const result = await apiCall<Envelope<MerchantArchiveResult>>(
+    `/merchants/${id}${query}`,
+    { method: "DELETE" },
+  );
   return result.data;
 }
 
@@ -1300,17 +1340,13 @@ async function fetchMerchantAnalytics(
   if (params?.groupBy) query.set("groupBy", params.groupBy);
   const queryStr = query.toString();
 
-  const response = await fetch(
+  const response = await protectedFetch(
     `/api/merchants/${id}/analytics${queryStr ? `?${queryStr}` : ""}`,
     { credentials: "include" },
   );
+  await throwIfResNotOk(response);
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(
-      error.error?.message || "Failed to fetch merchant analytics",
-    );
-  }
+
 
   const result = await response.json();
   return result.data;
@@ -1342,17 +1378,13 @@ async function fetchMerchantTransactions(
   }
   const queryStr = query.toString();
 
-  const response = await fetch(
+  const response = await protectedFetch(
     `/api/merchants/${id}/transactions${queryStr ? `?${queryStr}` : ""}`,
     { credentials: "include" },
   );
+  await throwIfResNotOk(response);
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(
-      error.error?.message || "Failed to fetch merchant transactions",
-    );
-  }
+
 
   const result = await response.json();
   return result.data;
@@ -1394,14 +1426,12 @@ async function mergeMerchants(
 async function fetchMerchantMergeHistory(): Promise<
   MerchantMergeHistoryItem[]
 > {
-  const response = await fetch("/api/merchants/merge/history", {
+  const response = await protectedFetch("/api/merchants/merge/history", {
     credentials: "include",
   });
+  await throwIfResNotOk(response);
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Failed to fetch merge history");
-  }
+
 
   const result = await response.json();
   return result.data?.history || [];
@@ -1497,7 +1527,7 @@ export function useCreateMerchant() {
       toast.success("Merchant created successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to create merchant");
+      toastActionError("Failed to create merchant", error);
     },
   });
 }
@@ -1513,7 +1543,7 @@ export function useUpdateMerchant() {
       toast.success("Merchant updated successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to update merchant");
+      toastActionError("Failed to update merchant", error);
     },
   });
 }
@@ -1527,14 +1557,14 @@ export function useDeleteMerchant() {
       options,
     }: {
       id: string;
-      options?: { action?: "soft" | "hard" | "merge"; mergeTargetId?: string };
+      options?: { action?: "soft" };
     }) => deleteMerchant(id, options),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["merchants"] });
-      toast.success("Merchant deleted successfully");
+      toast.success("Merchant archived");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to delete merchant");
+      toastActionError("Failed to delete merchant", error);
     },
   });
 }
@@ -1557,7 +1587,7 @@ export function useAddMerchantAlias() {
       toast.success("Alias added");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to add alias");
+      toastActionError("Failed to add alias", error);
     },
   });
 }
@@ -1580,7 +1610,7 @@ export function useDeleteMerchantAlias() {
       toast.success("Alias removed");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to remove alias");
+      toastActionError("Failed to remove alias", error);
     },
   });
 }
@@ -1596,7 +1626,7 @@ export function useUploadMerchantLogo() {
       toast.success("Logo uploaded");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to upload logo");
+      toastActionError("Failed to upload logo", error);
     },
   });
 }
@@ -1611,7 +1641,7 @@ export function useDeleteMerchantLogo() {
       toast.success("Logo removed");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to remove logo");
+      toastActionError("Failed to remove logo", error);
     },
   });
 }
@@ -1636,7 +1666,7 @@ export function useMergeMerchants() {
       toast.success("Merchants merged successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to merge merchants");
+      toastActionError("Failed to merge merchants", error);
     },
   });
 }
@@ -1655,7 +1685,7 @@ export function useUndoMerchantMerge() {
       toast.success("Merge undone");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to undo merge");
+      toastActionError("Failed to undo merge", error);
     },
   });
 }
@@ -1682,7 +1712,7 @@ export interface RuleCondition {
 
 export interface SplitConfig {
   categoryId?: string;
-  amount?: number;
+  amount?: string; // decimal money string ("25.00"), never a float
   percentage?: number;
   note?: string;
   merchantName?: string;
@@ -1732,51 +1762,78 @@ export interface UpdateRuleData {
 }
 
 async function fetchRules(): Promise<Rule[]> {
-  const response = await fetch("/api/rules", {
+  const response = await protectedFetch("/api/rules", {
     credentials: "include",
   });
+  await throwIfResNotOk(response);
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Failed to fetch rules");
-  }
+
 
   const data = await response.json();
   return data.data.rules;
 }
 
-async function createRule(data: CreateRuleData): Promise<Rule> {
-  const result = await apiCall<Envelope<{ rule: Rule }>>("/rules", {
+/** A saved rule and, when it was applied to past transactions, what that did (A-32). */
+export interface RuleSaveResult {
+  rule: Rule;
+  applied?: RuleApplyOutcome;
+}
+
+async function createRule(data: CreateRuleData): Promise<RuleSaveResult> {
+  const result = await apiCall<Envelope<RuleSaveResult>>("/rules", {
     method: "POST",
     body: JSON.stringify(data),
   });
-  return result.data.rule;
+  return result.data;
 }
 
-async function updateRule(id: string, data: UpdateRuleData): Promise<Rule> {
-  const result = await apiCall<Envelope<{ rule: Rule }>>(`/rules/${id}`, {
+async function updateRule(id: string, data: UpdateRuleData): Promise<RuleSaveResult> {
+  const result = await apiCall<Envelope<RuleSaveResult>>(`/rules/${id}`, {
     method: "PUT",
     body: JSON.stringify(data),
   });
-  return result.data.rule;
+  return result.data;
 }
 
 async function deleteRule(id: string): Promise<void> {
   await apiCall<Envelope<unknown>>(`/rules/${id}`, { method: "DELETE" });
 }
 
-async function testRule(id: string): Promise<{ matchingCount: number }> {
-  const result = await apiCall<Envelope<{ matchingCount: number }>>(
-    `/rules/${id}/test`,
-    { method: "POST" },
-  );
-  return result.data;
+// How many matches the Test button asks the server to count. The server caps
+// `limit` at 100 (previewSchema in server/modules/rules/rules.controller.ts).
+export const RULE_TEST_MATCH_LIMIT = 100;
+
+export interface RuleTestResult {
+  matchCount: number;
+  totalChecked: number;
+  /** True when the server stopped counting at the limit. */
+  isCapped: boolean;
 }
 
+// The server has no per-rule "test" route: a saved rule is tested by
+// previewing its stored conditions through POST /rules/preview.
+async function testRule(
+  rule: Pick<Rule, "conditions" | "conditionLogic">,
+): Promise<RuleTestResult> {
+  const result = await previewRule({
+    conditions: rule.conditions,
+    conditionLogic: rule.conditionLogic,
+    limit: RULE_TEST_MATCH_LIMIT,
+  });
+  return {
+    matchCount: result.count,
+    totalChecked: result.totalChecked,
+    isCapped: result.count >= RULE_TEST_MATCH_LIMIT,
+  };
+}
+
+// PUT /rules/reorder expects { rules: [{ id, priority }] } (rules.controller.ts).
 async function reorderRules(ruleIds: string[]): Promise<void> {
   await apiCall<Envelope<unknown>>("/rules/reorder", {
     method: "PUT",
-    body: JSON.stringify({ ruleIds }),
+    body: JSON.stringify({
+      rules: ruleIds.map((id, priority) => ({ id, priority })),
+    }),
   });
 }
 
@@ -1789,15 +1846,23 @@ export interface RulePreviewTransaction {
   categoryId?: string | null;
 }
 
+// Default match limit of rulesController.preview (previewSchema.limit); the
+// editor sends it explicitly so a count at the limit can be shown as a lower bound.
+export const RULE_PREVIEW_LIMIT = 20;
+
+// Mirrors the data returned by rulesController.preview (the V7 envelope's
+// `data`): matches come back as `matchingTransactions`, with `count` and
+// `totalChecked` (not `transactions` / `matchCount` / `totalScanned`).
 export interface RulePreviewResult {
-  matchCount: number;
-  transactions: RulePreviewTransaction[];
-  totalScanned: number;
+  matchingTransactions: RulePreviewTransaction[];
+  count: number;
+  totalChecked: number;
 }
 
 async function previewRule(data: {
   conditions: RuleCondition[];
   conditionLogic: "all" | "any";
+  limit?: number;
 }): Promise<RulePreviewResult> {
   const result = await apiCall<Envelope<RulePreviewResult>>("/rules/preview", {
     method: "POST",
@@ -1819,12 +1884,12 @@ export function useCreateRule() {
 
   return useMutation({
     mutationFn: createRule,
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["rules"] });
-      toast.success("Rule created successfully");
+      announceRuleSave("created", result.applied);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to create rule");
+      toastActionError("Failed to create rule", error);
     },
   });
 }
@@ -1835,12 +1900,12 @@ export function useUpdateRule() {
   return useMutation({
     mutationFn: ({ id, data }: { id: string; data: UpdateRuleData }) =>
       updateRule(id, data),
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["rules"] });
-      toast.success("Rule updated successfully");
+      announceRuleSave("updated", result.applied);
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to update rule");
+      toastActionError("Failed to update rule", error);
     },
   });
 }
@@ -1855,7 +1920,7 @@ export function useDeleteRule() {
       toast.success("Rule deleted successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to delete rule");
+      toastActionError("Failed to delete rule", error);
     },
   });
 }
@@ -1864,10 +1929,13 @@ export function useTestRule() {
   return useMutation({
     mutationFn: testRule,
     onSuccess: (data) => {
-      toast.success(`Rule would match ${data.matchingCount} transactions`);
+      const count = data.isCapped ? `${data.matchCount}+` : `${data.matchCount}`;
+      toast.success(
+        `Rule matches ${count} of the ${data.totalChecked} most recent transactions`,
+      );
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to test rule");
+      toastActionError("Failed to test rule", error);
     },
   });
 }
@@ -1882,7 +1950,7 @@ export function useReorderRules() {
       toast.success("Rules reordered successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to reorder rules");
+      toastActionError("Failed to reorder rules", error);
     },
   });
 }
@@ -1908,7 +1976,7 @@ export function useSeedMerchants() {
       toast.success("Zambian merchants created successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to seed merchants");
+      toastActionError("Failed to seed merchants", error);
     },
   });
 }
@@ -1916,76 +1984,69 @@ export function useSeedMerchants() {
 // USER PREFERENCES
 // ============================================================================
 
-export interface UserPreferences {
-  userId: string;
-  rememberLastAccount: boolean;
-  rememberLastCategoryPerMerchant: boolean;
-  defaultTransactionType: string;
-  autoFillTodayDate: boolean;
-  skipDuplicateImports: boolean;
-  autoAssignCategoriesFromRules: boolean;
-  autoCreateFromReceipt: boolean;
-  requireOcrReview: boolean;
-  ocrConfidenceThreshold: number;
-  createdAt: string;
-  updatedAt: string;
-}
+export type UserPreferences = UserPreferencesResponse;
+export type UpdateUserPreferencesData = UserPreferencesPatch;
+export type UpdatePersonalPreference = <K extends keyof UserPreferencesPatch>(key: K, value: UserPreferencesResponse[K]) => void;
 
-export interface UpdateUserPreferencesData {
-  rememberLastAccount?: boolean;
-  rememberLastCategoryPerMerchant?: boolean;
-  defaultTransactionType?: string;
-  autoFillTodayDate?: boolean;
-  skipDuplicateImports?: boolean;
-  autoAssignCategoriesFromRules?: boolean;
-  autoCreateFromReceipt?: boolean;
-  requireOcrReview?: boolean;
-  ocrConfidenceThreshold?: number;
-}
-
-async function fetchUserPreferences(): Promise<UserPreferences> {
-  const response = await fetch("/api/settings/preferences", {
-    credentials: "include",
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || "Failed to fetch preferences");
+function personalPreferencesResponse(value: unknown, operation: OperationLifetime | null): UserPreferences {
+  assertOperationLifetime(operation);
+  const parsed = userPreferencesEnvelopeSchema.safeParse(value);
+  if (!parsed.success || (operation?.expectations && parsed.data.data.preferences.userId !== operation.expectations.subject)) {
+    throw new Error("Invalid personal preferences response. Please retry.");
   }
-
-  const data = await response.json();
-  return data.data.preferences;
+  return parsed.data.data.preferences;
 }
 
 async function updateUserPreferences(
   data: UpdateUserPreferencesData,
+  operation: OperationLifetime | null,
 ): Promise<UserPreferences> {
-  const result = await apiCall<Envelope<{ preferences: UserPreferences }>>(
-    "/settings/preferences",
-    { method: "PUT", body: JSON.stringify(data) },
+  assertOperationLifetime(operation);
+  const patch = userPreferencesPatchSchema.parse(data);
+  const result = await apiCall<unknown>(
+    "/settings/user-preferences",
+    { method: "PUT", body: JSON.stringify(patch) }, true, false, operation,
   );
-  return result.data.preferences;
+  const preferences = personalPreferencesResponse(result, operation);
+  if (Object.entries(patch).some(([field, value]) => preferences[field as keyof UserPreferences] !== value)) {
+    throw new Error("Personal preference changes were not acknowledged. Please retry.");
+  }
+  return preferences;
 }
 
 export function useUserPreferences() {
+  const operation = useRef(captureOperationLifetime());
   return useQuery({
     queryKey: ["userPreferences"],
-    queryFn: fetchUserPreferences,
+    queryFn: async ({ signal }) => {
+      const response = await protectedFetch("/api/settings/user-preferences", { credentials: "include", signal }, operation.current);
+      await throwIfResNotOk(response);
+      return personalPreferencesResponse(await response.json(), operation.current);
+    },
     retry: false,
   });
 }
 
 export function useUpdateUserPreferences() {
   const queryClient = useQueryClient();
+  const operation = useRef(captureOperationLifetime());
 
   return useMutation({
-    mutationFn: updateUserPreferences,
+    scope: { id: "personal-user-preferences" },
+    onMutate: async () => {
+      assertOperationLifetime(operation.current);
+      await queryClient.cancelQueries({ queryKey: ["userPreferences"] });
+      assertOperationLifetime(operation.current);
+    },
+    mutationFn: (data: UpdateUserPreferencesData) => updateUserPreferences(data, operation.current),
     onSuccess: (data) => {
+      assertOperationLifetime(operation.current);
       queryClient.setQueryData(["userPreferences"], data);
       toast.success("Preferences updated successfully");
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to update preferences");
+      try { assertOperationLifetime(operation.current); } catch { return; }
+      toastActionError("Failed to update preferences", error);
     },
   });
 }
@@ -2014,6 +2075,14 @@ export interface AIConsentStatus {
   needsReconsent: boolean;
 }
 
+/**
+ * One consent decision. A grant names the disclosure version the actor was
+ * shown (Astra #255 r3); the server refuses a stale or missing one.
+ */
+export type AIConsentDecision =
+  | { consentGiven: true; consentVersion: string }
+  | { consentGiven: false };
+
 export interface UpdateAIConsentResponse {
   consentGiven: boolean;
   consentDate: string;
@@ -2025,11 +2094,11 @@ async function fetchAIConsent(): Promise<AIConsentStatus> {
 }
 
 async function updateAIConsent(
-  consentGiven: boolean,
+  decision: AIConsentDecision,
 ): Promise<UpdateAIConsentResponse> {
   return apiCall<UpdateAIConsentResponse>("/ai/consent", {
     method: "POST",
-    body: JSON.stringify({ consentGiven }),
+    body: JSON.stringify(decision),
   });
 }
 
@@ -2063,7 +2132,7 @@ export function useUpdateAIConsent() {
       );
     },
     onError: (error: Error) => {
-      toast.error(error.message || "Failed to update AI consent");
+      toastActionError("Failed to update AI consent", error);
     },
   });
 }

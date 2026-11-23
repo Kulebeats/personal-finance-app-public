@@ -4,17 +4,17 @@
 
 import { Button } from "@/components/ui/button";
 import { formatCurrency } from "@/lib/format";
-import { toMoneyNumber } from "@/lib/money";
+import { toMoneyNumber, type MoneyValue } from "@/lib/money";
 import { useSettings } from "@/contexts/SettingsContext";
 
 interface AnalyticsData {
-  totalSpent?: string | number | null;
+  totalSpent?: MoneyValue | number | null;
   transactionCount?: number | null;
-  averageTransaction?: string | number | null;
+  averageTransaction?: MoneyValue | number | null;
 }
 
 interface QuickRangeData {
-  totalSpent?: string | number | null;
+  totalSpent?: MoneyValue | number | null;
 }
 
 interface MerchantStatsCardsProps {

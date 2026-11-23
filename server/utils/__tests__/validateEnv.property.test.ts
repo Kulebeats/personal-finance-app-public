@@ -17,6 +17,11 @@ import {
  * **Validates: Requirements 15.1, 15.2**
  */
 describe("Property 19: Environment Validation at Startup", () => {
+  it.each([undefined, "http://app.example.invalid", "https://app.example.invalid/path", "https://user:secret@app.example.invalid", "https://app.example.invalid/?q=1"])("rejects unusable production APP_URL %s at boot", APP_URL => {
+    const result = validateEnv({ DATABASE_URL: "postgresql://test:test@localhost:5432/db", SESSION_SECRET: "s".repeat(32),
+      NODE_ENV: "production", CLIENT_URL: "https://app.example.invalid", REDIS_URL: "redis://localhost:6379", APP_URL });
+    expect(result.errors?.some(error => error.variable === "APP_URL")).toBe(true);
+  });
   // Arbitrary for valid DATABASE_URL
   const validDatabaseUrl = fc.constantFrom(
     "postgres://user:pass@localhost:5432/db",
@@ -48,6 +53,9 @@ describe("Property 19: Environment Validation at Startup", () => {
     NODE_ENV: validNodeEnv,
     CLIENT_URL: validClientUrl,
     REDIS_URL: fc.constant("redis://localhost:6379"),
+    APP_URL: fc.constant("https://app.example.invalid"),
+    // Required in production while the HTTP cron routes are mounted (OPS-003).
+    CRON_SECRET: fc.constant("synthetic-cron-secret-not-real-use"),
   });
 
   it("accepts all valid environment configurations", () => {

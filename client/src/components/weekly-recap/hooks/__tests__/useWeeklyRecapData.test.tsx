@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import type { ReactNode } from "react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react-query";
 import { renderHook, waitFor, act } from "@testing-library/react";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { clearCsrfToken } from "@/lib/api";
@@ -93,11 +93,22 @@ describe("useWeeklyRecapData hooks", () => {
   });
 
   afterEach(() => {
+    onlineManager.setOnline(true);
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
 
   describe("useWeeklyRecapData", () => {
+    it("withholds a cached projection while real offline revalidation is paused", async () => {
+      mockFetch.mockResolvedValue(mockFetchResponse({ success: true, data: mockRecapData }));
+      const { queryClient, wrapper } = createWrapper();
+      const { result } = renderHook(() => useWeeklyRecapData(), { wrapper });
+      await waitFor(() => expect(result.current.data).toEqual(mockRecapData));
+      act(() => { onlineManager.setOnline(false); void queryClient.invalidateQueries({ queryKey: ["weekly-recap"] }); });
+      await waitFor(() => expect(result.current.fetchStatus).toBe("paused"));
+      expect(result.current.isFetching).toBe(false);
+      expect(result.current.data).toBeUndefined();
+    });
     it("fetches weekly recap data", async () => {
       mockFetch.mockResolvedValue(
         mockFetchResponse({

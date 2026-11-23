@@ -19,7 +19,7 @@ import request from "supertest";
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import type { Express } from "express";
 import { db } from "../../../db";
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray, sql } from "drizzle-orm";
 import {
   users,
   households,
@@ -57,6 +57,7 @@ describe("Recurring Module - Database Integration Tests", () => {
   let otherAuthCookie: string;
 
   const timestamp = Date.now();
+  const ownedHouseholdIds = new Set<string>(), ownedUserIds = new Set<string>();
 
   beforeAll(async () => {
     app = await getTestApp();
@@ -74,6 +75,7 @@ describe("Recurring Module - Database Integration Tests", () => {
     testUser.passwordHash = passwordHash;
     householdId = testHousehold.id;
     userId = testUser.id;
+    ownedHouseholdIds.add(householdId); ownedUserIds.add(userId);
     testUser.householdId = testHousehold.id;
 
     // Insert primary household
@@ -161,6 +163,7 @@ describe("Recurring Module - Database Integration Tests", () => {
     otherUser.passwordHash = otherPasswordHash;
     otherHouseholdId = otherHousehold.id;
     otherUserId = otherUser.id;
+    ownedHouseholdIds.add(otherHouseholdId); ownedUserIds.add(otherUserId);
     otherUser.householdId = otherHousehold.id;
 
     await db.insert(households).values({
@@ -211,74 +214,15 @@ describe("Recurring Module - Database Integration Tests", () => {
   });
 
   afterAll(async () => {
-    try {
-      // Get all recurring rule IDs for both households
-      const primaryRules = await db
-        .select({ id: recurringTransactions.id })
-        .from(recurringTransactions)
-        .where(eq(recurringTransactions.householdId, householdId));
-      const otherRules = await db
-        .select({ id: recurringTransactions.id })
-        .from(recurringTransactions)
-        .where(eq(recurringTransactions.householdId, otherHouseholdId));
-
-      const allRuleIds = [
-        ...primaryRules.map((r) => r.id),
-        ...otherRules.map((r) => r.id),
-      ];
-
-      // Delete history and links for each rule
-      for (const ruleId of allRuleIds) {
-        await db
-          .delete(recurringTransactionHistory)
-          .where(
-            eq(recurringTransactionHistory.recurringTransactionId, ruleId),
-          );
-        await db
-          .delete(recurringTransactionLinks)
-          .where(eq(recurringTransactionLinks.recurringTransactionId, ruleId));
-      }
-
-      // Cleanup in reverse dependency order
-      await db.delete(auditLogs).where(eq(auditLogs.householdId, householdId));
-      await db
-        .delete(auditLogs)
-        .where(eq(auditLogs.householdId, otherHouseholdId));
-      await db
-        .delete(recurringTransactions)
-        .where(eq(recurringTransactions.householdId, householdId));
-      await db
-        .delete(recurringTransactions)
-        .where(eq(recurringTransactions.householdId, otherHouseholdId));
-      await db
-        .delete(transactions)
-        .where(eq(transactions.householdId, householdId));
-      await db
-        .delete(transactions)
-        .where(eq(transactions.householdId, otherHouseholdId));
-      await db
-        .delete(categories)
-        .where(eq(categories.householdId, householdId));
-      await db
-        .delete(categoryGroups)
-        .where(eq(categoryGroups.householdId, householdId));
-      await db.delete(accounts).where(eq(accounts.householdId, householdId));
-      await db
-        .delete(accounts)
-        .where(eq(accounts.householdId, otherHouseholdId));
-      await db
-        .delete(householdMembers)
-        .where(eq(householdMembers.householdId, householdId));
-      await db
-        .delete(householdMembers)
-        .where(eq(householdMembers.householdId, otherHouseholdId));
-      await db.delete(users).where(eq(users.id, userId));
-      await db.delete(users).where(eq(users.id, otherUserId));
-      await db.delete(households).where(eq(households.id, householdId));
-      await db.delete(households).where(eq(households.id, otherHouseholdId));
-    } catch (error) {
-      console.error("Cleanup error (ignored):", error);
-    }
+    // Registered UUIDs also cover partial setup or a failed assertion before
+    // inline cleanup. Household cascades include every owned account/category/
+    // group/tag label, rule, transaction, link/history, audit and outbox row.
+    await db.transaction(async tx => {
+      const householdIds = Array.from(ownedHouseholdIds), userIds = Array.from(ownedUserIds);
+      for (const id of userIds) await tx.execute(sql`delete from "session" where sess->>'userId' = ${id}`);
+      if (householdIds.length) await tx.delete(households).where(inArray(households.id, householdIds));
+      if (userIds.length) await tx.delete(users).where(inArray(users.id, userIds));
+    }); // Cleanup errors must fail the hook, never certify a clean test target.
   });
 
   // Helper to create a recurring rule
@@ -539,6 +483,23 @@ describe("Recurring Module - Database Integration Tests", () => {
   // 2. PATTERN DETECTION (8 tests)
   // =========================================================================
   describe("Pattern Detection", () => {
+    async function seedCurrentPattern(name: string, amount: string, count = 3, foreign = false) {
+      const today = new Date();
+      const dates = Array.from({ length: count }, (_, index) => new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() - count + index, 15)).toISOString().slice(0, 10));
+      const ids: string[] = dates.map(() => randomUUID());
+      await db.insert(transactions).values(ids.map((id, index) => ({ id, name, amount, date: dates[index], currency: "ZMW",
+        type: "expense" as const, householdId: foreign ? otherHouseholdId : householdId,
+        accountId: foreign ? otherAccountId : accountId, ownerUserId: foreign ? otherUserId : userId, isPrivate: false })));
+      return { ids, dates };
+    }
+    async function currentPreview(name: string, cookie = authCookie) {
+      const response = await request(app).post("/api/recurring/detect").set("Cookie", cookie)
+        .send({ minOccurrences: 3, lookbackMonths: 6, confidenceThreshold: 80 }).expect(200);
+      const pattern = response.body.data.find((item: { name: string }) => item.name === name);
+      expect(pattern).toBeDefined();
+      return pattern;
+    }
+
     it("should detect patterns with confidence threshold", async () => {
       // Create multiple similar transactions to form a pattern
       const dates = ["2024-01-15", "2024-02-15", "2024-03-15", "2024-04-15"];
@@ -597,77 +558,36 @@ describe("Recurring Module - Database Integration Tests", () => {
     });
 
     it("should confirm pattern and create recurring rule", async () => {
-      const transactionId = randomUUID();
-      await db.insert(transactions).values({
-        id: transactionId,
-        householdId,
-        accountId,
-        name: "Spotify Premium",
-        amount: "9.99",
-        type: "expense",
-        date: "2024-01-15",
-      });
+      const seeded = await seedCurrentPattern("Spotify Premium", "9.99");
+      const pattern = await currentPreview("Spotify Premium");
+      expect(pattern.selection.contributorIds).toEqual(seeded.ids);
 
       const res = await request(app)
         .post("/api/recurring/confirm")
         .set("Cookie", authCookie)
         .send({
           accountId,
-          pattern: {
-            name: "Spotify Premium",
-            type: "expense",
-            frequency: "monthly",
-            estimatedAmount: { amount: "9.99", currency: "ZMW" },
-            suggestedStartDate: "2024-01-15",
-            suggestedNextDueDate: "2024-02-15",
-            sampleTransactionIds: [transactionId],
-          },
+          pattern,
         })
         .expect(201);
 
       expect(res.body.success).toBe(true);
       expect(res.body.data.name).toBe("Spotify Premium");
       expect(res.body.data.frequency).toBe("monthly");
+      expect(res.body.data.totalOccurrences).toBe(3);
+      await request(app).get(`/api/recurring/${res.body.data.id}`).set("Cookie", authCookie).expect(200);
     });
 
     it("should confirm pattern and auto-link transactions", async () => {
-      const tx1Id = randomUUID();
-      const tx2Id = randomUUID();
-      await db.insert(transactions).values([
-        {
-          id: tx1Id,
-          householdId,
-          accountId,
-          name: "Apple Music",
-          amount: "10.99",
-          type: "expense",
-          date: "2024-01-15",
-        },
-        {
-          id: tx2Id,
-          householdId,
-          accountId,
-          name: "Apple Music",
-          amount: "10.99",
-          type: "expense",
-          date: "2024-02-15",
-        },
-      ]);
+      const seeded = await seedCurrentPattern("Apple Music", "10.99");
+      const pattern = await currentPreview("Apple Music");
 
       const res = await request(app)
         .post("/api/recurring/confirm")
         .set("Cookie", authCookie)
         .send({
           accountId,
-          pattern: {
-            name: "Apple Music",
-            type: "expense",
-            frequency: "monthly",
-            estimatedAmount: { amount: "10.99", currency: "ZMW" },
-            suggestedStartDate: "2024-01-15",
-            suggestedNextDueDate: "2024-03-15",
-            sampleTransactionIds: [tx1Id, tx2Id],
-          },
+          pattern,
         })
         .expect(201);
 
@@ -683,22 +603,26 @@ describe("Recurring Module - Database Integration Tests", () => {
             res.body.data.id,
           ),
         );
-      expect(links.length).toBeGreaterThanOrEqual(1);
+      expect(links.map(link => link.transactionId).sort()).toEqual([...seeded.ids].sort());
+      expect(res.body.data.totalOccurrences).toBe(3);
+      await request(app).get(`/api/recurring/${res.body.data.id}`).set("Cookie", authCookie).expect(200);
     });
 
-    it("should reject pattern with low confidence", async () => {
-      // When confirming, confidence is recorded but not rejected
-      // This tests that low confidence is accepted but recorded
-      const transactionId = randomUUID();
-      await db.insert(transactions).values({
-        id: transactionId,
-        householdId,
-        accountId,
-        name: "Random Vendor",
-        amount: "25.00",
-        type: "expense",
-        date: "2024-01-20",
+    it.each([1, 2])("requires a rescan for an unsupported %s-source low-confidence legacy selection without effects", async count => {
+      // The obsolete 201 contract is preserved at 865a265f and its failed log.
+      // A no-selector request must now attest the entire rederived default group.
+      const name = `Legacy Vendor ${count}`, seeded = await seedCurrentPattern(name, "25.00", count);
+      const state = async () => ({
+        rules: await db.select().from(recurringTransactions).where(eq(recurringTransactions.householdId, householdId)).orderBy(recurringTransactions.id),
+        links: await db.select().from(recurringTransactionLinks).innerJoin(recurringTransactions, eq(recurringTransactionLinks.recurringTransactionId, recurringTransactions.id))
+          .where(eq(recurringTransactions.householdId, householdId)).orderBy(recurringTransactionLinks.id),
+        history: await db.select().from(recurringTransactionHistory).innerJoin(recurringTransactions, eq(recurringTransactionHistory.recurringTransactionId, recurringTransactions.id))
+          .where(eq(recurringTransactions.householdId, householdId)).orderBy(recurringTransactionHistory.id),
+        sources: await db.select().from(transactions).where(eq(transactions.householdId, householdId)).orderBy(transactions.id),
+        account: await db.select().from(accounts).where(eq(accounts.id, accountId)),
+        audit: await db.select().from(auditLogs).where(eq(auditLogs.householdId, householdId)).orderBy(auditLogs.id),
       });
+      const before = await state();
 
       const res = await request(app)
         .post("/api/recurring/confirm")
@@ -706,20 +630,20 @@ describe("Recurring Module - Database Integration Tests", () => {
         .send({
           accountId,
           pattern: {
-            name: "Random Vendor",
+            name,
             type: "expense",
             frequency: "monthly",
             estimatedAmount: { amount: "25.00", currency: "ZMW" },
             confidence: 30, // Low confidence
-            suggestedStartDate: "2024-01-20",
-            suggestedNextDueDate: "2024-02-20",
-            sampleTransactionIds: [transactionId],
+            suggestedStartDate: seeded.dates[0],
+            suggestedNextDueDate: new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 15)).toISOString().slice(0, 10),
+            sampleTransactionIds: seeded.ids,
           },
         })
-        .expect(201);
+        .expect(409);
 
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.detectionConfidence).toBe(30);
+      expect(res.body.error.message).toMatch(/scan|selection/i);
+      expect(await state()).toEqual(before);
     });
 
     it("should handle pattern detection with mixed currencies (validation)", async () => {
@@ -737,33 +661,28 @@ describe("Recurring Module - Database Integration Tests", () => {
     });
 
     it("should verify pattern detection authorization (only own household)", async () => {
-      // Primary user should not see patterns from other household's transactions
-      await db.insert(transactions).values({
-        id: randomUUID(),
-        householdId: otherHouseholdId,
-        accountId: otherAccountId,
-        name: "Other Household Subscription",
-        amount: "20.00",
-        type: "expense",
-        date: "2024-01-10",
-      });
+      const own = await seedCurrentPattern("Own Household Authorization", "11.11");
+      const foreign = await seedCurrentPattern("Other Household Subscription", "20.00", 3, true);
+      expect((await currentPreview("Other Household Subscription", otherAuthCookie)).selection.contributorIds).toEqual(foreign.ids);
 
       const res = await request(app)
         .post("/api/recurring/detect")
         .set("Cookie", authCookie)
         .send({
-          minOccurrences: 1,
+          minOccurrences: 3,
           lookbackMonths: 12,
-          confidenceThreshold: 0,
+          confidenceThreshold: 50,
         })
         .expect(200);
 
       expect(res.body.success).toBe(true);
+      expect(res.body.data.find((pattern: { name: string }) => pattern.name === "Own Household Authorization").selection.contributorIds).toEqual(own.ids);
       // Should not include patterns from other household
       const otherPatterns = res.body.data.filter((p: any) =>
         p.name?.includes("Other Household"),
       );
       expect(otherPatterns.length).toBe(0);
+      for (const id of foreign.ids) expect(JSON.stringify(res.body)).not.toContain(id);
     });
   });
 
@@ -858,13 +777,13 @@ describe("Recurring Module - Database Integration Tests", () => {
         .send({ transactionId: tx.id })
         .expect(200);
 
-      // Try to link to second rule - may return 400 or 500
+      // Both rules are visible, so the ordinary duplicate is a validation error.
       const res = await request(app)
         .post(`/api/recurring/${rule2.id}/link`)
         .set("Cookie", authCookie)
         .send({ transactionId: tx.id });
 
-      expect([400, 500]).toContain(res.status);
+      expect(res.status).toBe(400);
     });
 
     it("should link with amount tolerance within range", async () => {
@@ -995,6 +914,7 @@ describe("Recurring Module - Database Integration Tests", () => {
     it("should not link private transaction from another user", async () => {
       // Create second user in same household
       const secondUserId = randomUUID();
+      ownedUserIds.add(secondUserId);
       await db.insert(users).values({
         id: secondUserId,
         email: `second-user-${timestamp}@example.com`,
@@ -1480,11 +1400,13 @@ describe("Recurring Module - Database Integration Tests", () => {
         totalOccurrences: 48, // 4 years of monthly
       });
 
-      // Create history entries
+      // Processed history retains its real source so the audience is verifiable.
       for (let i = 0; i < 10; i++) {
+        const source = await createTransaction({ name: `Historical occurrence ${i}` });
         await db.insert(recurringTransactionHistory).values({
           recurringTransactionId: ruleId,
           action: "processed",
+          linkedTransactionId: source.id,
           createdAt: new Date(2020 + Math.floor(i / 12), i % 12, 1),
         });
       }
@@ -1849,9 +1771,6 @@ describe("Recurring Module - Database Integration Tests", () => {
       // Import required modules
       const { transactionSplits } = await import("@shared/schema");
       const { budgets } = await import("@shared/schema");
-      const { calculateCategorySpentSplit } = await import(
-        "../../../repositories/BudgetSpendBatchQueries"
-      );
 
       // Step 1: Create additional categories for splits
       const category2Id = randomUUID();

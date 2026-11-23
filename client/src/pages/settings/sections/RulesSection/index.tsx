@@ -64,20 +64,24 @@ export default function RulesSection() {
     }
   };
 
-  const handleMoveRule = async (index: number, direction: "up" | "down") => {
+  // The list renders `filteredRules`, so "up"/"down" means the visible neighbour. Both rules are
+  // looked up by id in the full list: an index into the rendered list is not an index into it.
+  const handleMoveRule = async (ruleId: string, direction: "up" | "down") => {
     if (!rulesList) return;
 
+    const visible = filteredRules ?? [];
+    const visibleIndex = visible.findIndex((r) => r.id === ruleId);
+    const neighbour = visible[direction === "up" ? visibleIndex - 1 : visibleIndex + 1];
+    if (visibleIndex < 0 || !neighbour) return;
+
+    const from = rulesList.findIndex((r) => r.id === ruleId);
+    const to = rulesList.findIndex((r) => r.id === neighbour.id);
+    if (from < 0 || to < 0) return;
+
     const newRules = [...rulesList];
-    const newIndex = direction === "up" ? index - 1 : index + 1;
-    if (newIndex < 0 || newIndex >= newRules.length) return;
+    [newRules[from], newRules[to]] = [newRules[to], newRules[from]];
 
-    [newRules[index], newRules[newIndex]] = [
-      newRules[newIndex],
-      newRules[index],
-    ];
-
-    const ruleIds = newRules.map((r) => r.id);
-    await reorderRulesMutation.mutateAsync(ruleIds);
+    await reorderRulesMutation.mutateAsync(newRules.map((r) => r.id));
   };
 
   const isQueryEmpty = !searchQuery || searchQuery.trim() === "";
@@ -137,11 +141,7 @@ export default function RulesSection() {
   const members =
     householdMembers?.map((member) => ({
       id: member.userId,
-      name:
-        member.user?.fullName ||
-        member.user?.username ||
-        member.user?.email ||
-        "Member",
+      name: member.name,
     })) || [];
 
   const categories =
@@ -154,6 +154,9 @@ export default function RulesSection() {
       id: merchant.id,
       name: merchant.name,
     })) || [];
+  const categoryNamesById = new Map(
+    categories.map((category) => [category.id, category.name]),
+  );
   const accountOptions =
     accounts?.map((account) => ({ id: account.id, name: account.name })) || [];
   const goalOptions = linkableGoals.map((goal) => ({
@@ -204,6 +207,7 @@ export default function RulesSection() {
               rules={filteredRules}
               isCreating={isCreating}
               goalNamesById={goalNamesById}
+              categoryNamesById={categoryNamesById}
               onToggle={(ruleId, enabled) => {
                 const rule = rulesList?.find((r) => r.id === ruleId);
                 updateRule.mutate(
@@ -226,7 +230,10 @@ export default function RulesSection() {
                   },
                 });
               }}
-              onTest={(ruleId) => testRule.mutate(ruleId)}
+              onTest={(ruleId) => {
+                const rule = rulesList?.find((r) => r.id === ruleId);
+                if (rule) testRule.mutate(rule);
+              }}
               onMove={handleMoveRule}
               onStartQuick={() => setIsCreating(true)}
               isDeleting={deleteRule.isPending}

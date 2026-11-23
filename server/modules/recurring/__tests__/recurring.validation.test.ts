@@ -379,7 +379,7 @@ describe("Recurring Validation Schemas", () => {
       expect(result.success).toBe(true);
     });
 
-    it("validates amountVariance max (100%)", () => {
+    it("retains measured fractional deviation above the rule's tolerance cap", () => {
       const result = confirmPatternSchema.safeParse({
         accountId: validAccountId,
         pattern: {
@@ -387,17 +387,17 @@ describe("Recurring Validation Schemas", () => {
           type: "expense",
           frequency: "monthly",
           estimatedAmount: { amount: "10.00", currency: "ZMW" },
-          amountVariance: 150, // Too high
+          amountVariance: 150.125,
           suggestedStartDate: "2024-01-01",
           suggestedNextDueDate: "2024-02-01",
           sampleTransactionIds: [validTransactionId],
         },
       });
 
-      expect(result.success).toBe(false);
+      expect(result.success).toBe(true);
     });
 
-    it("validates dayOfMonth max (28 for cross-month safety)", () => {
+    it("accepts a month-end anchor and rejects numbers beyond day 31", () => {
       const result = confirmPatternSchema.safeParse({
         accountId: validAccountId,
         pattern: {
@@ -405,7 +405,7 @@ describe("Recurring Validation Schemas", () => {
           type: "expense",
           frequency: "monthly",
           estimatedAmount: { amount: "10.00", currency: "ZMW" },
-          dayOfMonth: 31, // Too high
+          dayOfMonth: 32,
           suggestedStartDate: "2024-01-01",
           suggestedNextDueDate: "2024-02-01",
           sampleTransactionIds: [validTransactionId],
@@ -421,7 +421,7 @@ describe("Recurring Validation Schemas", () => {
           type: "expense",
           frequency: "monthly",
           estimatedAmount: { amount: "10.00", currency: "ZMW" },
-          dayOfMonth: 28,
+          dayOfMonth: 31,
           suggestedStartDate: "2024-01-01",
           suggestedNextDueDate: "2024-02-01",
           sampleTransactionIds: [validTransactionId],

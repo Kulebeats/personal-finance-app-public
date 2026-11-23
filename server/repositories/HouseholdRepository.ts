@@ -1,4 +1,4 @@
-import { and, eq, isNull, gt, inArray, sql } from "drizzle-orm";
+import { and, eq, isNull, gt, sql } from "drizzle-orm";
 import { db } from "../db";
 import {
   householdMembers,
@@ -12,25 +12,13 @@ import {
   type InsertHouseholdInvitation,
 } from "@shared/schema";
 import { withTransaction } from "../utils/withTransaction";
-import { seedDefaultTags } from "../seed";
-import {
-  ConflictError,
-  ForbiddenError,
-  NotFoundError,
-  ValidationError,
-} from "../utils/errorHandler";
+import { seedDefaultCategories, seedDefaultTags } from "../seed";
+import { ConflictError, NotFoundError } from "../utils/errorHandler";
 import { isPostgresError } from "../utils/postgresError";
+import { lockUserMembership } from "./householdMembershipLock";
 
 type HouseholdRole = typeof householdMembers.$inferInsert["role"];
 type HouseholdPreferences = typeof householdPreferences.$inferSelect;
-
-/**
- * Advisory-lock namespace (classid) for the per-user household-create lock.
- * Paired with hashtext(userId) as the objid in pg_advisory_xact_lock so these
- * create locks never collide with advisory locks taken for other purposes.
- * Value is ASCII "hous" (0x686F7573), an arbitrary but stable positive int4.
- */
-const HOUSEHOLD_CREATE_LOCK_NAMESPACE = 0x686f7573;
 
 export class HouseholdRepository {
   async findById(id: string): Promise<Household | undefined> {
@@ -47,7 +35,7 @@ export class HouseholdRepository {
       .select({ household: households })
       .from(householdMembers)
       .innerJoin(households, eq(householdMembers.householdId, households.id))
-      .where(eq(householdMembers.userId, userId))
+      .where(eq(householdMembers.userId, userId)).orderBy(householdMembers.id)
       .limit(1);
     return result[0]?.household;
   }
@@ -64,15 +52,14 @@ export class HouseholdRepository {
   }
 
   /**
-   * Create a household together with its owner membership and default tags as
-   * one atomic unit. The controller previously issued these as three separate,
+   * Create a household with its owner, default tags and categories as one
+   * atomic unit. The controller previously issued these as separate,
    * non-transactional writes (household insert → owner addMember →
    * seedDefaultTags), so a failure in the second or third step left an
    * orphaned, ownerless household: findByUserId joins through household_members,
-   * so the creating user could neither see nor delete it. Wrapping all three in
+   * so the creating user could neither see nor delete it. Wrapping these steps in
    * a single transaction makes creation all-or-nothing — a partial failure rolls
-   * back fully and never leaves an ownerless household. Mirrors the atomic
-   * membership-lifecycle methods (acceptInvite, transferOwnership) below.
+   * back fully and never leaves an ownerless household.
    *
    * This is also the single, authoritative guard for the "one household per
    * user" rule. A bare findByUserId-then-create check (as the controller used
@@ -93,14 +80,15 @@ export class HouseholdRepository {
     userId: string;
   }): Promise<Household> {
     return await withTransaction(async (tx) => {
-      // Serialize concurrent creates for this user (CLAUDE.md Rule 10: atomic
-      // read-then-write on a contended path). hashtext(userId) maps the UUID to
-      // the int4 lock key; a hash collision only briefly over-serializes two
-      // unrelated users and never affects correctness, because the membership
-      // check below is still scoped to this exact userId.
-      await tx.execute(
-        sql`SELECT pg_advisory_xact_lock(${HOUSEHOLD_CREATE_LOCK_NAMESPACE}::int4, hashtext(${params.userId}))`
-      );
+      // Serialize concurrent creates and invite accepts for this user (Rule 10).
+      await lockUserMembership(tx, params.userId);
+
+      // A-20: an erasure holding this lock may have just committed; an erased
+      // account gets no household.
+      const [user] = await tx.select({ erasedAt: users.erasedAt }).from(users).where(eq(users.id, params.userId)).limit(1);
+      if (user?.erasedAt) {
+        throw new NotFoundError("User not found");
+      }
 
       // Authoritative single-household guard, now under the lock so it observes
       // any membership a concurrent create committed just before us.
@@ -123,6 +111,7 @@ export class HouseholdRepository {
         role: "owner",
       });
       await seedDefaultTags(household.id, tx);
+      await seedDefaultCategories(household.id, tx);
       return household;
     });
   }
@@ -169,7 +158,8 @@ export class HouseholdRepository {
         role: householdMembers.role,
         joinedAt: householdMembers.joinedAt,
         lastActiveAt: householdMembers.lastActiveAt,
-        name: users.fullName,
+        // AH-05: never a blank name on the members screen.
+        name: sql<string | null>`coalesce(${users.fullName}, ${users.displayName}, ${users.username})`,
         email: users.email,
       })
       .from(householdMembers)
@@ -201,184 +191,6 @@ export class HouseholdRepository {
       }
       throw error;
     }
-  }
-
-  async updateMemberRole(
-    householdId: string,
-    userId: string,
-    role: HouseholdRole
-  ) {
-    const result = await db
-      .update(householdMembers)
-      .set({ role })
-      .where(
-        and(
-          eq(householdMembers.householdId, householdId),
-          eq(householdMembers.userId, userId)
-        )
-      )
-      .returning();
-    return result[0];
-  }
-
-  async removeMember(householdId: string, userId: string) {
-    await db
-      .delete(householdMembers)
-      .where(
-        and(
-          eq(householdMembers.householdId, householdId),
-          eq(householdMembers.userId, userId)
-        )
-      );
-  }
-
-  /**
-   * SCP-318: transfer ownership atomically. The two role flips (new owner →
-   * "owner", current owner → "admin") must be one unit, else a partial failure
-   * or a concurrent transfer leaves the household with two owners or none.
-   * Both member rows are locked FOR UPDATE (consistent userId order, deadlock-
-   * safe) and the current owner's role is re-checked under the lock, so a second
-   * concurrent transfer sees the demoted owner and is rejected — guaranteeing
-   * exactly one owner.
-   */
-  async transferOwnership(
-    householdId: string,
-    currentOwnerId: string,
-    newOwnerId: string
-  ): Promise<void> {
-    await withTransaction(async (tx) => {
-      const lockedMembers = await tx
-        .select()
-        .from(householdMembers)
-        .where(
-          and(
-            eq(householdMembers.householdId, householdId),
-            inArray(householdMembers.userId, [currentOwnerId, newOwnerId])
-          )
-        )
-        .orderBy(householdMembers.userId)
-        .for("update");
-
-      const currentMember = lockedMembers.find(
-        (m) => m.userId === currentOwnerId
-      );
-      const targetMember = lockedMembers.find((m) => m.userId === newOwnerId);
-
-      if (!currentMember || currentMember.role !== "owner") {
-        throw new ForbiddenError(
-          "Only the current owner can transfer ownership"
-        );
-      }
-      if (!targetMember) {
-        throw new NotFoundError("Target member not found");
-      }
-
-      await tx
-        .update(householdMembers)
-        .set({ role: "owner" })
-        .where(
-          and(
-            eq(householdMembers.householdId, householdId),
-            eq(householdMembers.userId, newOwnerId)
-          )
-        );
-      await tx
-        .update(householdMembers)
-        .set({ role: "admin" })
-        .where(
-          and(
-            eq(householdMembers.householdId, householdId),
-            eq(householdMembers.userId, currentOwnerId)
-          )
-        );
-    });
-  }
-
-  /**
-   * SCP-333: change a member's role atomically. The previous flow read the
-   * target member outside a transaction, then wrote the new role, so a
-   * concurrent remove/transfer could change the row in between (read-then-write
-   * race). Here the target row is locked FOR UPDATE and re-checked under the
-   * lock before the update, so the decision and the write are one consistent
-   * unit. Authorization (who may change which role) stays in the controller;
-   * this method only guarantees the write is race-safe.
-   */
-  async updateMemberRoleAtomic(
-    householdId: string,
-    userId: string,
-    role: HouseholdRole
-  ) {
-    return await withTransaction(async (tx) => {
-      const [locked] = await tx
-        .select()
-        .from(householdMembers)
-        .where(
-          and(
-            eq(householdMembers.householdId, householdId),
-            eq(householdMembers.userId, userId)
-          )
-        )
-        .for("update")
-        .limit(1);
-
-      if (!locked) {
-        throw new NotFoundError("Member not found");
-      }
-
-      const [updated] = await tx
-        .update(householdMembers)
-        .set({ role })
-        .where(
-          and(
-            eq(householdMembers.householdId, householdId),
-            eq(householdMembers.userId, userId)
-          )
-        )
-        .returning();
-      return updated;
-    });
-  }
-
-  /**
-   * SCP-333: remove a member atomically with a race-safe last-member guard.
-   * The previous flow counted members and then deleted in two separate
-   * statements, so two concurrent removals could each see count > 1 and both
-   * delete, emptying the household. Here every member row is locked FOR UPDATE
-   * (consistent userId order, deadlock-safe), the target's presence and the
-   * "not the last member" invariant are re-checked under the lock, and only
-   * then is the delete issued — so the count check and the delete are one unit.
-   */
-  async removeMemberWithLastMemberGuard(
-    householdId: string,
-    userId: string
-  ): Promise<void> {
-    await withTransaction(async (tx) => {
-      const lockedMembers = await tx
-        .select()
-        .from(householdMembers)
-        .where(eq(householdMembers.householdId, householdId))
-        .orderBy(householdMembers.userId)
-        .for("update");
-
-      const target = lockedMembers.find((m) => m.userId === userId);
-      if (!target) {
-        throw new NotFoundError("Member not found");
-      }
-      if (lockedMembers.length <= 1) {
-        throw new ValidationError(
-          "Cannot remove the last member of the household"
-        );
-      }
-
-      await tx
-        .delete(householdMembers)
-        .where(
-          and(
-            eq(householdMembers.householdId, householdId),
-            eq(householdMembers.userId, userId)
-          )
-        );
-    });
   }
 
   async findPreferences(householdId: string) {
@@ -529,98 +341,6 @@ export class HouseholdRepository {
         acceptedBy: acceptedByUserId,
       })
       .where(eq(householdInvitations.id, invitationId))
-      .returning();
-    return result[0];
-  }
-
-  /**
-   * SCP-318: accept an invitation atomically. addMember + markInvitationAccepted
-   * must be one unit, else two concurrent accepts of the same code can both add
-   * the member unless the invitation is serialized; the database membership
-   * constraint remains the final backstop. The invitation row is locked FOR
-   * UPDATE and its acceptedAt re-checked under the lock, and a
-   * duplicate-membership guard runs inside the same transaction.
-   *
-   * Membership-lifecycle race (Gap 2): the household row is locked FOR UPDATE
-   * FIRST, as a stable serialization anchor against a concurrent sole-member
-   * account erasure (which deletes this household). The invitation lock alone is
-   * not enough: a sole-member erase would not contend on it in time, so the
-   * joiner could be inserted into a household being deleted and then silently
-   * cascade-removed (household_members.household_id is ON DELETE CASCADE).
-   * eraseAccount takes the same household lock, so the two fully serialize.
-   * Parent-first lock order (household → invitation → member) is deadlock-safe.
-   */
-  async acceptInvite(
-    invitationId: string,
-    householdId: string,
-    userId: string,
-    role: HouseholdRole
-  ): Promise<void> {
-    await withTransaction(async (tx) => {
-      const [householdRow] = await tx
-        .select({ id: households.id })
-        .from(households)
-        .where(eq(households.id, householdId))
-        .for("update")
-        .limit(1);
-      if (!householdRow) {
-        throw new NotFoundError("Household no longer exists");
-      }
-
-      const [locked] = await tx
-        .select()
-        .from(householdInvitations)
-        .where(eq(householdInvitations.id, invitationId))
-        .for("update")
-        .limit(1);
-
-      if (!locked) {
-        throw new NotFoundError("Invitation not found or invalid code");
-      }
-      if (locked.acceptedAt) {
-        throw new ConflictError("This invitation has already been used");
-      }
-
-      const existing = await tx
-        .select()
-        .from(householdMembers)
-        .where(
-          and(
-            eq(householdMembers.householdId, householdId),
-            eq(householdMembers.userId, userId)
-          )
-        )
-        .for("update")
-        .limit(1);
-      if (existing[0]) {
-        throw new ConflictError("You are already a member of this household");
-      }
-
-      await tx.insert(householdMembers).values({ householdId, userId, role });
-      await tx
-        .update(householdInvitations)
-        .set({ acceptedAt: new Date(), acceptedBy: userId })
-        .where(eq(householdInvitations.id, invitationId));
-    });
-  }
-
-  /**
-   * Update invitation expiry (for resending invites)
-   */
-  async updateInvitationExpiry(
-    invitationId: string,
-    householdId: string,
-    newExpiresAt: Date
-  ): Promise<HouseholdInvitation | undefined> {
-    const result = await db
-      .update(householdInvitations)
-      .set({ expiresAt: newExpiresAt })
-      .where(
-        and(
-          eq(householdInvitations.id, invitationId),
-          eq(householdInvitations.householdId, householdId)
-        )
-      )
       .returning();
     return result[0];
   }

@@ -70,7 +70,9 @@ export function MerchantFormFields({ state, updateForm }: MerchantFormFieldsProp
           }
         />
         <p className="text-xs text-muted-foreground">
-          Allowed types: JPG, PNG, SVG, WEBP.
+          Allowed types: JPG, PNG, WEBP up to 2 MB, or a vector-only SVG up to
+          512 KB (no embedded images or comments). SVG logos are converted to
+          PNG.
         </p>
         {viewState.editingMerchant ? (
           <div className="flex gap-2">

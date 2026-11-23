@@ -11,7 +11,16 @@ export interface ChatRequest {
   message: string;
   /** Omit to start a new thread; resend the returned id to keep one thread. */
   conversationId?: string;
+  /**
+   * R17: idempotency key for ONE logical request (16-128 URL-safe chars).
+   * Resend the same key on a retry so a completed request replays.
+   */
+  clientRequestKey?: string;
 }
+
+/** R17: which processor produced the reply (server `answerMode`). */
+export type AnswerMode = "claude" | "gemini" | "local" | "unavailable";
+export type ProviderId = "anthropic" | "gemini";
 
 export interface ResponseProvenance {
   dataWindow: {
@@ -24,11 +33,18 @@ export interface ResponseProvenance {
 
 export interface ChatResponse {
   reply: string;
-  conversationId: string;
+  /** Absent on a reply that belongs to no stored thread (R17 #255 r4). */
+  conversationId?: string;
   toolsUsed: string[];
   tokenCount: number;
   remainingQueries: number;
   provenance?: ResponseProvenance;
+  /** Additive (R17): absent on older deployments. */
+  answerMode?: AnswerMode;
+  providers?: {
+    analysis: ProviderId | "local" | null;
+    answer: ProviderId | "local" | null;
+  };
 }
 
 export interface AIStatusResponse {
@@ -44,6 +60,20 @@ export interface AIStatusResponse {
    * absent on older server deployments, so treat as `false` when undefined.
    */
   degraded?: boolean;
+  /** Additive (R17): real health from the server's attempt ledger. */
+  state?: "unconfigured" | "operational" | "degraded" | "outage";
+  quotaLimited?: boolean;
+  providers?: Array<{
+    provider: ProviderId;
+    role: "primary" | "fallback";
+    configured: boolean;
+    model: string | null;
+    health: "unconfigured" | "unverified" | "healthy" | "unhealthy";
+    lastCheckedAt: string | null;
+    lastFailureCategory: string | null;
+    /** Why the provider cannot be used now: no key/model, no operator call cap, or cap reached. */
+    unavailableReason?: "not_configured" | "no_cap" | "cap_reached" | null;
+  }>;
   rateLimit: {
     remaining: number;
     resetTime: string;
@@ -89,4 +119,6 @@ export interface ThandiMessage {
   timestamp: string;
   toolsUsed?: string[];
   provenance?: ResponseProvenance;
+  /** Assistant messages only: who produced this reply (R17). */
+  answerMode?: AnswerMode;
 }

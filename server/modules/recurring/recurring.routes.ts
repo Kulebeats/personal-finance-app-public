@@ -9,7 +9,7 @@
 import { Router } from "express";
 import { householdGuard } from "../../middleware/householdGuard";
 import { requireRole } from "../../middleware/validateEntity";
-import { generalLimiter, analyticsLimiter } from "../../middleware/rateLimit";
+import { analyticsLimiter } from "../../middleware/rateLimit";
 import { recurringController } from "./recurring.controller";
 
 const router = Router();
@@ -17,13 +17,12 @@ const router = Router();
 // All routes require auth and household context
 router.use(householdGuard);
 
-// Apply general rate limiting to all routes
-router.use(generalLimiter);
 
 // =========================================================================
 // Query Routes (before :id to avoid conflicts)
 // =========================================================================
 router.get("/", recurringController.list);
+router.get("/calendar", recurringController.getCalendar);
 router.get("/upcoming", recurringController.getUpcoming);
 router.get("/summary", analyticsLimiter, recurringController.getSummary);
 

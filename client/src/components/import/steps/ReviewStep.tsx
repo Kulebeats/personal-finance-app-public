@@ -13,6 +13,10 @@ import {
 import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import type { Account, ApiResponse } from "@/lib/api";
+import { previewImportDates } from "../datePreview";
+import { ImportDatePreview } from "../ImportDatePreview";
+import { ImportDuplicateReview } from "../ImportDuplicateReview";
+import { useImportPreview } from "../useImportPreview";
 
 export function ReviewStep() {
   const {
@@ -22,7 +26,13 @@ export function ReviewStep() {
     setStep,
     targetAccountId,
     setTargetAccountId,
+    mapping,
+    dateFormat,
   } = useImportWizard();
+  const preview = previewImportDates(parsedData?.rows ?? [], mapping.date, dateFormat);
+  const serverPreview = useImportPreview();
+  // Import only after the duplicate check has run, so candidate choices are explicit.
+  const isPreviewBlocked = !serverPreview.data || (serverPreview.data.counts.conflict ?? 0) > 0;
 
   // Fetch accounts. GET /api/accounts returns the V7 envelope
   // { success: true, data: Account[] } — data IS the bare accounts array.
@@ -32,6 +42,7 @@ export function ReviewStep() {
   const accounts = accountsResponse?.data ?? [];
 
   const handleNext = () => {
+    if (preview.hasErrors || !preview.rows.length || isPreviewBlocked) return;
     if (!targetAccountId) {
       alert("Please select a target account");
       return;
@@ -52,6 +63,9 @@ export function ReviewStep() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-8">
+        <p className="text-sm">CSV date format: {dateFormat === "auto" ? "Auto (unambiguous dates only)" : dateFormat}.
+          Calendar dates; no timezone conversion.</p>
+        <ImportDatePreview dates={preview.dates} />
         {/* Account Selection */}
         <div className="space-y-2">
           <Label className="text-sm font-medium">Target Account *</Label>
@@ -145,6 +159,11 @@ export function ReviewStep() {
           </div>
         </RadioGroup>
 
+        {targetAccountId && (
+          <ImportDuplicateReview preview={serverPreview.data} isLoading={serverPreview.isLoading}
+            error={serverPreview.error} />
+        )}
+
         {importStrategy === "prioritize_csv" && (
           <Alert variant="destructive">
             <AlertTriangle className="h-4 w-4" />
@@ -163,7 +182,7 @@ export function ReviewStep() {
         </Button>
         <Button
           onClick={handleNext}
-          disabled={!targetAccountId}
+          disabled={!targetAccountId || preview.hasErrors || !preview.rows.length || isPreviewBlocked}
           variant={
             importStrategy === "prioritize_csv" ? "destructive" : "default"
           }

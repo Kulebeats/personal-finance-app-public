@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { priceGrzBond } from "../services/grz-bond-pricing";
 import { z } from "zod";
 import {
   calculateAccruedInterest,
@@ -7,9 +8,8 @@ import {
   calculateYieldToMaturity,
 } from "../services/grz-service";
 import { householdGuard } from "../middleware/householdGuard";
-import { requireRole } from "../middleware/validateEntity";
+import { requireCapability } from "../core/authz/requireCapability";
 import { requireAuth } from "../auth";
-import { generalLimiter } from "../middleware/rateLimit";
 
 const router = Router();
 
@@ -23,7 +23,7 @@ const bondPriceSchema = z.object({
   requiredYield: numeric(z.number().nonnegative()),
   frequency: numeric(z.number().int().positive()).optional(),
   accruedInterest: numeric(z.number().nonnegative()).optional(),
-});
+}).strict();
 
 const ytmSchema = z.object({
   faceValue: numeric(z.number().positive()),
@@ -49,11 +49,13 @@ const tbillYieldSchema = z.object({
 
 // SEC-AUTH-006: Apply authentication, rate limiting, and household isolation
 router.use(requireAuth);
-router.use(generalLimiter);
 router.use(householdGuard);
 
-router.post("/bond-price", requireRole("member"), (req, res) => {
+router.post("/bond-price", requireCapability("financial.read"), (req, res) => {
   try {
+    if (req.body && Object.prototype.hasOwnProperty.call(req.body, "method")) {
+      return res.json({ success: true, data: priceGrzBond(req.body) });
+    }
     const data = bondPriceSchema.parse(req.body);
     const result = calculateBondPriceFromYield({
       faceValue: data.faceValue,
@@ -72,7 +74,7 @@ router.post("/bond-price", requireRole("member"), (req, res) => {
   }
 });
 
-router.post("/ytm", requireRole("member"), (req, res) => {
+router.post("/ytm", requireCapability("financial.read"), (req, res) => {
   try {
     const data = ytmSchema.parse(req.body);
     const result = calculateYieldToMaturity({
@@ -91,7 +93,7 @@ router.post("/ytm", requireRole("member"), (req, res) => {
   }
 });
 
-router.post("/accrued", requireRole("member"), (req, res) => {
+router.post("/accrued", requireCapability("financial.read"), (req, res) => {
   try {
     const data = accruedSchema.parse(req.body);
     const result = calculateAccruedInterest({
@@ -110,7 +112,7 @@ router.post("/accrued", requireRole("member"), (req, res) => {
   }
 });
 
-router.post("/tbill-yield", requireRole("member"), (req, res) => {
+router.post("/tbill-yield", requireCapability("financial.read"), (req, res) => {
   try {
     const data = tbillYieldSchema.parse(req.body);
     const result = calculateTBillYield({

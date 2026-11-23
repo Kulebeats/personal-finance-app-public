@@ -1,14 +1,14 @@
+import { listVisibleBills, listVisibleBonds } from "../services/grz/holdingVisibility";
 import { Router } from "express";
+import { recordBillSchema, recordBondSchema } from "../services/grz/acquisition";
 import { db } from "../db";
 import {
+  accounts,
   grzBonds,
   grzTBills,
   grzBondPayments,
-  investmentTransactions,
-  insertGrzBondSchema,
-  insertGrzTBillSchema,
 } from "@shared/schema";
-import { eq, desc, and, sql } from "drizzle-orm";
+import { eq, and, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   generateBondSchedule,
@@ -18,9 +18,9 @@ import { transactionService } from "../services/TransactionService";
 import { householdGuard } from "../middleware/householdGuard";
 import { requireRole } from "../middleware/validateEntity";
 import { requireAuth } from "../auth";
-import { generalLimiter } from "../middleware/rateLimit";
 import { Money } from "../core/money";
-import Decimal from "decimal.js";
+import { isValidDateString } from "../utils/dateUtils";
+import { householdToday } from "../services/householdCalendarToday";
 import { withTransaction } from "../utils/withTransaction";
 import { businessAuditService } from "../services/BusinessAuditService";
 import {
@@ -30,25 +30,21 @@ import {
   ValidationError,
 } from "../core/errors";
 import { success, created } from "../core/http";
+import { grzBondDto, grzPaymentDto, grzTBillDto } from "../services/grz/grzDto";
+import { GRZ_POLICY_DEFAULTS } from "../services/grz/grzPolicyDefaults";
 import { asyncHandler } from "../utils/errorHandler";
+import { GRZ_COUPON_CURRENCY, lockCouponPayment, lockGrzSettlementAccounts, lockGrzWriter } from "../services/grz/couponPaymentAccess";
 import { grzCouponPaymentKey } from "../services/grz/couponPaymentKey";
+import { settleGrzPrincipal } from "../services/grz/principalSettlement";
+import { readLockedGrzPrincipalValuation } from "../services/grz/bondValuation";
+import { sellGrzBond } from "../services/grz/bondSale";
+import { confirmTBillReceipt } from "../services/grz/tbillSettlement";
 
 const router = Router();
 
 // SEC-AUTH-005: Apply authentication, rate limiting, and household isolation
 router.use(requireAuth);
-router.use(generalLimiter);
 router.use(householdGuard);
-
-const sellBondSchema = z.object({
-  soldDate: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/)
-    .optional(),
-  soldPrice: z.coerce.number().positive(),
-  soldYield: z.coerce.number().nonnegative().optional(),
-  accountId: z.string().uuid().optional(),
-});
 
 // ============================================================================
 // GRZ BONDS
@@ -58,17 +54,8 @@ const sellBondSchema = z.object({
 router.get(
   "/bonds",
   asyncHandler(async (req, res) => {
-    const { householdId } = req.householdContext!;
-
-    const bonds = await db.query.grzBonds.findMany({
-      where: eq(grzBonds.householdId, householdId),
-      with: {
-        payments: true,
-      },
-      orderBy: [desc(grzBonds.purchaseDate)],
-    });
-
-    success(res, bonds);
+    const bonds = await listVisibleBonds(req.householdContext!);
+    success(res, bonds.map(grzBondDto), 200, { policy: GRZ_POLICY_DEFAULTS });
   })
 );
 
@@ -80,10 +67,7 @@ router.post(
     const { householdId, userId } = req.householdContext!;
 
     // Parse body
-    const parseResult = insertGrzBondSchema.safeParse({
-      ...req.body,
-      householdId,
-    });
+    const parseResult = recordBondSchema.safeParse(req.body);
     if (!parseResult.success) {
       throw new ValidationError(
         "Invalid bond data",
@@ -92,35 +76,21 @@ router.post(
     }
     const data = parseResult.data;
 
-    // FIX AUTH-GRZ-ACC-001: Validate account ownership
-    if (data.accountId) {
-      const { accountRepository } = await import(
-        "../repositories/AccountRepository"
-      );
-      const account = await accountRepository.findById(
-        data.accountId,
-        householdId
-      );
-      if (!account) {
-        throw new NotFoundError(
-          "Account not found or does not belong to this household"
-        );
-      }
-    }
-
     const newBond = await withTransaction(async (tx) => {
-      const [bond] = await tx.insert(grzBonds).values(data).returning();
+      const actor = await lockGrzWriter(tx, req.householdContext!);
+      if (data.accountId) await lockGrzSettlementAccounts(tx, actor, null, data.accountId, "share", "Account");
+      const [bond] = await tx.insert(grzBonds).values({ ...data, householdId }).returning();
 
       // Generate coupon schedule. SCP-311: pass decimals as strings (wrapped in Money).
       const schedule = generateBondSchedule(
-        new Date(data.purchaseDate),
-        new Date(data.maturityDate),
-        data.faceValue,
-        data.couponRate,
+        new Date(bond.purchaseDate),
+        new Date(bond.maturityDate),
+        bond.faceValue,
+        bond.couponRate,
         {
-          couponFrequency: data.couponFrequency || undefined,
-          firstCouponDate: data.firstCouponDate
-            ? new Date(data.firstCouponDate)
+          couponFrequency: bond.couponFrequency ?? undefined,
+          firstCouponDate: bond.firstCouponDate
+            ? new Date(bond.firstCouponDate)
             : undefined,
         }
       );
@@ -165,7 +135,7 @@ router.post(
       return bond;
     });
 
-    created(res, newBond);
+    created(res, grzBondDto(newBond));
   })
 );
 
@@ -177,164 +147,17 @@ router.post(
 router.get(
   "/tbills",
   asyncHandler(async (req, res) => {
-    const { householdId } = req.householdContext!;
-
-    const tbills = await db.query.grzTBills.findMany({
-      where: eq(grzTBills.householdId, householdId),
-      orderBy: [desc(grzTBills.purchaseDate)],
-    });
-
-    success(res, tbills);
+    const tbills = await listVisibleBills(req.householdContext!);
+    success(res, tbills.map(grzTBillDto), 200, { policy: GRZ_POLICY_DEFAULTS });
   })
 );
 
-// PUT /api/grz/bonds/:id/sell
+// PUT /api/grz/bonds/:id/sell - confirmed sale settles cash once (NEW-04, GRZ-03)
 router.put(
   "/bonds/:id/sell",
   requireRole("member"),
   asyncHandler(async (req, res) => {
-    const { householdId, userId } = req.householdContext!;
-    const { id } = req.params;
-    const parseResult = sellBondSchema.safeParse(req.body);
-    if (!parseResult.success) {
-      throw new ValidationError(
-        "Invalid sell data",
-        parseResult.error.errors
-      );
-    }
-    const payload = parseResult.data;
-
-    const bond = await db.query.grzBonds.findFirst({
-      where: eq(grzBonds.id, id),
-    });
-
-    if (!bond) {
-      throw new NotFoundError("Bond not found");
-    }
-
-    if (bond.householdId !== householdId) {
-      throw new ForbiddenError();
-    }
-
-    // NOTE: this is a pre-flight check only — it reads outside the transaction,
-    // so it cannot be trusted to be still true by the time we write. The
-    // authoritative already-sold guard is re-run under FOR UPDATE inside the
-    // transaction below. This early throw only avoids the extra work in the
-    // common (uncontended) case and preserves the existing conflict contract.
-    if (bond.status === "sold") {
-      throw new ConflictError("Bond is already sold");
-    }
-
-    const soldDate = payload.soldDate || new Date().toISOString().split("T")[0];
-    const accountId = bond.accountId || payload.accountId;
-
-    if (!accountId) {
-      throw new ValidationError("Account ID is required");
-    }
-
-    // FIX AUTH-GRZ-ACC-001: Validate account ownership before creating transaction
-    const { accountRepository } = await import(
-      "../repositories/AccountRepository"
-    );
-    const account = await accountRepository.findById(accountId, householdId);
-    if (!account) {
-      throw new NotFoundError(
-        "Account not found or does not belong to this household"
-      );
-    }
-
-    // SCP-311: sale proceeds via Money (exact ledger value); soldYield is a rate.
-    const soldPriceStored = new Money(payload.soldPrice, "ZMW").toString();
-    const soldYieldStored =
-      payload.soldYield !== undefined
-        ? new Decimal(payload.soldYield).toDecimalPlaces(4, Decimal.ROUND_HALF_UP).toString()
-        : null;
-
-    const result = await withTransaction(async (tx) => {
-      // CONCURRENCY (CLAUDE.md Rule 10): lock the bond row, then re-check its
-      // state INSIDE the lock before writing.
-      //
-      // The status check above is a read-then-write TOCTOU: two concurrent sells
-      // (a double-clicked button, a retried request) both read status='active',
-      // both pass the check, and both proceed to write — flipping the bond to
-      // 'sold' twice AND inserting TWO investment_transactions rows, so the same
-      // bond's proceeds are booked to the ledger twice. The sale is not
-      // idempotent, so the second one is pure phantom income.
-      //
-      // FOR UPDATE serializes the two transactions on this row: the second one
-      // blocks until the first commits, then observes the committed
-      // status='sold' and aborts without writing. The bond row already exists
-      // here, so FOR UPDATE genuinely locks it (unlike a lock attempt on a
-      // not-yet-inserted row, which would lock nothing — Postgres has no gap
-      // locking).
-      const [locked] = await tx
-        .select()
-        .from(grzBonds)
-        .where(and(eq(grzBonds.id, id), eq(grzBonds.householdId, householdId)))
-        .for("update")
-        .limit(1);
-
-      if (!locked) {
-        throw new NotFoundError("Bond not found");
-      }
-
-      // Authoritative guard: re-read under the lock, so it reflects any sell a
-      // concurrent request committed a moment ago.
-      if (locked.status === "sold") {
-        throw new ConflictError("Bond is already sold");
-      }
-
-      const [updated] = await tx
-        .update(grzBonds)
-        .set({
-          status: "sold",
-          soldDate,
-          soldPrice: soldPriceStored,
-          soldYield: soldYieldStored,
-          updatedAt: new Date(),
-        })
-        .where(eq(grzBonds.id, id))
-        .returning();
-
-      const [investmentTx] = await tx
-        .insert(investmentTransactions)
-        .values({
-          householdId,
-          accountId,
-          type: "sell",
-          amount: soldPriceStored,
-          currency: "ZMW",
-          transactionDate: soldDate,
-          notes: `GRZ Bond Sale: ${bond.bondName}${
-            bond.isin ? ` (${bond.isin})` : ""
-          }`,
-        })
-        .returning();
-
-      // DPA audit (SCP-312)
-      await businessAuditService.logUpdate({
-        userId,
-        householdId,
-        entityType: "grz_bond",
-        entityId: id,
-        oldValue: { status: bond.status },
-        newValue: {
-          status: "sold",
-          soldDate,
-          soldPrice: updated.soldPrice,
-        },
-        metadata: { action: "sell", investmentTransactionId: investmentTx.id },
-        ipAddress: businessAuditService.getIpAddress(req),
-        tx,
-      });
-
-      return { updated, investmentTx };
-    });
-
-    // The pre-flight checks above throw the SAME error classes as the in-lock
-    // guards inside the transaction, so a caller sees an identical contract
-    // whether the duplicate sell was caught before the transaction or inside
-    // it — only the timing differs, never the meaning.
+    const result = await sellGrzBond(req.householdContext!, req.params.id, req.body, businessAuditService.getIpAddress(req));
     success(res, result);
   })
 );
@@ -346,19 +169,7 @@ router.post(
   asyncHandler(async (req, res) => {
     const { householdId, userId } = req.householdContext!;
 
-    // Calculate T-Bill metrics. SCP-311: money as strings (wrapped in Money); tenorDays is a count.
-    const calculations = calculateTBillResults(
-      String(req.body.faceValue),
-      String(req.body.purchasePrice),
-      Number(req.body.tenorDays)
-    );
-
-    const parseResult = insertGrzTBillSchema.safeParse({
-      ...req.body,
-      householdId,
-      purchaseYield: String(calculations.annualizedYield),
-      discountAmount: new Money(calculations.discount, "ZMW").toString(),
-    });
+    const parseResult = recordBillSchema.safeParse(req.body);
     if (!parseResult.success) {
       throw new ValidationError(
         "Invalid T-Bill data",
@@ -366,25 +177,18 @@ router.post(
       );
     }
     const data = parseResult.data;
-
-    // FIX AUTH-GRZ-ACC-001: Validate account ownership
-    if (data.accountId) {
-      const { accountRepository } = await import(
-        "../repositories/AccountRepository"
-      );
-      const account = await accountRepository.findById(
-        data.accountId,
-        householdId
-      );
-      if (!account) {
-        throw new NotFoundError(
-          "Account not found or does not belong to this household"
-        );
-      }
-    }
+    const calculations = calculateTBillResults(data.faceValue, data.purchasePrice, data.tenorDays);
 
     const newTBill = await withTransaction(async (tx) => {
-      const [tbill] = await tx.insert(grzTBills).values(data).returning();
+      const actor = await lockGrzWriter(tx, req.householdContext!);
+      // A-42: new T-bills must name an account eligible for settlement in the form.
+      const settlement = await lockGrzSettlementAccounts(tx, actor, null, data.accountId, "share", "Account");
+      if (settlement.currency !== "ZMW" || !settlement.isAsset || settlement.isArchived) {
+        throw new ValidationError("A T-bill must mature into an active ZMW asset account");
+      }
+      const [tbill] = await tx.insert(grzTBills).values({ ...data, householdId,
+        purchaseYield: String(calculations.annualizedYield), discountAmount: new Money(calculations.discount, "ZMW").toString(),
+      }).returning();
 
       // DPA audit (SCP-312)
       await businessAuditService.logCreate({
@@ -393,10 +197,10 @@ router.post(
         entityType: "grz_tbill",
         entityId: tbill.id,
         newValue: {
-          faceValue: data.faceValue,
-          purchasePrice: data.purchasePrice,
-          purchaseYield: data.purchaseYield,
-          discountAmount: data.discountAmount,
+          faceValue: tbill.faceValue,
+          purchasePrice: tbill.purchasePrice,
+          purchaseYield: tbill.purchaseYield,
+          discountAmount: tbill.discountAmount,
         },
         ipAddress: businessAuditService.getIpAddress(req),
         tx,
@@ -405,21 +209,32 @@ router.post(
       return tbill;
     });
 
-    created(res, newTBill);
+    created(res, grzTBillDto(newTBill));
+  })
+);
+
+// POST /api/grz/tbills/:id/confirm-receipt - the member confirms the bank credit (A-36)
+router.post(
+  "/tbills/:id/confirm-receipt",
+  requireRole("member"),
+  asyncHandler(async (req, res) => {
+    const result = await confirmTBillReceipt(req.householdContext!, req.params.id, req.body, businessAuditService.getIpAddress(req));
+    success(res, grzTBillDto(result.bill));
   })
 );
 
 // POST /api/grz/payments/:id/pay
+const payAccountSchema = z.object({ accountId: z.string().uuid() }).passthrough();
 router.post(
   "/payments/:id/pay",
   requireRole("member"),
   asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { accountId, date } = req.body;
-
-    if (!accountId) {
-      throw new ValidationError("Account ID is required");
-    }
+    // NEW-33: a malformed account id is a client error, caught before any lookup.
+    const parsedAccount = payAccountSchema.safeParse(req.body);
+    if (!parsedAccount.success) throw new ValidationError("Account ID is required and must be a UUID", parsedAccount.error.errors);
+    const { accountId } = parsedAccount.data;
+    const { date } = req.body;
 
     const { householdId, userId } = req.householdContext!;
 
@@ -427,7 +242,7 @@ router.post(
     const { accountRepository } = await import(
       "../repositories/AccountRepository"
     );
-    const account = await accountRepository.findById(accountId, householdId);
+    const account = await accountRepository.findByIdWithVisibility(accountId, householdId, userId);
     if (!account) {
       throw new NotFoundError(
         "Account not found or does not belong to this household"
@@ -450,48 +265,53 @@ router.post(
       throw new ForbiddenError();
     }
 
+    if (payment.bond.accountId && payment.bond.accountId !== account.id &&
+        !await accountRepository.findByIdWithVisibility(payment.bond.accountId, householdId, userId)) {
+      throw new NotFoundError("Payment not found");
+    }
+
     // NOTE: pre-flight only — this reads outside the transaction, so it cannot
     // be trusted to still hold by the time we write. The authoritative
     // already-paid guard is re-run under FOR UPDATE inside the transaction
     // below. This early throw only avoids the extra work in the common
     // (uncontended) case and preserves the existing conflict contract.
+    if (payment.paymentType === "principal") {
+      const result = await settleGrzPrincipal(req.householdContext!, payment.id, req.body,
+        readLockedGrzPrincipalValuation, businessAuditService.getIpAddress(req));
+      const settlement = { operationId: result.settlement.operationId, status: result.settlement.status,
+        pendingReason: result.pendingReason, cashTransactionId: result.settlement.cashTransactionId };
+      return res.status(result.pending ? 202 : 200).json({ success: true, data: { ...grzPaymentDto(result.payment), settlement } });
+    }
     if (payment.status === "paid") {
       throw new ConflictError("Payment is already marked as paid");
     }
 
-    const paymentDate = date ? new Date(date) : new Date();
+    if (date !== undefined && (typeof date !== "string" || !isValidDateString(date))) {
+      throw new ValidationError("Payment date must be a valid calendar date");
+    }
+    const paymentDate: string = date ?? await householdToday(db, householdId);
     // SCP-311: keep the DB net-coupon decimal in Money so the ledger income value is exact.
-    const netCouponMoney = new Money(payment.netAmount ?? "0", "ZMW");
+    const netCouponMoney = new Money(payment.netAmount, GRZ_COUPON_CURRENCY);
 
     // 2. Create Transaction (Income)
     //
-    // CONCURRENCY (CLAUDE.md Rule 10): this ledger write happens BEFORE — and
-    // outside — the payment-row lock below, because transactionService owns its
-    // own transaction and takes no external tx. So the lock alone cannot stop
-    // two concurrent pays from each booking an income row. The deterministic
-    // idempotency key is what makes that impossible: both requests derive the
-    // SAME uuidv5 from the payment id, and `transactions.idempotency_key` is a
-    // UNIQUE column, so the loser's insert collides and returns the winner's
-    // transaction (isDuplicate=true) rather than inserting a second coupon.
-    //
-    // Keyed on the payment id alone, deliberately: a scheduled coupon row is
-    // payable exactly once, so its id fully identifies the ledger row it may
-    // produce. It is NOT keyed on the date — `paymentDate` defaults to now(),
-    // so two concurrent pays would derive different dates and a date-bearing key
-    // would let both through, which is the very bug being closed.
+    // The posting transaction locks the grant, bond, payment and accounts. Its
+    // payment-based key permits recovery if the later status update rolls back.
     const { transaction } = await transactionService.createTransaction(
       {
         accountId,
         amount: netCouponMoney.toString(),
-        date: paymentDate.toISOString().split("T")[0],
+        currency: GRZ_COUPON_CURRENCY,
+        date: paymentDate,
         type: "income",
         name: `GRZ Coupon: ${payment.bond.bondName}`,
-        notes: `Coupon Payment for ${payment.bond.bondName}. Gross: ${payment.grossAmount}, WHT: ${payment.withholdingTax}`,
         // categoryId: ??? - Should be "Interest Income" or similar. Leaving null for now.
       },
       householdId,
       userId,
-      grzCouponPaymentKey(id)
+      grzCouponPaymentKey(payment.id),
+      undefined,
+      { couponPaymentId: payment.id },
     );
 
     // 3. Create Investment Transaction
@@ -503,39 +323,17 @@ router.post(
     // (The income transaction above is created by the shared transactionService,
     // which takes no external tx; the audit is atomic with the GRZ payment write.)
     const updated = await withTransaction(async (tx) => {
-      // CONCURRENCY (CLAUDE.md Rule 10): lock the payment row and re-check its
-      // state INSIDE the lock before writing. The status check above is a
-      // read-then-write TOCTOU: two concurrent pays (a double-clicked button, a
-      // retried request) both read status='scheduled', both pass, and both write
-      // — marking the coupon paid twice and emitting TWO audit rows.
-      //
-      // FOR UPDATE serializes them on this row: the loser blocks until the
-      // winner commits, sees status='paid', and aborts without writing. The
-      // payment row already exists here, so FOR UPDATE genuinely locks it
-      // (Postgres has no gap locking — a lock on a not-yet-inserted row would
-      // lock nothing).
-      const [locked] = await tx
-        .select()
-        .from(grzBondPayments)
-        .where(eq(grzBondPayments.id, id))
-        .for("update")
-        .limit(1);
-
-      if (!locked) {
-        throw new NotFoundError("Payment not found");
-      }
-
-      // Authoritative guard: re-read under the lock, so it reflects any pay a
-      // concurrent request committed a moment ago.
-      if (locked.status === "paid") {
-        throw new ConflictError("Payment is already marked as paid");
-      }
+      const locked = await lockCouponPayment(tx, req.householdContext!, payment.id, transaction.id, account.id,
+        date === undefined ? undefined : paymentDate);
+      const scopeIds = Array.from(new Set([locked.posting.accountId, ...(locked.bond.accountId ? [locked.bond.accountId] : [])]));
+      const privacy = await tx.select({ private: accounts.isPrivate }).from(accounts).where(inArray(accounts.id, scopeIds));
+      const auditHouseholdId = !locked.bond.accountId || locked.posting.isPrivate || privacy.some(row => row.private) ? null : householdId;
 
       const [u] = await tx
         .update(grzBondPayments)
         .set({
           status: "paid",
-          actualPaymentDate: paymentDate.toISOString().split("T")[0],
+          actualPaymentDate: locked.posting.date,
           incomeTransactionId: transaction.id,
         })
         .where(eq(grzBondPayments.id, id))
@@ -543,15 +341,13 @@ router.post(
 
       await businessAuditService.log({
         userId,
-        householdId,
+        householdId: auditHouseholdId,
         action: "PROCESS",
         entityType: "grz_bond_payment",
         entityId: id,
         details: {
-          bondName: payment.bond.bondName,
-          grossAmount: payment.grossAmount,
-          withholdingTax: payment.withholdingTax,
-          netAmount: payment.netAmount,
+          bondName: locked.bond.bondName,
+          ...locked.breakdown,
           incomeTransactionId: transaction.id,
         },
         ipAddress: businessAuditService.getIpAddress(req),
@@ -561,11 +357,11 @@ router.post(
       return u;
     });
 
-    // The pre-flight checks above throw the SAME error classes as the in-lock
+    // The in-lock
     // guards inside the transaction, so a caller sees an identical contract
     // whether the duplicate pay was caught before the transaction or inside
     // it — only the timing differs, never the meaning.
-    success(res, updated);
+    success(res, grzPaymentDto(updated));
   })
 );
 

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { marketDataService } from "../services/MarketDataService";
-import { requireAuth, householdGuard, requireRole } from "../middleware/auth";
+import { requireAuth } from "../middleware/auth";
+import { requireSuperAdmin } from "../middleware/systemRoleGuard";
 import { analyticsLimiter } from "../middleware/rateLimit";
 import { logger } from "../utils/logger";
 
@@ -11,17 +12,19 @@ router.use(analyticsLimiter);
 
 /**
  * POST /api/investments/market/refresh
- * Manually trigger a refresh of security prices and FX rates
+ * Manually trigger a refresh of security prices and FX rates.
+ * NEW-13: curated reference prices are global, so only an operator may refresh
+ * them, and the operator needs no household: the audit rows name none.
  */
 router.post(
   "/refresh",
   requireAuth,
-  householdGuard,
-  requireRole("member"),
-  async (_req, res) => {
+  requireSuperAdmin(),
+  async (req, res) => {
     try {
-      const fxResult = await marketDataService.updateFXRates();
-      const priceResult = await marketDataService.updateSecurityPrices();
+      const actor = { userId: req.session.userId! };
+      const fxResult = await marketDataService.updateFXRates(actor);
+      const priceResult = await marketDataService.updateSecurityPrices(actor);
 
       res.json({
         success: true,
@@ -34,7 +37,6 @@ router.post(
       res.status(500).json({
         success: false,
         message: "Failed to refresh market data",
-        error: String(err),
       });
     }
   }

@@ -6,6 +6,9 @@
 
 import { toast } from "sonner";
 import { apiCall, clearCsrfToken } from "@/lib/api";
+import { withFieldErrors, type AuthFieldError } from "./authFieldErrors";
+import { authErrorCopy } from "./authErrorCopy";
+import { beginSessionTransition, completeSessionTransition } from "@/lib/session";
 
 interface LoginData {
   email: string;
@@ -26,28 +29,23 @@ interface LoginResult {
   maskedEmail?: string;
   isEmailNotVerified?: boolean;
   message?: string;
+  fieldErrors?: AuthFieldError[];
 }
 
 interface ApiResult {
   success: boolean;
   message?: string;
+  fieldErrors?: AuthFieldError[];
 }
 
 interface AuthEnvelope<T = unknown> {
   success: boolean;
   data?: T;
-  error?: { message?: string };
+  error?: { code?: string; message?: string; fields?: unknown };
   message?: string;
 }
 
-type AuthError = Error & { status?: number };
-
-function getAuthErrorMessage(error: unknown, fallback: string): string {
-  if (error instanceof SyntaxError) {
-    return "Server returned invalid response";
-  }
-  return error instanceof Error ? error.message : fallback;
-}
+type AuthError = Error & { status?: number; code?: string };
 
 function getAuthErrorStatus(error: unknown): number | undefined {
   const status = (error as AuthError | undefined)?.status;
@@ -55,6 +53,8 @@ function getAuthErrorStatus(error: unknown): number | undefined {
 }
 
 export async function handleLoginApi(data: LoginData): Promise<LoginResult> {
+  const operation = beginSessionTransition();
+  let broadcast = true;
   try {
     const result = await apiCall<
       AuthEnvelope<{ requiresMfa?: boolean; maskedEmail?: string }>
@@ -66,7 +66,8 @@ export async function handleLoginApi(data: LoginData): Promise<LoginResult> {
     if (!result.success) {
       return {
         success: false,
-        message: result.error?.message || result.message || "Login failed",
+        message: authErrorCopy("login", result.error),
+        ...withFieldErrors(result),
       };
     }
 
@@ -81,17 +82,21 @@ export async function handleLoginApi(data: LoginData): Promise<LoginResult> {
     }
     return { success: true };
   } catch (error) {
-    const message = getAuthErrorMessage(error, "Login failed");
+    // Only this login rejection is guaranteed to precede SID rotation.
+    broadcast = !(getAuthErrorStatus(error) === 401 && (error as AuthError)?.code === "INVALID_CREDENTIALS");
     return {
       success: false,
-      message,
+      message: authErrorCopy("login", error),
+      ...withFieldErrors(error),
       isEmailNotVerified:
-        getAuthErrorStatus(error) === 403 && /email not verified/i.test(message),
+        getAuthErrorStatus(error) === 403 && (error as AuthError)?.code === "EMAIL_VERIFICATION_REQUIRED",
     };
-  }
+  } finally { completeSessionTransition(operation, undefined, broadcast); }
 }
 
 export async function handleRegisterApi(data: RegisterData): Promise<ApiResult> {
+  const operation = beginSessionTransition();
+  const broadcast = true;
   try {
     const result = await apiCall<AuthEnvelope>("/auth/register", {
       method: "POST",
@@ -105,18 +110,22 @@ export async function handleRegisterApi(data: RegisterData): Promise<ApiResult> 
     }
     return {
       success: false,
-      message:
-        result.error?.message || result.message || "Registration failed",
+      message: authErrorCopy("register", result.error),
+      ...withFieldErrors(result),
     };
   } catch (error) {
     return {
       success: false,
-      message: getAuthErrorMessage(error, "Registration failed"),
+      message: authErrorCopy("register", error),
+      ...withFieldErrors(error),
     };
-  }
+  } finally { completeSessionTransition(operation, undefined, broadcast); }
 }
 
 export async function handleMfaVerifyApi(code: string): Promise<ApiResult> {
+  const operation = beginSessionTransition();
+  const broadcast = true;
+  let failure: string | undefined;
   try {
     const result = await apiCall<AuthEnvelope>("/auth/mfa/verify", {
       method: "POST",
@@ -128,17 +137,18 @@ export async function handleMfaVerifyApi(code: string): Promise<ApiResult> {
       clearCsrfToken();
       return { success: true };
     }
+    failure = authErrorCopy("mfaVerify", result.error);
     return {
       success: false,
-      message:
-        result.error?.message || result.message || "MFA verification failed",
+      message: failure,
     };
   } catch (error) {
+    failure = authErrorCopy("mfaVerify", error);
     return {
       success: false,
-      message: getAuthErrorMessage(error, "MFA verification failed"),
+      message: failure,
     };
-  }
+  } finally { completeSessionTransition(operation, failure, broadcast); }
 }
 
 export async function handleResendMfaApi(): Promise<{
@@ -154,12 +164,10 @@ export async function handleResendMfaApi(): Promise<{
     if (result.success) {
       return { success: true, maskedEmail: result.data?.maskedEmail };
     }
-    toast.error(
-      result.error?.message || result.message || "Failed to resend code",
-    );
+    toast.error(authErrorCopy("mfaResend", result.error));
     return { success: false };
   } catch (error) {
-    toast.error(getAuthErrorMessage(error, "Failed to resend code"));
+    toast.error(authErrorCopy("mfaResend", error));
     return { success: false };
   }
 }
@@ -176,15 +184,12 @@ export async function handleForgotPasswordApi(email: string): Promise<ApiResult>
     }
     return {
       success: false,
-      message:
-        result.error?.message ||
-        result.message ||
-        "Failed to request password reset",
+      message: authErrorCopy("forgotPassword", result.error),
     };
   } catch (error) {
     return {
       success: false,
-      message: getAuthErrorMessage(error, "Failed to request password reset"),
+      message: authErrorCopy("forgotPassword", error),
     };
   }
 }
@@ -193,6 +198,8 @@ export async function handleResetPasswordApi(
   token: string,
   newPassword: string,
 ): Promise<ApiResult> {
+  const operation = beginSessionTransition();
+  const broadcast = true;
   try {
     const result = await apiCall<AuthEnvelope>("/auth/reset-password", {
       method: "POST",
@@ -204,15 +211,14 @@ export async function handleResetPasswordApi(
     }
     return {
       success: false,
-      message:
-        result.error?.message || result.message || "Failed to reset password",
+      message: authErrorCopy("resetPassword", result.error),
     };
   } catch (error) {
     return {
       success: false,
-      message: getAuthErrorMessage(error, "Failed to reset password"),
+      message: authErrorCopy("resetPassword", error),
     };
-  }
+  } finally { completeSessionTransition(operation, undefined, broadcast); }
 }
 
 export async function handleResendVerificationApi(
@@ -229,18 +235,12 @@ export async function handleResendVerificationApi(
     }
     return {
       success: false,
-      message:
-        result.error?.message ||
-        result.message ||
-        "Failed to resend verification email",
+      message: authErrorCopy("resendVerification", result.error),
     };
   } catch (error) {
     return {
       success: false,
-      message: getAuthErrorMessage(
-        error,
-        "Failed to resend verification email",
-      ),
+      message: authErrorCopy("resendVerification", error),
     };
   }
 }

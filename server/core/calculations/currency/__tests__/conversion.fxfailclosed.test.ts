@@ -32,6 +32,7 @@ describe("FX conversion fail-closed (SCP-321)", () => {
           { amount: 1000, currency: "EUR" },
         ],
         "USD",
+        "household-1",
       ),
     ).rejects.toThrow(CalculationError);
   });
@@ -44,6 +45,7 @@ describe("FX conversion fail-closed (SCP-321)", () => {
         { amount: 1000, currency: "EUR" },
       ],
       "USD",
+      "household-1",
     );
     expect(result.total).toBe(2100); // 1000*1 + 1000*1.1, not a silent 2000
   });
@@ -54,6 +56,7 @@ describe("FX conversion fail-closed (SCP-321)", () => {
         stubFx({}),
         [{ amount: 500, currency: "EUR" }],
         "USD",
+        "household-1",
       ),
     ).rejects.toThrow(CalculationError);
   });
@@ -63,6 +66,7 @@ describe("FX conversion fail-closed (SCP-321)", () => {
       stubFx({}),
       [{ amount: 500, currency: "USD" }],
       "USD",
+      "household-1",
     );
     expect(result[0]).toBe(500);
   });

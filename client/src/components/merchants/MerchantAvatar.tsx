@@ -1,3 +1,4 @@
+import { ProtectedImage } from "@/components/session/ProtectedImage";
 import {
   Building2,
   Bus,
@@ -85,7 +86,7 @@ export function MerchantAvatar({
 
   if (resolvedLogoUrl && !hasError) {
     return (
-      <img
+      <ProtectedImage
         src={resolvedLogoUrl}
         alt={name}
         loading="lazy"

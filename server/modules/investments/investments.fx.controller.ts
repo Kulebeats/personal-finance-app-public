@@ -2,12 +2,12 @@
  * FX Impact Controller
  * Handles foreign exchange impact analysis
  */
+import { isIP } from "node:net";
 import { Request, Response, NextFunction } from "express";
 import { investmentService } from "./investments.service";
-import { businessAuditService } from "../../services/BusinessAuditService";
 import { logger } from "../../utils/logger";
 import { success } from "../../core/http";
-import { ValidationError } from "../../core/errors";
+import { UnauthorizedError, ValidationError } from "../../core/errors";
 import {
   listFxRatesQuerySchema,
   createFxRateSchema,
@@ -21,7 +21,7 @@ async function listFxRates(req: Request, res: Response, next: NextFunction) {
       throw new ValidationError("Invalid request data", parsed.error.errors);
     }
 
-    const rates = await investmentService.listFxRates(parsed.data);
+    const rates = await investmentService.listFxRates(req.householdContext!.householdId, parsed.data);
     return success(res, rates);
   } catch (error) {
     next(error);
@@ -30,35 +30,31 @@ async function listFxRates(req: Request, res: Response, next: NextFunction) {
 
 async function createFxRate(req: Request, res: Response, next: NextFunction) {
   try {
-    const { householdId, userId } = req.householdContext!;
     const parsed = createFxRateSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new ValidationError("Invalid request data", parsed.error.errors);
     }
+    if (!req.user || !req.sessionID) {
+      throw new UnauthorizedError("Authentication required");
+    }
+    const requestIp = req.ip?.split("%")[0];
+    const session = {
+      snapshot: { ...req.user },
+      sessionId: req.sessionID,
+      generation: req.session.securityGeneration,
+    };
+    const rate = await investmentService.createFxRate(
+      parsed.data,
+      req.householdContext!,
+      requestIp && isIP(requestIp) ? requestIp : undefined,
+      session,
+    );
 
-    const rate = await investmentService.createFxRate(parsed.data);
-
-    await businessAuditService.logCreate({
-      userId,
-      householdId,
-      entityType: "fx_rate",
-      entityId: rate.id,
-      newValue: {
-        fromCurrency: rate.fromCurrency,
-        toCurrency: rate.toCurrency,
-        rate: rate.rate,
-        date: rate.date,
-      },
-      ipAddress: businessAuditService.getIpAddress(req),
-    });
-
-    logger.info("Created FX rate", {
+    logger.info("Recorded household FX rate", {
       from: rate.fromCurrency,
       to: rate.toCurrency,
-      rate: rate.rate,
     });
-    success(res, rate, 201);
-    return;
+    return success(res, rate, 201);
   } catch (error) {
     next(error);
   }

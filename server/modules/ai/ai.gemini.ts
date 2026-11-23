@@ -1,735 +1,351 @@
 /**
- * Gemini API Client
+ * Gemini adapter: Thandi's fallback provider (R17.1, AI-03).
  *
- * Handles communication with Google's Gemini 2.0 Flash API.
- * - Function calling for tool execution
- * - Response generation from tool results
- * - Timeout and error handling
+ * Conforms to the canonical `AIProviderAdapter` contract. The model id comes
+ * from `GEMINI_MODEL` only (the retired hard-coded `gemini-2.0-flash` is gone).
+ * Calls carry a real abort signal and timeout through the SDK's request
+ * options instead of a non-cancelling promise race, and every SDK failure is
+ * mapped to a typed `ProviderFailureCategory`.
+ *
+ * Tool declarations are generated from the canonical JSON Schema definitions
+ * in `ai.tool-definitions.ts`, so both providers see the same allow-list.
  *
  * @module ai/ai.gemini
  */
 
 import {
+  FinishReason,
   GoogleGenerativeAI,
+  GoogleGenerativeAIAbortError,
+  GoogleGenerativeAIFetchError,
+  GoogleGenerativeAIRequestInputError,
+  GoogleGenerativeAIResponseError,
   SchemaType,
-  type FunctionDeclaration,
-  type Tool,
-  type GenerateContentCandidate,
   type Content,
+  type EnhancedGenerateContentResponse,
+  type FunctionDeclaration,
+  type FunctionDeclarationSchemaProperty,
+  type GenerativeModel,
+  type SingleRequestOptions,
 } from "@google/generative-ai";
 import { logger } from "../../utils/logger";
-import { AIErrorCode } from "./ai.types";
+import { DEFAULT_AI_REQUEST_TOKEN_BUDGET } from "./ai.guardrails";
+import { getGeminiConfig } from "./ai.provider-config";
+import {
+  AI_SYSTEM_PROMPT_TEMPLATE,
+  AI_SYSTEM_PROMPT_VERSION,
+  AI_TOOL_DEFINITIONS,
+  AI_TOOL_NAMES,
+  buildAnswerPrompt,
+  buildSystemPrompt,
+  type JsonSchemaProperty,
+} from "./ai.tool-definitions";
+import {
+  ProviderError,
+  estimatePromptTokens,
+  UNKNOWN_USAGE,
+  type AIProviderAdapter,
+  type AnalysisResult,
+  type AnswerResult,
+  type ProviderCallOptions,
+  type ProviderFailureCategory,
+  type ProviderPriorTurn,
+  type ProviderToolCall,
+  type ProviderUsage,
+  type ToolResultForPrompt,
+} from "./ai.provider.types";
 
-// ============================================================================
-// CONFIGURATION
-// ============================================================================
+// Compatibility re-exports: these names predate the canonical contract.
+export { AI_SYSTEM_PROMPT_TEMPLATE, AI_SYSTEM_PROMPT_VERSION };
+export const GEMINI_TOOL_NAMES: readonly string[] = AI_TOOL_NAMES;
+export type GeminiToolCall = ProviderToolCall;
+export type GeminiPriorTurn = ProviderPriorTurn;
+export type GeminiCallOptions = ProviderCallOptions;
+export type GeminiResponse = AnalysisResult;
 
-const GEMINI_MODEL = "gemini-2.0-flash";
-const REQUEST_TIMEOUT_MS = 10000; // 10 second timeout per requirements
+const DEFAULT_CALL_TIMEOUT_MS = 12_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 1024;
 const MIN_OUTPUT_TOKENS = 64;
+/** Finish reasons that mean the provider declined (P1-2), not a protocol fault. */
+const SAFETY_FINISH_REASONS: ReadonlySet<string> = new Set([
+  FinishReason.SAFETY,
+  FinishReason.BLOCKLIST,
+  FinishReason.PROHIBITED_CONTENT,
+  FinishReason.RECITATION,
+  FinishReason.SPII,
+]);
+const DEFAULT_TOKEN_BUDGET = DEFAULT_AI_REQUEST_TOKEN_BUDGET;
+const PRIMING_ACK =
+  "Understood. I will help answer financial questions using the available tools and follow all guidelines.";
 
-export const AI_SYSTEM_PROMPT_VERSION = "v1.1.0";
+const SCHEMA_TYPE: Readonly<Record<JsonSchemaProperty["type"], SchemaType>> = {
+  string: SchemaType.STRING,
+  number: SchemaType.NUMBER,
+  boolean: SchemaType.BOOLEAN,
+};
 
-// ============================================================================
-// TOOL DEFINITIONS FOR GEMINI FUNCTION CALLING
-// ============================================================================
-
-/**
- * Tool definitions in Gemini function calling format.
- * These describe what each tool does so Gemini can decide when to call them.
- */
-const TOOL_DEFINITIONS: FunctionDeclaration[] = [
-  {
-    name: "get_spending_by_category",
-    description:
-      "Get spending breakdown by category for a specified time period. Use this to answer questions about where money is being spent, expense patterns, or category-level spending analysis.",
-    parameters: {
-      type: SchemaType.OBJECT,
-      properties: {
-        period: {
-          type: SchemaType.STRING,
-          format: "enum",
-          description:
-            'Time period for analysis: "7d" (last 7 days), "30d" (last 30 days), "90d" (last 90 days), or "12m" (last 12 months)',
-          enum: ["7d", "30d", "90d", "12m"],
-        },
-      },
-      required: ["period"],
-    },
-  },
-  {
-    name: "get_budget_status",
-    description:
-      "Get current budget status showing how much is budgeted vs spent per category. Use this to answer questions about budget progress, remaining budget, or if the user is over/under budget.",
-    parameters: {
-      type: SchemaType.OBJECT,
-      properties: {
-        month: {
-          type: SchemaType.STRING,
-          description:
-            "Month in YYYY-MM format. Defaults to current month if not specified.",
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "get_goals_status",
-    description:
-      "Get progress status for all savings goals. Use this to answer questions about goal progress, savings targets, or how close goals are to completion.",
-    parameters: {
-      type: SchemaType.OBJECT,
-      properties: {
-        includeCompleted: {
-          type: SchemaType.BOOLEAN,
-          description: "Whether to include completed goals. Defaults to false.",
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "get_upcoming_recurring",
-    description:
-      "Get upcoming recurring transactions (bills, subscriptions, regular expenses). Use this to answer questions about upcoming bills, scheduled payments, or recurring costs.",
-    parameters: {
-      type: SchemaType.OBJECT,
-      properties: {
-        days: {
-          type: SchemaType.NUMBER,
-          description: "Number of days to look ahead. Defaults to 30.",
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "get_recent_transactions",
-    description:
-      "Get the most recent transactions. Use this to answer questions about recent spending, latest purchases, or transaction history.",
-    parameters: {
-      type: SchemaType.OBJECT,
-      properties: {
-        limit: {
-          type: SchemaType.NUMBER,
-          description:
-            "Maximum number of transactions to return. Defaults to 20.",
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "get_account_balances",
-    description:
-      "Get current balance for all accounts. Use this to answer questions about account balances, total assets, or financial position.",
-    parameters: {
-      type: SchemaType.OBJECT,
-      properties: {
-        includeArchived: {
-          type: SchemaType.BOOLEAN,
-          description:
-            "Whether to include archived/closed accounts. Defaults to false.",
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "get_merchant_spending",
-    description:
-      "Get spending aggregated by merchant. Use this to answer questions about spending at specific stores, top merchants, or where money goes by vendor.",
-    parameters: {
-      type: SchemaType.OBJECT,
-      properties: {
-        period: {
-          type: SchemaType.STRING,
-          format: "enum",
-          description: 'Time period: "30d", "90d", or "12m"',
-          enum: ["30d", "90d", "12m"],
-        },
-        limit: {
-          type: SchemaType.NUMBER,
-          description: "Maximum merchants to return. Defaults to 20.",
-        },
-      },
-      required: ["period"],
-    },
-  },
-  {
-    name: "get_category_trends",
-    description:
-      "Get spending trends over time for categories. Use this to answer questions about spending patterns over months, whether spending is increasing/decreasing, or historical category analysis.",
-    parameters: {
-      type: SchemaType.OBJECT,
-      properties: {
-        months: {
-          type: SchemaType.NUMBER,
-          description: "Number of months to analyze. Defaults to 6.",
-        },
-        categoryId: {
-          type: SchemaType.STRING,
-          description:
-            "Optional specific category to analyze. If not provided, analyzes all categories.",
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "get_monthly_summary",
-    description:
-      "Get income vs expenses summary for a month. Use this to answer questions about monthly finances, savings rate, net income, or overall financial health for a month.",
-    parameters: {
-      type: SchemaType.OBJECT,
-      properties: {
-        month: {
-          type: SchemaType.STRING,
-          description: "Month in YYYY-MM format. Defaults to current month.",
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "get_transaction_search",
-    description:
-      "Search transactions by various filters. Use this to find specific transactions, search by merchant, category, date range, or amount.",
-    parameters: {
-      type: SchemaType.OBJECT,
-      properties: {
-        text: {
-          type: SchemaType.STRING,
-          description: "Text to search in transaction descriptions",
-        },
-        categoryId: {
-          type: SchemaType.STRING,
-          description: "Filter by category ID",
-        },
-        merchantId: {
-          type: SchemaType.STRING,
-          description: "Filter by merchant ID",
-        },
-        dateFrom: {
-          type: SchemaType.STRING,
-          description: "Start date in YYYY-MM-DD format",
-        },
-        dateTo: {
-          type: SchemaType.STRING,
-          description: "End date in YYYY-MM-DD format",
-        },
-        minAmount: {
-          type: SchemaType.STRING,
-          description: "Minimum transaction amount",
-        },
-        maxAmount: {
-          type: SchemaType.STRING,
-          description: "Maximum transaction amount",
-        },
-        limit: {
-          type: SchemaType.NUMBER,
-          description: "Maximum results. Defaults to 20.",
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "get_goal_assignments",
-    description:
-      "Get which accounts are linked to savings goals. Use this to answer questions about goal funding sources or account-goal relationships.",
-    parameters: {
-      type: SchemaType.OBJECT,
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: "get_cash_flow",
-    description:
-      "Get projected cash flow for upcoming months. Use this to answer questions about future finances, projected balance, or cash flow forecasts.",
-    parameters: {
-      type: SchemaType.OBJECT,
-      properties: {
-        months: {
-          type: SchemaType.NUMBER,
-          description: "Number of months to project. Defaults to 3.",
-        },
-      },
-      required: [],
-    },
-  },
-];
-
-export const GEMINI_TOOL_NAMES = TOOL_DEFINITIONS.map((tool) => tool.name);
-
-export const AI_SYSTEM_PROMPT_TEMPLATE = `You are Thandiso, a helpful AI assistant for personal finance. You help users understand their financial data including spending, budgets, goals, and transactions.
-
-GUIDELINES:
-1. Only use the available tools to get financial data - never make up numbers
-2. Be concise but helpful in your responses
-3. When showing money amounts, use the household's currency
-4. If data is empty or unavailable, say so clearly
-5. Never give specific financial advice - just present the data
-6. Add "Note: This is not financial advice" when discussing significant financial decisions
-7. Respect user privacy - don't ask for sensitive information
-
-AVAILABLE TOOLS:
-- get_spending_by_category: Spending breakdown by category
-- get_budget_status: Budget progress per category
-- get_goals_status: Savings goal progress
-- get_upcoming_recurring: Upcoming bills and subscriptions
-- get_recent_transactions: Recent transaction history
-- get_account_balances: Account balance summary
-- get_merchant_spending: Spending by merchant
-- get_category_trends: Spending trends over time
-- get_monthly_summary: Monthly income vs expenses
-- get_transaction_search: Search transactions by filters
-- get_goal_assignments: Goal-account relationships
-- get_cash_flow: Cash flow projections`;
-
-// ============================================================================
-// TYPES
-// ============================================================================
-
-export interface GeminiToolCall {
-  name: string;
-  args: Record<string, unknown>;
+function toGeminiProperty(property: JsonSchemaProperty): FunctionDeclarationSchemaProperty {
+  if (property.enum) {
+    return { type: SchemaType.STRING, format: "enum", description: property.description, enum: [...property.enum] };
+  }
+  return { type: SCHEMA_TYPE[property.type], description: property.description } as FunctionDeclarationSchemaProperty;
 }
 
-export interface GeminiResponse {
-  toolCalls: GeminiToolCall[];
-  textResponse?: string;
-  tokenCount: number;
+/** Gemini declaration shape, generated from the canonical definitions. */
+export const GEMINI_TOOL_DECLARATIONS: FunctionDeclaration[] = AI_TOOL_DEFINITIONS.map((definition) => ({
+  name: definition.name,
+  description: definition.description,
+  parameters: {
+    type: SchemaType.OBJECT,
+    properties: Object.fromEntries(
+      Object.entries(definition.inputSchema.properties).map(([key, property]) => [key, toGeminiProperty(property)]),
+    ),
+    required: [...definition.inputSchema.required],
+  },
+}));
+
+/** Map a Gemini SDK failure to a typed category. Exported for the failure-matrix tests. */
+export function classifyGeminiError(error: unknown): { category: ProviderFailureCategory; status: number | null } {
+  // An abort is the deadline signal firing; user cancellation is decided by
+  // the orchestrator, which owns the caller's signal.
+  if (error instanceof GoogleGenerativeAIAbortError) return { category: "timeout", status: null };
+  if (error instanceof GoogleGenerativeAIFetchError) {
+    const status = error.status ?? null;
+    const reasons = (error.errorDetails ?? []).map((detail) => String(detail.reason ?? ""));
+    if (reasons.includes("API_KEY_INVALID")) return { category: "authentication", status };
+    if (status === 401) return { category: "authentication", status };
+    if (status === 403) return { category: "permission", status };
+    if (status === 404) return { category: "model_not_found", status };
+    if (status === 408 || status === 504) return { category: "timeout", status };
+    if (status === 429) return { category: "rate_limited", status };
+    if (status === 503) return { category: "overloaded", status };
+    if (status !== null && status >= 500) return { category: "server_error", status };
+    return { category: "invalid_request", status };
+  }
+  if (error instanceof GoogleGenerativeAIRequestInputError) return { category: "invalid_request", status: null };
+  if (error instanceof GoogleGenerativeAIResponseError) {
+    return { category: /block|safety/i.test(error.message) ? "safety_refusal" : "malformed_output", status: null };
+  }
+  if (error instanceof Error && error.name === "AbortError") return { category: "timeout", status: null };
+  return { category: "connection", status: null };
 }
 
-/**
- * A prior conversation turn replayed as model context (OPEN-3).
- * `user` = the household member, `model` = a previous assistant reply.
- */
-export interface GeminiPriorTurn {
-  role: "user" | "model";
-  text: string;
+function toUsage(response: EnhancedGenerateContentResponse): ProviderUsage {
+  const usage = response.usageMetadata;
+  if (!usage) return UNKNOWN_USAGE;
+  return {
+    known: true,
+    inputTokens: usage.promptTokenCount ?? null,
+    outputTokens: usage.candidatesTokenCount ?? null,
+    cacheReadTokens: usage.cachedContentTokenCount ?? null,
+    cacheWriteTokens: null,
+  };
 }
 
-export interface GeminiCallOptions {
-  tokenBudget?: number;
-  maxOutputTokens?: number;
-  /**
-   * Prior turns, OLDEST FIRST, already capped, injection-re-scanned and
-   * budget-trimmed by `ai.guardrails.selectHistoryTurns`. This client does not
-   * re-trim them; it only places them ahead of the current message.
-   */
-  priorTurns?: GeminiPriorTurn[];
-}
+export class GeminiClient implements AIProviderAdapter {
+  readonly id = "gemini" as const;
+  private cached: { key: string; model: string; instance: GenerativeModel } | null = null;
 
-export interface GeminiError {
-  code: AIErrorCode;
-  message: string;
-  retryable: boolean;
-}
-
-// ============================================================================
-// GEMINI CLIENT CLASS
-// ============================================================================
-
-export class GeminiClient {
-  private client: GoogleGenerativeAI | null = null;
-  private model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]> | null =
-    null;
-
-  constructor() {
-    this.initialize();
+  configuredModel(): string | null {
+    return getGeminiConfig().model;
   }
 
-  /**
-   * Initialize the Gemini client with API key.
-   */
-  private initialize(): void {
-    const apiKey = process.env.GEMINI_API_KEY;
-
-    if (!apiKey) {
-      logger.warn("GEMINI_API_KEY not set - AI features will be disabled");
-      return;
-    }
-
-    try {
-      this.client = new GoogleGenerativeAI(apiKey);
-      this.model = this.client.getGenerativeModel({
-        model: GEMINI_MODEL,
-        generationConfig: {
-          maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
-          temperature: 0.2, // Low temperature for more deterministic responses
-        },
-        tools: [
-          {
-            functionDeclarations: TOOL_DEFINITIONS,
-          },
-        ] as Tool[],
-      });
-
-      logger.info("Gemini client initialized", { model: GEMINI_MODEL });
-    } catch (error) {
-      logger.error("Failed to initialize Gemini client", { error });
-    }
+  configurationIssue(): ProviderFailureCategory | null {
+    const { apiKey, model } = getGeminiConfig();
+    return apiKey && model ? null : "unconfigured";
   }
 
-  /**
-   * Check if the client is available.
-   */
+  /** Configured (key and model present). Configured is not proven healthy. */
   isAvailable(): boolean {
-    return this.model !== null;
+    return this.configurationIssue() === null;
   }
 
-  /**
-   * Analyze user query and determine which tools to call.
-   * Returns tool calls that should be executed.
-   */
-  async analyzeQuery(
-    userMessage: string,
-    options: GeminiCallOptions = {},
-  ): Promise<GeminiResponse> {
-    if (!this.model) {
-      throw this.createError(
-        AIErrorCode.EXTERNAL_API_ERROR,
-        "Gemini client not initialized",
-        false,
-      );
+  async analyzeQuery(userMessage: string, options: ProviderCallOptions = {}): Promise<AnalysisResult> {
+    const model = this.requireModel();
+    const systemPrompt = buildSystemPrompt();
+    const tokenBudget = this.resolveTokenBudget(options.tokenBudget);
+    // The current message and system prompt are checked WITHOUT history:
+    // history was already trimmed to fit inside the remainder.
+    const promptTokens = estimatePromptTokens(systemPrompt) + estimatePromptTokens(userMessage);
+    this.assertWithinBudget(promptTokens, tokenBudget);
+
+    const chat = model.instance.startChat({ history: this.buildContents(systemPrompt, options.priorTurns ?? []) });
+    const response = await this.call(() => chat.sendMessage(userMessage, this.requestOptions(options)), options);
+    this.assertNotBlocked(response);
+
+    const { toolCalls, text } = this.extract(response);
+    if (toolCalls.length === 0 && text.length === 0) {
+      throw this.failure("malformed_output", "Gemini returned neither text nor a tool call", true, toUsage(response));
     }
-
-    const startTime = Date.now();
-
-    try {
-      const systemPrompt = this.buildSystemPrompt();
-      const tokenBudget = this.resolveTokenBudget(options.tokenBudget);
-      const priorTurns = options.priorTurns ?? [];
-      // The current message and system prompt are checked against the budget
-      // WITHOUT history: history has already been trimmed to fit inside the
-      // remainder, and it must never be able to starve the current message.
-      const estimatedPromptTokens =
-        this.estimateTokens(systemPrompt) + this.estimateTokens(userMessage);
-
-      if (estimatedPromptTokens >= tokenBudget) {
-        logger.warn("Gemini analyze skipped due to token budget", {
-          tokenBudget,
-          estimatedPromptTokens,
-        });
-
-        return {
-          toolCalls: [],
-          textResponse:
-            "I need a shorter question to stay within the request budget.",
-          tokenCount: tokenBudget,
-        };
-      }
-
-      // Start chat with system context, then any prior conversation turns
-      // (OPEN-3) so follow-up questions like "what about last month?" resolve.
-      const chat = this.model.startChat({
-        history: this.buildContents(systemPrompt, priorTurns),
-      });
-
-      // Send user message with timeout
-      const response = await this.withTimeout(
-        chat.sendMessage(userMessage),
-        REQUEST_TIMEOUT_MS,
-      );
-
-      const result = response.response;
-      const candidate = result.candidates?.[0];
-
-      if (!candidate) {
-        throw this.createError(
-          AIErrorCode.EXTERNAL_API_ERROR,
-          "No response from Gemini",
-          true,
-        );
-      }
-
-      const { toolCalls, textResponse } = this.processCandidate(candidate);
-
-      // Estimate token count
-      const estimatedTokenCount =
-        this.estimateTokens(userMessage) +
-        this.estimateTokens(textResponse || "") +
-        toolCalls.length * 50; // Approximate tokens for tool calls
-      const tokenCount = Math.min(estimatedTokenCount, tokenBudget);
-
-      logger.debug("Gemini query analyzed", {
-        toolCalls: toolCalls.map((tc) => tc.name),
-        hasTextResponse: !!textResponse,
-        tokenCount,
-        latencyMs: Date.now() - startTime,
-      });
-
-      return {
-        toolCalls,
-        textResponse,
-        tokenCount,
-      };
-    } catch (error) {
-      this.handleError(error, startTime);
-      throw error; // reachable only if handleError re-throws, which it usually does
-    }
+    const usage = toUsage(response);
+    return {
+      toolCalls,
+      textResponse: text.length > 0 ? text : undefined,
+      tokenCount: Math.min(tokenBudget, (usage.inputTokens ?? promptTokens) + (usage.outputTokens ?? 0)),
+      provider: this.id,
+      model: model.model,
+      usage,
+      providerRequestId: null,
+    };
   }
 
-  /**
-   * Process the Gemini response candidate to extract tool calls and text.
-   */
-  private processCandidate(candidate: GenerateContentCandidate): {
-    toolCalls: GeminiToolCall[];
-    textResponse?: string;
-  } {
-    // Extract function calls
-    const toolCalls: GeminiToolCall[] = [];
-    let textResponse: string | undefined;
-
-    for (const part of candidate.content.parts) {
-      if ("functionCall" in part && part.functionCall) {
-        toolCalls.push({
-          name: part.functionCall.name,
-          args: part.functionCall.args as Record<string, unknown>,
-        });
-      } else if ("text" in part && part.text) {
-        textResponse = part.text;
-      }
-    }
-    return { toolCalls, textResponse };
-  }
-
-  private handleError(error: unknown, startTime: number): void {
-    const latency = Date.now() - startTime;
-    logger.error("Gemini query failed", { error, latencyMs: latency });
-
-    if (error instanceof Error && "code" in error) {
-      throw error; // Re-throw our own errors
-    }
-
-    // Handle timeout
-    if (error instanceof Error && error.message.includes("timeout")) {
-      throw this.createError(
-        AIErrorCode.EXTERNAL_API_ERROR,
-        "Request timed out",
-        true,
-      );
-    }
-
-    // Handle rate limiting
-    if (error instanceof Error && error.message.includes("429")) {
-      throw this.createError(
-        AIErrorCode.RATE_LIMIT_EXCEEDED,
-        "Gemini API rate limit exceeded",
-        true,
-      );
-    }
-
-    throw this.createError(
-      AIErrorCode.EXTERNAL_API_ERROR,
-      error instanceof Error ? error.message : "Unknown error",
-      true,
-    );
-  }
-
-  /**
-   * Generate a natural language response from tool results.
-   */
   async generateResponse(
     userMessage: string,
-    toolResults: Array<{ name: string; result: unknown }>,
+    toolResults: ToolResultForPrompt[],
     currency: string,
-    options: GeminiCallOptions = {},
-  ): Promise<{ response: string; tokenCount: number }> {
-    if (!this.model) {
-      throw this.createError(
-        AIErrorCode.EXTERNAL_API_ERROR,
-        "Gemini client not initialized",
-        false,
-      );
-    }
+    options: ProviderCallOptions = {},
+  ): Promise<AnswerResult> {
+    const model = this.requireModel();
+    const fullPrompt = `${buildSystemPrompt()}\n\n${buildAnswerPrompt(userMessage, toolResults, currency)}`;
+    const tokenBudget = this.resolveTokenBudget(options.tokenBudget);
+    const promptTokens = estimatePromptTokens(fullPrompt);
+    this.assertWithinBudget(promptTokens, tokenBudget);
 
-    const startTime = Date.now();
-
-    try {
-      const systemPrompt = this.buildSystemPrompt();
-      const tokenBudget = this.resolveTokenBudget(options.tokenBudget);
-
-      // Format tool results for the model
-      const toolResultsText = toolResults
-        .map(
-          (tr) =>
-            `Tool: ${tr.name}\nResult: ${JSON.stringify(tr.result, null, 2)}`,
-        )
-        .join("\n\n");
-
-      const fullPrompt = `${systemPrompt}
-
-User question: ${userMessage}
-
-Tool results:
-${toolResultsText}
-
-Based on the tool results above, provide a helpful, accurate answer to the user's question. Use the currency ${currency} when displaying amounts. Be concise but complete.`;
-
-      const promptTokens = this.estimateTokens(fullPrompt);
-      if (promptTokens >= tokenBudget) {
-        return {
-          response:
-            "I need a shorter question or narrower date range to stay within the response budget.",
-          tokenCount: tokenBudget,
-        };
-      }
-
-      const remainingBudget = tokenBudget - promptTokens;
-      const requestedMaxOutputTokens = options.maxOutputTokens ?? remainingBudget;
-      const maxOutputTokens = Math.max(
-        MIN_OUTPUT_TOKENS,
-        Math.min(DEFAULT_MAX_OUTPUT_TOKENS, requestedMaxOutputTokens, remainingBudget),
-      );
-
-      // Generate response with timeout
-      const response = await this.withTimeout(
-        this.model.generateContent({
-          contents: [{ role: "user", parts: [{ text: fullPrompt }] }],
-          generationConfig: {
-            maxOutputTokens,
-            temperature: 0.2,
-          },
-        }),
-        REQUEST_TIMEOUT_MS,
-      );
-
-      const result = response.response;
-      const text = result.text();
-
-      const estimatedTokenCount = promptTokens + this.estimateTokens(text);
-      const tokenCount = Math.min(estimatedTokenCount, tokenBudget);
-
-      logger.debug("Gemini response generated", {
-        responseLength: text.length,
-        tokenCount,
-        latencyMs: Date.now() - startTime,
-      });
-
-      return {
-        response: text,
-        tokenCount,
-      };
-    } catch (error) {
-      logger.error("Gemini response generation failed", { error });
-
-      if (error instanceof Error && "code" in error) {
-        throw error;
-      }
-
-      throw this.createError(
-        AIErrorCode.EXTERNAL_API_ERROR,
-        error instanceof Error ? error.message : "Unknown error",
-        true,
-      );
-    }
-  }
-
-  // ============================================================================
-  // PRIVATE HELPERS
-  // ============================================================================
-
-  /**
-   * Build the provider `contents` array: the system-prompt priming pair,
-   * followed by prior conversation turns in oldest-first order (OPEN-3).
-   *
-   * Prior turns arrive already capped, injection-re-scanned and budget-trimmed
-   * (see `ai.guardrails.selectHistoryTurns`); this is purely assembly. Exposed
-   * (internal) so tests can assert the exact shape that leaves the household
-   * boundary.
-   */
-  buildContents(
-    systemPrompt: string,
-    priorTurns: GeminiPriorTurn[] = [],
-  ): Content[] {
-    const contents: Content[] = [
-      {
-        role: "user",
-        parts: [{ text: systemPrompt }],
-      },
-      {
-        role: "model",
-        parts: [
+    const remaining = tokenBudget - promptTokens;
+    const maxOutputTokens = Math.max(
+      MIN_OUTPUT_TOKENS,
+      Math.min(DEFAULT_MAX_OUTPUT_TOKENS, options.maxOutputTokens ?? remaining, remaining),
+    );
+    const response = await this.call(
+      () =>
+        model.instance.generateContent(
           {
-            text: "Understood. I will help answer financial questions using the available tools and follow all guidelines.",
+            contents: [{ role: "user", parts: [{ text: fullPrompt }] }],
+            generationConfig: { maxOutputTokens, temperature: 0.2 },
           },
-        ],
-      },
-    ];
+          this.requestOptions(options),
+        ),
+      options,
+    );
+    this.assertNotBlocked(response);
 
-    for (const turn of priorTurns) {
-      contents.push({ role: turn.role, parts: [{ text: turn.text }] });
+    const text = this.safeText(response);
+    if (text.length === 0) {
+      throw this.failure("malformed_output", "Gemini returned an empty answer", true, toUsage(response));
     }
-
-    return contents;
+    const usage = toUsage(response);
+    return {
+      response: text,
+      tokenCount: Math.min(tokenBudget, (usage.inputTokens ?? promptTokens) + (usage.outputTokens ?? 0)),
+      provider: this.id,
+      model: model.model,
+      usage,
+      providerRequestId: null,
+    };
   }
 
   /**
-   * Token cost of the system prompt. The service reserves this alongside the
-   * current message before deciding how much history can fit in the budget.
+   * Provider `contents`: the system-prompt priming pair, then prior turns
+   * oldest-first. Exposed so tests can assert the exact shape that leaves the
+   * household boundary.
    */
+  buildContents(systemPrompt: string, priorTurns: ProviderPriorTurn[] = []): Content[] {
+    return [
+      { role: "user", parts: [{ text: systemPrompt }] },
+      { role: "model", parts: [{ text: PRIMING_ACK }] },
+      ...priorTurns.map((turn) => ({ role: turn.role, parts: [{ text: turn.text }] })),
+    ];
+  }
+
+  /** Token cost of the system prompt, reserved before history is trimmed. */
   estimateSystemPromptTokens(): number {
-    return this.estimateTokens(this.buildSystemPrompt());
+    return estimatePromptTokens(buildSystemPrompt());
+  }
+
+  private requireModel(): { model: string; instance: GenerativeModel } {
+    const { apiKey, model } = getGeminiConfig();
+    if (!apiKey || !model) {
+      throw this.failure("unconfigured", "Gemini is not configured (GEMINI_API_KEY and GEMINI_MODEL are required)", false);
+    }
+    if (!this.cached || this.cached.key !== apiKey || this.cached.model !== model) {
+      const instance = new GoogleGenerativeAI(apiKey).getGenerativeModel({
+        model,
+        generationConfig: { maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS, temperature: 0.2 },
+        tools: [{ functionDeclarations: GEMINI_TOOL_DECLARATIONS }],
+      });
+      this.cached = { key: apiKey, model, instance };
+    }
+    return { model, instance: this.cached.instance };
+  }
+
+  private requestOptions(options: ProviderCallOptions): SingleRequestOptions {
+    return { timeout: options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS, signal: options.signal };
+  }
+
+  private async call(
+    send: () => Promise<{ response: EnhancedGenerateContentResponse }>,
+    options: ProviderCallOptions,
+  ): Promise<EnhancedGenerateContentResponse> {
+    try {
+      return (await send()).response;
+    } catch (error) {
+      const { category, status } = classifyGeminiError(error);
+      logger.warn("Gemini call failed", { category, status, model: getGeminiConfig().model });
+      throw this.failure(category, `Gemini call failed (${category})`, true, UNKNOWN_USAGE, status);
+    }
   }
 
   /**
-   * Build system prompt with guidelines.
+   * Review fix P1-2: a blocked prompt or a safety-type finish is the
+   * provider's refusal. Classify it BEFORE extraction, so an empty blocked
+   * response is never "malformed output" (which would let local mode answer
+   * a question the provider refused).
    */
-  private buildSystemPrompt(): string {
-    return `Prompt version: ${AI_SYSTEM_PROMPT_VERSION}\n${AI_SYSTEM_PROMPT_TEMPLATE}`;
+  private assertNotBlocked(response: EnhancedGenerateContentResponse): void {
+    const blockReason = response.promptFeedback?.blockReason;
+    const finishReason = response.candidates?.[0]?.finishReason;
+    if (blockReason || (finishReason && SAFETY_FINISH_REASONS.has(finishReason))) {
+      logger.warn("Gemini refused the request", { blockReason, finishReason });
+      throw this.failure("safety_refusal", "Gemini declined to answer", true, toUsage(response));
+    }
   }
 
-  /**
-   * Wrap a promise with a timeout.
-   */
-  private async withTimeout<T>(
-    promise: Promise<T>,
-    timeoutMs: number,
-  ): Promise<T> {
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => {
-        reject(new Error(`Request timeout after ${timeoutMs}ms`));
-      }, timeoutMs);
-    });
-
-    return Promise.race([promise, timeoutPromise]);
+  private extract(response: EnhancedGenerateContentResponse): { toolCalls: ProviderToolCall[]; text: string } {
+    const candidate = response.candidates?.[0];
+    const toolCalls: ProviderToolCall[] = [];
+    const texts: string[] = [];
+    for (const part of candidate?.content?.parts ?? []) {
+      if (part.functionCall) {
+        const args = part.functionCall.args;
+        toolCalls.push({
+          name: part.functionCall.name,
+          args: args !== null && typeof args === "object" ? (args as Record<string, unknown>) : {},
+        });
+      } else if (part.text) {
+        texts.push(part.text);
+      }
+    }
+    return { toolCalls, text: texts.join("\n").trim() };
   }
 
-  /**
-   * Estimate token count from text.
-   * Rough approximation: ~4 characters per token.
-   */
-  private estimateTokens(text: string): number {
-    return Math.ceil(text.length / 4);
+  private safeText(response: EnhancedGenerateContentResponse): string {
+    try {
+      return response.text().trim();
+    } catch (error) {
+      const { category } = classifyGeminiError(error);
+      throw this.failure(category, `Gemini answer unreadable (${category})`, true, toUsage(response));
+    }
+  }
+
+  private assertWithinBudget(promptTokens: number, tokenBudget: number): void {
+    if (promptTokens >= tokenBudget) {
+      throw this.failure("invalid_request", "Request exceeds the token budget", false);
+    }
   }
 
   private resolveTokenBudget(tokenBudget?: number): number {
-    if (!tokenBudget || tokenBudget <= 0) {
-      return 2000;
-    }
-
-    return tokenBudget;
+    return tokenBudget && tokenBudget > 0 ? tokenBudget : DEFAULT_TOKEN_BUDGET;
   }
 
-  /**
-   * Create a structured error.
-   */
-  private createError(
-    code: AIErrorCode,
+  private failure(
+    category: ProviderFailureCategory,
     message: string,
-    retryable: boolean,
-  ): GeminiError & Error {
-    const error = new Error(message) as GeminiError & Error;
-    error.code = code;
-    error.retryable = retryable;
-    return error;
+    dispatched: boolean,
+    usage: ProviderUsage = UNKNOWN_USAGE,
+    status: number | null = null,
+  ): ProviderError {
+    return new ProviderError({ provider: this.id, category, message, dispatched, usage, status });
   }
 }
 
-// Export singleton instance
 export const geminiClient = new GeminiClient();

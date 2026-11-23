@@ -11,9 +11,19 @@ import { transactionRepository } from "../../repositories/TransactionRepository"
 import { type Transaction } from "@shared/schema";
 import { logger } from "../../utils/logger";
 import { withTransaction } from "../../utils/withTransaction";
-import type { Rule, MerchantCache } from "./types";
+import type { Rule, MerchantCache, PlannedEffect, BlockedRuleReferences, BlockedRuleRun } from "./types";
+import type { TransactionUpdateSnapshot } from "../../repositories/TransactionUpdateWriter";
+import { writeRuleApplyAudit } from "./apply-audit";
+import { EMPTY_PROPOSAL, summarizeEffects, type RuleProposal } from "./proposal";
 import { matchesRule } from "./matching";
-import { evaluateActions, linkGoalsToTransaction } from "./actions";
+import { evaluateActions, linkGoalsToTransaction, planRuleActions } from "./actions";
+import { EMPTY_OUTCOME, failureOf, withRow, type RuleApplyOutcome } from "./apply-outcome";
+
+/** A rule's blocked ids as a run entry, or null when it blocked nothing. */
+function toBlockedRun(ruleId: string, blocked: BlockedRuleReferences): BlockedRuleRun | null {
+  if (blocked.categoryIds.length + blocked.tagIds.length === 0) return null;
+  return { ruleId, categoryIds: [...blocked.categoryIds], tagIds: [...blocked.tagIds] };
+}
 
 export class RuleService {
   /**
@@ -22,7 +32,8 @@ export class RuleService {
    * @param householdId - The household ID
    * @param context - Optional context with userId
    * @param dryRun - If true, returns what would be changed without persisting
-   * @returns The updated transaction (or preview if dryRun)
+   * @returns The updated transaction. With dryRun it is the previewed
+   *   transaction plus the proposed tag, alias, split and goal-link changes.
    */
   async applyRules(
     transaction: Transaction,
@@ -40,22 +51,42 @@ export class RuleService {
       return this.previewRules(transaction, householdId, rules);
     }
 
-    // SCP-334: run the ENTIRE apply — every matched rule's inline writes
-    // (tags, merchant aliases, splits), the field update, and goal links — in
-    // ONE database transaction so a partial failure rolls back the whole apply
-    // instead of leaving the transaction half-ruled. evaluateActions and
-    // linkGoalsToTransaction propagate DB errors when given a tx (no swallow).
+    return (await this.persistRules(transaction, householdId, rules, context)).transaction;
+  }
+
+  /**
+   * SCP-334: run the ENTIRE apply — every matched rule's inline writes
+   * (tags, merchant aliases, splits), the field update, and goal links — in
+   * ONE database transaction so a partial failure rolls back the whole apply
+   * instead of leaving the transaction half-ruled. evaluateActions and
+   * linkGoalsToTransaction propagate DB errors when given a tx (no swallow).
+   * `changed` says whether any rule changed the row (A-32 counts it).
+   */
+  private async persistRules(
+    transaction: Transaction,
+    householdId: string,
+    rules: Rule[],
+    context?: { userId?: string }
+  ): Promise<{ transaction: Transaction; changed: boolean }> {
     return withTransaction(async (tx) => {
       let currentTransaction = { ...transaction };
       let updates: Partial<Transaction> = {};
       const linkGoalIds: string[] = [];
+      const effects: PlannedEffect[] = [];
+      const changedByRuleIds: string[] = [];
+      const blockedRuns: BlockedRuleRun[] = [];
       const merchantCache: MerchantCache = new Map();
 
       for (const rule of rules) {
         if (
           await matchesRule(rule, currentTransaction, householdId, merchantCache)
         ) {
-          const { updates: actionUpdates, linkGoalIds: actionLinkGoals } =
+          const {
+            updates: actionUpdates,
+            linkGoalIds: actionLinkGoals,
+            effects: actionEffects,
+            blocked,
+          } =
             await evaluateActions(
               rule,
               currentTransaction,
@@ -69,11 +100,13 @@ export class RuleService {
             currentTransaction = { ...currentTransaction, ...actionUpdates };
 
             logger.info(
-              `Applied rule "${rule.name}" to transaction ${transaction.id}`,
+              "Rule updates prepared",
               {
                 ruleId: rule.id,
                 transactionId: transaction.id,
-                updates: actionUpdates,
+                householdId,
+                updatesCount: Object.keys(actionUpdates).length,
+                action: "apply",
               }
             );
           }
@@ -81,18 +114,30 @@ export class RuleService {
           if (actionLinkGoals.length > 0) {
             linkGoalIds.push(...actionLinkGoals);
           }
+          effects.push(...actionEffects);
+          if (
+            Object.keys(actionUpdates).length > 0 ||
+            actionLinkGoals.length > 0 ||
+            actionEffects.length > 0
+          ) {
+            changedByRuleIds.push(rule.id);
+          }
+          const blockedRun = toBlockedRun(rule.id, blocked);
+          if (blockedRun) blockedRuns.push(blockedRun);
         }
       }
 
       // Persist field changes within the same transaction
       let finalTransaction = currentTransaction;
+      let snapshot: TransactionUpdateSnapshot | undefined;
       if (Object.keys(updates).length > 0 && transaction.id) {
         const updated = await transactionRepository.update(
           transaction.id,
           householdId,
           updates,
           undefined,
-          tx
+          tx,
+          { onWrite: async (_tx, written) => { snapshot = written; } }
         );
         finalTransaction = updated.transaction || currentTransaction;
       }
@@ -107,31 +152,55 @@ export class RuleService {
         );
       }
 
-      return finalTransaction;
+      // FIN-16: one audit row per changed transaction, in this same transaction,
+      // so a failed audit insert rolls the whole apply back. A run whose
+      // actions were blocked (ORG-003) is audited even if nothing changed.
+      if (transaction.id && (changedByRuleIds.length > 0 || blockedRuns.length > 0)) {
+        await writeRuleApplyAudit(tx, {
+          householdId,
+          userId: context?.userId ?? null,
+          transaction,
+          snapshot,
+          updates,
+          effects,
+          linkGoalIds,
+          ruleIds: changedByRuleIds,
+          blocked: blockedRuns,
+        });
+      }
+
+      return { transaction: finalTransaction, changed: changedByRuleIds.length > 0 };
     });
   }
 
   /**
    * Dry-run preview helper: evaluates matched rules to compute the previewed
    * transaction. Mirrors the pre-SCP-334 dry-run behavior (no transaction
-   * wrapper; evaluateActions is called without a tx).
+   * wrapper). Uses planRuleActions, which writes nothing (C3-09).
    */
   private async previewRules(
     transaction: Transaction,
     householdId: string,
     rules: Rule[]
-  ): Promise<Transaction> {
+  ): Promise<Transaction & RuleProposal> {
     let currentTransaction = { ...transaction };
     let updates: Partial<Transaction> = {};
     const linkGoalIds: string[] = [];
+    const effects: PlannedEffect[] = [];
+    const blockedRuns: BlockedRuleRun[] = [];
     const merchantCache: MerchantCache = new Map();
 
     for (const rule of rules) {
       if (
         await matchesRule(rule, currentTransaction, householdId, merchantCache)
       ) {
-        const { updates: actionUpdates, linkGoalIds: actionLinkGoals } =
-          await evaluateActions(
+        const {
+          updates: actionUpdates,
+          linkGoalIds: actionLinkGoals,
+          effects: actionEffects,
+          blocked,
+        } =
+          await planRuleActions(
             rule,
             currentTransaction,
             householdId,
@@ -146,6 +215,9 @@ export class RuleService {
         if (actionLinkGoals.length > 0) {
           linkGoalIds.push(...actionLinkGoals);
         }
+        effects.push(...actionEffects);
+        const blockedRun = toBlockedRun(rule.id, blocked);
+        if (blockedRun) blockedRuns.push(blockedRun);
       }
     }
 
@@ -154,32 +226,38 @@ export class RuleService {
       updatesCount: Object.keys(updates).length,
       linkGoalIdsCount: linkGoalIds.length,
     });
-    return currentTransaction;
+    return { ...currentTransaction, ...summarizeEffects(effects, linkGoalIds, blockedRuns) };
   }
 
   /**
-   * Apply rules to multiple transactions
+   * Apply rules to multiple transactions (apply-to-past). Returns each
+   * transaction as it now stands and the outcome: rows changed, and rows that
+   * failed with the reason (A-32), so the caller can report a partial apply.
    */
   async applyRulesToTransactions(
     transactions: Transaction[],
     householdId: string,
     context?: { userId?: string }
-  ): Promise<Transaction[]> {
+  ): Promise<{ transactions: Transaction[]; outcome: RuleApplyOutcome }> {
     const results: Transaction[] = [];
+    let outcome: RuleApplyOutcome = EMPTY_OUTCOME;
     for (const txn of transactions) {
       // Rule 11 defence-in-depth: never mutate another member's PRIVATE
       // transaction, even if a caller passes an unfiltered list. Callers are
       // expected to fetch via findByHouseholdWithVisibility; this guard covers
-      // the transaction-privacy half for any path that doesn't.
+      // the transaction-privacy half for any path that doesn't. Such a row is
+      // neither counted nor listed in the outcome.
       if (txn.isPrivate && context?.userId && txn.ownerUserId !== context.userId) {
         results.push(txn);
         continue;
       }
       // SCP-334: each transaction's rule application is atomic. In a batch
       // (apply-to-past), one transaction's rollback must not abort the whole
-      // batch — log it and keep that transaction un-ruled.
+      // batch — keep that transaction un-ruled and report it as failed.
       try {
-        results.push(await this.applyRules(txn, householdId, context));
+        const applied = await this.applyRulesTracked(txn, householdId, context);
+        results.push(applied.transaction);
+        outcome = withRow(outcome, { changed: applied.changed });
       } catch (error) {
         logger.error("Rule application failed for transaction in batch", {
           householdId,
@@ -187,9 +265,38 @@ export class RuleService {
           error,
         });
         results.push(txn);
+        outcome = withRow(outcome, { failure: failureOf(txn, error) });
       }
     }
-    return results;
+    return { transactions: results, outcome };
+  }
+
+  /**
+   * Apply-to-past after a rule is saved: run the rules over every past
+   * transaction `userId` can see and say what happened (A-32). Rule 11: only
+   * rows VISIBLE to the requester are read or changed, so another member's
+   * private transactions stay untouched and unreported (mirrors dryRunRule /
+   * SCP-334). includePending: false keeps pending transactions out.
+   */
+  async applyToPast(householdId: string, userId: string): Promise<RuleApplyOutcome> {
+    const visibleTransactions = await transactionRepository.findByHouseholdWithVisibility(
+      householdId,
+      userId,
+      { includePending: false },
+    );
+    const { outcome } = await this.applyRulesToTransactions(visibleTransactions, householdId, { userId });
+    return outcome;
+  }
+
+  /** applyRules for one batch row, also saying whether any rule changed it. */
+  private async applyRulesTracked(
+    transaction: Transaction,
+    householdId: string,
+    context?: { userId?: string }
+  ): Promise<{ transaction: Transaction; changed: boolean }> {
+    const rules = await ruleRepository.findEnabledByHousehold(householdId);
+    if (rules.length === 0) return { transaction, changed: false };
+    return this.persistRules(transaction, householdId, rules, context);
   }
 
   /**
@@ -247,12 +354,13 @@ export class RuleService {
     transactionId: string,
     householdId: string,
     userId: string
-  ): Promise<{
-    transaction: Transaction;
-    matches: boolean;
-    proposedUpdates: Partial<Transaction>;
-    linkGoalIds: string[];
-  }> {
+  ): Promise<
+    {
+      transaction: Transaction;
+      matches: boolean;
+      proposedUpdates: Partial<Transaction>;
+    } & RuleProposal
+  > {
     const rule = await ruleRepository.findByIdAndHousehold(ruleId, householdId);
     if (!rule) {
       throw new Error("Rule not found");
@@ -279,22 +387,27 @@ export class RuleService {
         transaction,
         matches: false,
         proposedUpdates: {},
-        linkGoalIds: [],
+        ...EMPTY_PROPOSAL,
       };
     }
 
-    const { updates, linkGoalIds } = await evaluateActions(
+    // C3-09: planRuleActions computes the proposal and writes nothing; the
+    // persist step (persistRuleEffects) is never reachable from a dry run.
+    const { updates, linkGoalIds, effects, blocked } = await planRuleActions(
       rule,
       transaction,
       householdId,
       merchantCache
     );
 
+    const blockedRun = toBlockedRun(rule.id, blocked);
+    const proposal = summarizeEffects(effects, linkGoalIds, blockedRun ? [blockedRun] : []);
+
     return {
       transaction,
       matches: true,
       proposedUpdates: updates,
-      linkGoalIds,
+      ...proposal,
     };
   }
 }

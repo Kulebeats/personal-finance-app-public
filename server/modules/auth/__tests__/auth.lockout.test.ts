@@ -34,6 +34,16 @@ const mockAuditService = vi.hoisted(() => ({
 vi.mock("../../../repositories/UserRepository", () => ({
   userRepository: mockUserRepository,
 }));
+// This suite owns lockout decisions with a mocked user repository. Durable
+// identity/store rechecks are proved separately against actual PostgreSQL.
+vi.mock("../../../services/session-identity", () => ({
+  assertCurrentCredential: vi.fn().mockResolvedValue(undefined),
+  registerSessionIdentity: (_user: unknown, data: unknown) => mockUserRepository.upsertSession(data),
+  revokeLoginSession: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("../auth.security.monitor", () => ({ authSecurityMonitor: {
+  checkLoginVelocity: vi.fn().mockResolvedValue(undefined), checkGeoAnomaly: vi.fn().mockResolvedValue(undefined),
+} }));
 
 vi.mock("../../../auth", () => ({
   hashPassword: vi.fn().mockResolvedValue("hashed_password"),
@@ -322,6 +332,9 @@ describe("Auth Module Lockout Tests", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
+      expect(res.body.data.user.id).toBe(mockUser.id);
+      expect(res.headers["set-cookie"]).toBeDefined();
+      expect(mockUserRepository.upsertSession).toHaveBeenCalledWith(expect.objectContaining({ userId: mockUser.id }));
     });
   });
 
@@ -335,10 +348,14 @@ describe("Auth Module Lockout Tests", () => {
       mockUserRepository.findSessions.mockResolvedValue([]);
       (verifyPassword as any).mockResolvedValue(true);
 
-      await request(app).post("/api/auth/login").send({
+      const res = await request(app).post("/api/auth/login").send({
         email: "test@example.com",
         password: "correctpassword",
       });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.user.id).toBe(mockUser.id);
+      expect(res.headers["set-cookie"]).toBeDefined();
 
       expect(mockUserRepository.update).toHaveBeenCalledWith(mockUser.id, {
         failedLoginAttempts: 0,
@@ -352,10 +369,14 @@ describe("Auth Module Lockout Tests", () => {
       mockUserRepository.findSessions.mockResolvedValue([]);
       (verifyPassword as any).mockResolvedValue(true);
 
-      await request(app).post("/api/auth/login").send({
+      const res = await request(app).post("/api/auth/login").send({
         email: "test@example.com",
         password: "correctpassword",
       });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.user.id).toBe(mockUser.id);
+      expect(res.headers["set-cookie"]).toBeDefined();
 
       // Update should not be called to reset attempts (they're already 0)
       expect(mockUserRepository.update).not.toHaveBeenCalledWith(

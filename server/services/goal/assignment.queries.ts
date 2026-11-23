@@ -17,6 +17,9 @@ import { and, desc, eq } from "drizzle-orm";
 import { NotFoundError, ValidationError } from "../../utils/errorHandler";
 import { accountRepository } from "../../repositories/AccountRepository";
 import { Money } from "../../core/money";
+import { visibleAccountPredicate } from "../../core/authz/transaction-visibility";
+import type { HouseholdContext } from "../../middleware/householdGuard";
+import type { TransactionType } from "../../utils/withTransaction";
 
 /**
  * Get goal by ID with household validation
@@ -97,14 +100,34 @@ export async function getAssignments(
     }));
 }
 
+/** Actor-scoped read for GET /goals/:id/assignments; mutation callers retain getAssignments. */
+export async function getVisibleAssignments(goalId: string, actor: HouseholdContext) {
+  const goal = await getGoal(goalId, actor.householdId);
+  const rows = await db
+    .select({ assignment: goalAccountAssignments, account: accounts })
+    .from(goalAccountAssignments)
+    .innerJoin(goals, eq(goalAccountAssignments.goalId, goals.id))
+    .innerJoin(accounts, eq(goalAccountAssignments.accountId, accounts.id))
+    .where(and(
+      eq(goals.id, goal.id),
+      eq(goals.householdId, actor.householdId),
+      visibleAccountPredicate(actor),
+    ));
+
+  return rows.map((row) => ({
+    ...row.assignment,
+    accountName: row.account.name,
+    accountBalance: row.account.balance,
+    accountCurrency: row.account.currency,
+    accountType: row.account.type,
+  }));
+}
+
 /**
- * Get all assignments for a household (with goal info)
- * FIX AUTH-GOAL-ASSIGN-001: Filter out private accounts not owned by requesting user
+ * Get all assignments for the actor's household (with goal info).
+ * Membership, goal household, and account visibility are checked in SQL.
  */
-export async function getAssignmentsForHousehold(
-  householdId: string,
-  userId: string
-) {
+export async function getAssignmentsForHousehold(actor: HouseholdContext) {
   const rows = await db
     .select({
       assignment: goalAccountAssignments,
@@ -114,23 +137,21 @@ export async function getAssignmentsForHousehold(
     .from(goalAccountAssignments)
     .innerJoin(accounts, eq(goalAccountAssignments.accountId, accounts.id))
     .innerJoin(goals, eq(goalAccountAssignments.goalId, goals.id))
-    .where(eq(goals.householdId, householdId));
+    .where(and(
+      eq(goals.householdId, actor.householdId),
+      visibleAccountPredicate(actor),
+    ));
 
-  // Filter out private accounts not owned by the requesting user
-  return rows
-    .filter(
-      (row) => !row.account.isPrivate || row.account.ownerUserId === userId
-    )
-    .map((row) => ({
-      ...row.assignment,
-      accountName: row.account.name,
-      accountBalance: row.account.balance,
-      accountCurrency: row.account.currency,
-      accountType: row.account.type,
-      goalName: row.goal.name,
-      goalType: row.goal.type,
-      goalCurrency: row.goal.currency,
-    }));
+  return rows.map((row) => ({
+    ...row.assignment,
+    accountName: row.account.name,
+    accountBalance: row.account.balance,
+    accountCurrency: row.account.currency,
+    accountType: row.account.type,
+    goalName: row.goal.name,
+    goalType: row.goal.type,
+    goalCurrency: row.goal.currency,
+  }));
 }
 
 /**
@@ -211,4 +232,22 @@ export async function getExistingAssignment(goalId: string, accountId: string) {
     .limit(1);
 
   return existing;
+}
+
+/**
+ * The assignment locked FOR UPDATE in `tx`: the row an update or removal applies and audits.
+ * Every assignment writer locks the account's whole set, in id order, before
+ * its own row: locking only the target row first and the rest later lets two
+ * writers on one account each hold a row the other waits for (40P01).
+ */
+export async function lockExistingAssignment(tx: TransactionType, goalId: string, accountId: string) {
+  const accountSet = await tx
+    .select()
+    .from(goalAccountAssignments)
+    .where(eq(goalAccountAssignments.accountId, accountId))
+    .orderBy(goalAccountAssignments.id)
+    .for("update");
+  const locked = accountSet.find((assignment) => assignment.goalId === goalId);
+  if (!locked) throw new NotFoundError("Assignment not found");
+  return locked;
 }

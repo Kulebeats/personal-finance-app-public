@@ -2,6 +2,8 @@
 import { debtPayoffCalculator } from "../DebtPayoffCalculator";
 import { GoalContributionService } from "./GoalContributionService";
 import { Money } from "../../core/money";
+import type { HouseholdContext } from "../../middleware/householdGuard";
+import { readGoalSourceVisibility } from "./GoalViewerProgress";
 import {
   calculateGoalProjection,
   type GoalProjectionCalculatorInput,
@@ -19,19 +21,23 @@ export class GoalDebtService extends GoalContributionService {
    * 3. The calculator rounds results to 2 decimal places internally
    *
    * For actual balance updates, always use the Money class directly.
+   *
+   * The balance is the goal's progress, so a viewer who cannot see every
+   * progress source gets null, as the other goal readers do (FIN-01).
    */
   async calculatePayoff(
     id: string,
-    householdId: string,
+    actor: HouseholdContext,
     data: { monthlyPayment: number; oneTimePayment?: number }
   ) {
-    const goal = await this.getGoalById(id, householdId);
+    const goal = await this.getGoalById(id, actor.householdId);
 
     if (goal.type !== "pay_down") {
       throw new ValidationError(
         "Payoff calculations only apply to pay down goals"
       );
     }
+    if (!(await this.isProgressVisible(actor, goal.id))) return null;
 
     // Convert to numbers at the boundary for debtPayoffCalculator (legacy API)
     // Use Money.abs() to ensure positive balance, then toNumber() for calculator
@@ -50,16 +56,17 @@ export class GoalDebtService extends GoalContributionService {
    * Get multiple payoff scenarios for a pay-down goal.
    *
    * Returns four scenarios: minimum, current, accelerated, and aggressive payment plans.
-   * See calculatePayoff() for notes on precision handling.
+   * See calculatePayoff() for notes on precision and visibility.
    */
-  async getPayoffScenarios(id: string, householdId: string) {
-    const goal = await this.getGoalById(id, householdId);
+  async getPayoffScenarios(id: string, actor: HouseholdContext) {
+    const goal = await this.getGoalById(id, actor.householdId);
 
     if (goal.type !== "pay_down") {
       throw new ValidationError(
         "Payoff calculations only apply to pay down goals"
       );
     }
+    if (!(await this.isProgressVisible(actor, goal.id))) return null;
 
     // Keep Money objects, convert to numbers only at the boundary for debtPayoffCalculator
     // This ensures precision is maintained until the final conversion
@@ -78,6 +85,11 @@ export class GoalDebtService extends GoalContributionService {
       currentPayment: currentPaymentMoney.toNumber(),
       oneTimePayment: oneTimePaymentMoney.toNumber(),
     });
+  }
+
+  private async isProgressVisible(actor: HouseholdContext, goalId: string): Promise<boolean> {
+    const visibility = await readGoalSourceVisibility(actor, [goalId]);
+    return visibility.get(goalId)?.progressVisible === true;
   }
 
   async calculateDebtStrategy(

@@ -8,9 +8,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
+import { DateFormatSelect } from "../DateFormatSelect";
 
 export function ColumnAssignmentStep() {
-  const { parsedData, mapping, updateMapping, setStep, currentStep } =
+  const { parsedData, mapping, updateMapping, setStep, dateFormat, setDateFormat } =
     useImportWizard();
 
   // If we have parsed headers, let's use them
@@ -18,21 +19,26 @@ export function ColumnAssignmentStep() {
 
   const requiredFields = [
     { label: "Date", key: "date", required: true },
-    { label: "Amount", key: "amount", required: true },
+    // IMP-01: Amount, or the Debit/Credit pair below.
+    { label: "Amount (or Debit/Credit)", key: "amount", required: true },
     { label: "Merchant Name", key: "merchant", required: false }, // Optional but good
   ];
 
   const optionalFields = [
+    { label: "Debit (money out)", key: "debit" },
+    { label: "Credit (money in)", key: "credit" },
+    { label: "Currency", key: "currency" },
     { label: "Category", key: "category" },
     { label: "Account", key: "account" },
     { label: "Notes", key: "notes" },
+    { label: "Bank Reference", key: "reference" },
     // { label: "Tags", key: "tags" },
   ];
 
   const handleNext = () => {
     // Basic validation
-    if (!mapping.date || !mapping.amount) {
-      alert("Please map Date and Amount fields");
+    if (!mapping.date || !(mapping.amount || mapping.debit || mapping.credit)) {
+      alert("Please map Date, and Amount or Debit/Credit");
       return;
     }
     setStep("category-mapping");
@@ -48,9 +54,15 @@ export function ColumnAssignmentStep() {
           Choose from the drop down list of your CSV columns and map each to the
           appropriate field in CopperCoin.
         </p>
+        {(parsedData?.formulaCells ?? 0) > 0 && (
+          <p className="text-sm text-muted-foreground mt-2" data-testid="import-formula-note">
+            {parsedData?.formulaCells} formula cells were read by the value Excel last saved; formulas are not recalculated.
+          </p>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-8">
+        <DateFormatSelect value={dateFormat} onChange={setDateFormat} />
         {/* Required Section */}
         <div className="space-y-4">
           <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">

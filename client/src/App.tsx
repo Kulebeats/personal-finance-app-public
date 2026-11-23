@@ -1,11 +1,13 @@
-import { Switch, Route, useLocation } from "wouter";
-import { Suspense, type ComponentType } from "react";
-import { queryClient } from "./lib/queryClient";
+import { Switch, Route, Redirect, useLocation } from "wouter";
+import { Suspense, useState, type ComponentType } from "react";
+import { createDataQueryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "next-themes";
 import { Toaster as SonnerToaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { SettingsProvider } from "@/contexts/SettingsContext";
+import { SessionProvider } from "@/contexts/SessionContext";
+import { SessionBoundary } from "@/components/session/SessionBoundary";
+import { isPublicRoute } from "@/lib/public-routes";
 import { GlobalErrorBoundary } from "@/components/GlobalErrorBoundary";
 import { RouteErrorBoundary } from "@/components/RouteErrorBoundary";
 import { lazyWithChunkReload } from "@/lib/chunkReload";
@@ -74,7 +76,6 @@ import { ImportWizardProvider } from "@/components/import/ImportWizardContext";
 import { ImportWizard } from "@/components/import/ImportWizard";
 import { CommandPalette } from "@/components/CommandPalette";
 import { CommandPaletteProvider } from "@/contexts/CommandPaletteContext";
-import { StepUpProvider } from "@/components/security/StepUpProvider";
 
 // Loading fallback for lazy loaded pages
 function PageLoader() {
@@ -85,7 +86,16 @@ function PageLoader() {
   );
 }
 
-function Router() {
+function LegacyVerifyEmailRedirect() {
+  return (
+    <Redirect
+      to={`/verify-email${window.location.search}${window.location.hash}`}
+      replace
+    />
+  );
+}
+
+export function Router() {
   return (
     <Switch>
       <Route path="/login" component={LoginRoute} />
@@ -107,6 +117,7 @@ function Router() {
       <Route path="/settings/:section/:subsection" component={SettingsRoute} />
       <Route path="/receipts" component={ReceiptsRoute} />
       <Route path="/verify-email" component={VerifyEmailRoute} />
+      <Route path="/auth/verify-email" component={LegacyVerifyEmailRedirect} />
       <Route path="/forgot-password" component={ForgotPasswordRoute} />
       <Route path="/reset-password" component={ResetPasswordRoute} />
       <Route path="/invite/:code" component={AcceptInviteRoute} />
@@ -116,30 +127,34 @@ function Router() {
 }
 
 function App() {
+  const [location] = useLocation();
+  const [publicClient] = useState(() => createDataQueryClient());
+  const routes = <Suspense fallback={<PageLoader />}><Router /></Suspense>;
   return (
-    <QueryClientProvider client={queryClient}>
+    <QueryClientProvider client={publicClient}>
       <GlobalErrorBoundary>
-        <SettingsProvider>
           <ThemeProvider
             defaultTheme="light"
             attribute="class"
             themes={["light", "dark", "light-gray"]}
           >
             <TooltipProvider>
-              <ImportWizardProvider>
-                <CommandPaletteProvider>
-                  <SonnerToaster />
-                  <Suspense fallback={<PageLoader />}>
-                    <Router />
-                  </Suspense>
-                  <ImportWizard />
-                  <CommandPalette />
-                  <StepUpProvider />
-                </CommandPaletteProvider>
-              </ImportWizardProvider>
+              <SonnerToaster />
+              <SessionProvider>
+                {isPublicRoute(location) ? routes : (
+                  <SessionBoundary>
+                    <ImportWizardProvider>
+                      <CommandPaletteProvider>
+                        {routes}
+                        <ImportWizard />
+                        <CommandPalette />
+                      </CommandPaletteProvider>
+                    </ImportWizardProvider>
+                  </SessionBoundary>
+                )}
+              </SessionProvider>
             </TooltipProvider>
           </ThemeProvider>
-        </SettingsProvider>
       </GlobalErrorBoundary>
     </QueryClientProvider>
   );

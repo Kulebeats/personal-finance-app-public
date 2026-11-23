@@ -7,7 +7,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import request from "supertest";
 import type { Express } from "express";
 import { db } from "../../../db";
-import { eq } from "drizzle-orm";
+import { eq, or, sql } from "drizzle-orm";
 import {
   users,
   households,
@@ -16,6 +16,7 @@ import {
   categoryGroups,
   categories,
   auditLogs,
+  session,
 } from "@shared/schema";
 import {
   createTestUser,
@@ -102,6 +103,7 @@ describe("Rules Integration Tests", () => {
     const [category] = await db
       .insert(categories)
       .values({
+        householdId: testHousehold.id,
         groupId: categoryGroupId,
         name: "Test Category",
         icon: "shopping-cart",
@@ -124,6 +126,11 @@ describe("Rules Integration Tests", () => {
   });
 
   afterAll(async () => {
+    // Express sessions outlive their users unless the fixture removes them.
+    await db.delete(session).where(or(
+      eq(sql<string>`${session.sess}->>'userId'`, userId),
+      eq(sql<string>`${session.sess}->>'mfaPendingUserId'`, userId),
+    ));
     // Cleanup
     await db.delete(auditLogs).where(eq(auditLogs.householdId, householdId));
     await db.delete(rules).where(eq(rules.householdId, householdId));
@@ -730,9 +737,9 @@ describe("Rules Integration Tests", () => {
   // Rate Limiting
   // ==========================================================================
   describe("Rate Limiting", () => {
-    it("should mount generalLimiter before rules endpoints", () => {
+    it("should inherit general quota without a duplicate rules mount", () => {
       expect(routerUsesMiddlewareBeforeRoutes(rulesRouter, generalLimiter)).toBe(
-        true,
+        false,
       );
     });
 
@@ -978,6 +985,8 @@ describe("Rules Integration Tests", () => {
         [foodCategoryId, transportCategoryId],
         "2026-01-01",
         "2026-01-31",
+        { kind: "system", purpose: "rule-split-reconciliation-regression" },
+        "ZMW",
       );
       expect(
         spentByCategory.find((row) => row.categoryId === foodCategoryId)?.total,
@@ -1170,7 +1179,10 @@ describe("Rules Integration Tests", () => {
       expect(transportBudget?.amount).toBe("50.00");
 
       const total = created.reduce(
-        (sum, budget) => sum.add(new Money(budget.amount, "ZMW")),
+        (sum, budget) => {
+          if (budget.amount === null) throw new Error("Legacy direct recalculation must create a recurring default");
+          return sum.add(new Money(budget.amount, "ZMW"));
+        },
         Money.zero("ZMW"),
       );
       expect(total.toString()).toBe("100.00");
@@ -1257,7 +1269,7 @@ describe("Rules Integration Tests", () => {
       await db.delete(rules).where(eq(rules.id, ruleId));
     });
 
-    it("transactions and sankey reports exclude split parents via NOT EXISTS guards", async () => {
+    it("transactions and sankey reports count a rule-split purchase by its splits, never the parent amount too (NEW-14)", async () => {
       const { transactions, transactionSplits } = await import("@shared/schema");
 
       const ruleRes = await request(app)
@@ -1303,12 +1315,19 @@ describe("Rules Integration Tests", () => {
         .get("/api/reports/transactions?from=2026-04-01&to=2026-04-30&type=expense")
         .set("Cookie", authCookie);
       expect(txReport.status).toBe(200);
-      expect(JSON.stringify(txReport.body)).not.toContain(splitTxId);
+      const splitRows = (txReport.body.data.items as Array<{ id: string; splitId?: string | null; amount: { amount: string }; category?: { id: string } | null }>)
+        .filter((item) => item.id === splitTxId)
+        .map((item) => [item.category?.id, item.amount.amount, typeof item.splitId])
+        .sort();
+      expect(splitRows).toEqual([[foodCategoryId, "50.00", "string"], [transportCategoryId, "50.00", "string"]].sort());
 
       const sankey = await request(app)
-        .get("/api/reports/sankey?from=2026-04-01&to=2026-04-30")
+        .get("/api/reports/sankey?from=2026-04-01&to=2026-04-30&mode=expense_groups_to_categories")
         .set("Cookie", authCookie);
       expect(sankey.status).toBe(200);
+      const categoryLinks = (sankey.body.data.sankey.links as Array<{ value: { amount: string }; meta?: { entityId?: string } }>)
+        .filter((link) => link.meta?.entityId === foodCategoryId || link.meta?.entityId === transportCategoryId);
+      expect(categoryLinks.map((link) => link.value.amount).sort()).toEqual(["50.00", "50.00"]);
 
       await db
         .delete(transactionSplits)

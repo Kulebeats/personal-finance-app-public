@@ -1,4 +1,4 @@
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, asc, inArray, sql } from "drizzle-orm";
 import { db } from "../db";
 import { categories, type Category, type InsertCategory } from "@shared/schema";
 import { withTransaction } from "../utils/withTransaction";
@@ -137,6 +137,16 @@ export class CategoryRepository {
   async reorder(householdId: string, orderedIds: string[]): Promise<void> {
     // Use transaction wrapper utility for automatic rollback
     await withTransaction(async (tx) => {
+      // Rule authoring takes category SHARE locks in UUID order. Acquire all
+      // reorder write locks in that same order before applying display values
+      // in the user's requested order, so the two writers cannot invert locks.
+      const idsToLock = Array.from(new Set(orderedIds.map((id) => id.toLowerCase()))).sort();
+      if (idsToLock.length > 0) {
+        await tx.select({ id: categories.id }).from(categories)
+          .where(and(eq(categories.householdId, householdId), inArray(categories.id, idsToLock)))
+          .orderBy(asc(categories.id))
+          .for("no key update");
+      }
       // Update each category's display order
       for (let i = 0; i < orderedIds.length; i++) {
         await tx

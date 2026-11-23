@@ -2,7 +2,8 @@ import rateLimit, { ipKeyGenerator, type Options } from "express-rate-limit";
 import RedisStore from "rate-limit-redis";
 import { Request, Response } from "express";
 import { logger } from "../utils/logger";
-import { redis } from "../config/redis";
+import { productionRedis, redis } from "../config/redis";
+import { createProductionRateLimiter, type RateLimitPrefix } from "../config/redis/production-rate-limit.mjs";
 
 /**
  * Rate Limiting Middleware
@@ -14,10 +15,16 @@ import { redis } from "../config/redis";
  * - Production refuses to boot without REDIS_URL (see validateEnv.ts)
  * - Falls back to in-memory store for development/test only
  *
- * V7 Requirements:
- * - General API: 100 req/min/user
- * - Analytics: 30 req/min/user
+ * Tier sizes: general and shared-IP credential limits follow spec R00.3. Those
+ * two numbers are D22 proposals (policy, not arithmetic) until the owner
+ * ratifies them; the spec gives no number for the other tiers, so they keep
+ * their earlier values.
  */
+
+/** R00.3 proposal (D22): 600 requests per authenticated user per 60 s window. */
+const GENERAL_LIMIT_PER_MINUTE = 600;
+/** R00.3 proposal (D22): credential POSTs, 10 per minute per IP. */
+const IP_AUTH_LIMIT_PER_MINUTE = 10;
 
 // ============================================================================
 // REDIS STORE CONFIGURATION (SCP-307)
@@ -39,7 +46,7 @@ import { redis } from "../config/redis";
  *
  * @param prefix Distinct key namespace for this limiter (e.g. "rl:general:").
  */
-function buildStore(prefix: string): Options["store"] | undefined {
+function buildStore(prefix: RateLimitPrefix): Options["store"] | undefined {
   if (!redis) {
     if (process.env.NODE_ENV === "production") {
       logger.warn(
@@ -73,9 +80,12 @@ function buildStore(prefix: string): Options["store"] | undefined {
  * accidentally left without a `store`.
  */
 function createLimiter(
-  prefix: string,
+  prefix: RateLimitPrefix,
   options: Partial<Options>,
 ): ReturnType<typeof rateLimit> {
+  if (productionRedis) {
+    return createProductionRateLimiter(productionRedis, prefix, options);
+  }
   return rateLimit({
     ...options,
     store: buildStore(prefix),
@@ -143,11 +153,12 @@ const createRateLimitHandler = (windowMs: number) => {
 };
 
 /**
- * General API rate limiter: 100 requests per minute
+ * General API rate limiter, mounted once on /api in routes.ts. Keyed per user,
+ * with the client IP as the anonymous fallback.
  */
 export const generalLimiter = createLimiter("rl:general:", {
   windowMs: 60 * 1000, // 1 minute
-  max: 100,
+  max: GENERAL_LIMIT_PER_MINUTE,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: getRateLimitKey,
@@ -185,12 +196,12 @@ export const authLimiter = createLimiter("rl:auth:", {
 });
 
 /**
- * Strict IP-based Auth Limiter: 5 requests per minute
- * Purely IP-based to prevent brute force when userId isn't known yet.
+ * IP-based credential limiter on the credential POSTs only (never /me or
+ * /logout). Purely IP-based to prevent brute force when userId isn't known yet.
  */
 export const ipAuthLimiter = createLimiter("rl:ipauth:", {
   windowMs: 60 * 1000, // 1 minute
-  max: 5,
+  max: IP_AUTH_LIMIT_PER_MINUTE,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: getIpRateLimitKey,

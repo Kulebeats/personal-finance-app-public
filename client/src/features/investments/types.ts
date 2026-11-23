@@ -1,10 +1,12 @@
+import type { MoneyDto } from "@shared/money";
+
 export interface InvestmentHolding {
   id: string;
   securityId: string;
   quantity: string;
   averageBuyPrice: string;
-  currentValue?: number;
-  gainLoss?: number;
+  currentValue?: MoneyDto;
+  gainLoss?: MoneyDto;
   gainLossPercent?: number;
   security?: InvestmentSecurity;
 }

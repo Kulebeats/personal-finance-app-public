@@ -11,14 +11,13 @@
  * @module routes/security
  */
 
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, NextFunction } from "express";
 import { db } from "../db";
 import { users } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { requireAuth } from "../auth";
 import { logger } from "../utils/logger";
 import { isEmailServiceConfigured } from "../services/emailService";
-import { generalLimiter } from "../middleware/rateLimit";
 import { requireStepUp } from "../middleware/requireStepUp";
 import { settingsController } from "../modules/settings/settings.controller";
 
@@ -29,11 +28,24 @@ import mfaRoutes from "./security.mfa";
 
 const router = Router();
 
-// SEC-RATE-006: Apply rate limiting to all security routes
-router.use(generalLimiter);
-
 // Mount email routes (some don't require auth - verify endpoint)
 router.use("/email", emailRoutes);
+
+/** Hand one exact path to the MFA router (its own limiter and guards apply). */
+const toMfaRoutes = (path: string) => (req: Request, res: Response, next: NextFunction) => {
+  req.url = path;
+  mfaRoutes(req, res, next);
+};
+
+// AH-11: a member past the MFA grace must still reach step-up, MFA status and
+// enrolment, and nothing else here. Exact routes only, registered before the
+// router-wide requireAuth; each handler is guarded by requireAuthAllowingMfaEnrolment.
+// Any other path (e.g. /mfa/enable/x) falls through to requireAuth and the gate.
+router.post("/step-up", toMfaRoutes("/step-up"));
+router.get("/step-up/status", toMfaRoutes("/step-up/status"));
+router.get("/mfa/status", toMfaRoutes("/status"));
+router.post("/mfa/enable", toMfaRoutes("/enable"));
+router.post("/mfa/enable/confirm", toMfaRoutes("/enable/confirm"));
 
 // All remaining routes require authentication
 router.use(requireAuth);
@@ -108,16 +120,5 @@ router.get("/login-history", (req: Request, res: Response, next) => {
 
 // Mount MFA routes
 router.use("/mfa", mfaRoutes);
-
-// Step-up routes (also part of MFA)
-router.post("/step-up", (req: Request, res: Response, next) => {
-  req.url = "/step-up";
-  mfaRoutes(req, res, next);
-});
-
-router.get("/step-up/status", (req: Request, res: Response, next) => {
-  req.url = "/step-up/status";
-  mfaRoutes(req, res, next);
-});
 
 export default router;

@@ -11,6 +11,8 @@ import fc from "fast-check";
 import { Request, Response, NextFunction } from "express";
 import { householdGuard } from "../householdGuard";
 import { householdRepository } from "../../repositories/HouseholdRepository";
+import { userRepository } from "../../repositories/UserRepository";
+import type { User } from "@shared/schema";
 
 // Configure fast-check to run minimum 100 iterations
 fc.configureGlobal({ numRuns: 100 });
@@ -27,6 +29,15 @@ vi.mock("../../repositories/HouseholdRepository", () => ({
     findMember: vi.fn(),
   },
 }));
+vi.mock("../../repositories/UserRepository", () => ({ userRepository: { findById: vi.fn() } }));
+
+// These membership properties intentionally model a current verified actor.
+// Pending, stale and erased identities have independent R02 negative regressions.
+function verifiedActor(userId: string) {
+  vi.mocked(userRepository.findById).mockResolvedValue({
+    id: userId, emailVerified: true, mfaEnabled: true, securityGeneration: 0, erasedAt: null, passwordHash: "synthetic-property-hash",
+  } as User);
+}
 
 describe("Property 12: Household Authorization Enforcement", () => {
   let mockRequest: Partial<Request>;
@@ -74,6 +85,7 @@ describe("Property 12: Household Authorization Enforcement", () => {
           mockRequest = {
             session: { userId } as any,
           };
+          verifiedActor(userId);
           
           vi.mocked(householdRepository.findByUserId).mockResolvedValueOnce({
             id: householdId,
@@ -129,6 +141,7 @@ describe("Property 12: Household Authorization Enforcement", () => {
           mockRequest = {
             session: { userId } as any,
           };
+          verifiedActor(userId);
           
           vi.mocked(householdRepository.findByUserId).mockResolvedValueOnce({
             id: householdId,
@@ -204,6 +217,7 @@ describe("Property 12: Household Authorization Enforcement", () => {
         async (userId) => {
           // Setup: User has no household
           mockRequest.session = { userId } as any;
+          verifiedActor(userId);
           
           vi.mocked(householdRepository.findByUserId).mockResolvedValue(undefined);
 
@@ -255,6 +269,7 @@ describe("Property 12: Household Authorization Enforcement", () => {
           mockRequest = {
             session: { userId } as any,
           };
+          verifiedActor(userId);
           
           vi.mocked(householdRepository.findByUserId).mockResolvedValueOnce({
             id: householdId,

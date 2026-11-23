@@ -1,5 +1,5 @@
-﻿import { AccountImportService } from "./AccountImportService";
+﻿import { AccountAuditedWriteService } from "./AccountAuditedWrites";
 
-export class AccountService extends AccountImportService {}
+export class AccountService extends AccountAuditedWriteService {}
 
 export const accountService = new AccountService();

@@ -5,27 +5,19 @@
  */
 
 import type { MoneyValue } from "@shared/money";
-import { toMoneyNumber } from "@/lib/money";
+import { formatCurrency as formatMoney, toMoneyNumber } from "@/lib/money";
 
 /**
- * Format currency value
+ * Format a report amount as the rest of the app shows money: in its own
+ * currency (a MoneyDto's, else `currency`), to that currency's minor units,
+ * never rounded to whole units (42.50 is "K 42.50", not "ZMW 43"). With no
+ * known currency (null) the bare number is shown, never a guessed symbol.
  */
 export function formatCurrency(
   value: MoneyValue | number,
-  currency = "USD",
+  currency: string | null,
 ): string {
-  const numericValue = toMoneyNumber(value);
-  const resolvedCurrency =
-    typeof value === "object" && value !== null && "currency" in value
-      ? value.currency
-      : currency;
-
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: resolvedCurrency,
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(numericValue);
+  return formatMoney(value, currency ?? "");
 }
 
 /**

@@ -5,7 +5,10 @@
  * Uses the API client for server-backed data.
  */
 
+import { userErrorMessage } from "@/lib/errorCopy";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { assertOperationLifetime, captureOperationLifetime } from "@/lib/operation-lifetime";
+import { downloadProtectedBlob } from "@/lib/protected-media";
 import {
   accountsApi,
   type Account,
@@ -17,12 +20,18 @@ import {
   type NetWorthHistory,
   type AccountSettings,
   type TransactionImportRow,
+  type TransactionImportDecision,
+  type ApiError,
+  IMPORT_REVIEW_REQUIRED,
 } from "../lib/api";
 import { useToast } from "@/hooks/use-toast";
+import { invalidateImportQueries } from "@/lib/invalidate-import-queries";
 
 // Query keys
 export const accountKeys = {
   all: ["accounts"] as const,
+  lists: () => ["accounts", "list"] as const,
+  netWorthHistories: () => ["accounts", "net-worth-history"] as const,
   list: (params?: {
     includeArchived?: boolean;
     includeHidden?: boolean;
@@ -35,8 +44,14 @@ export const accountKeys = {
   netWorthHistory: (
     dateRange: string,
     scope?: "user" | "household",
+    includeAccounts = false,
+    accountOwnerUserId?: string | null,
+    viewRevision = 0,
+    mountIdentity?: string,
   ) =>
-    [...accountKeys.all, "net-worth-history", dateRange, scope] as const,
+    [...accountKeys.all, "net-worth-history", dateRange, scope,
+      ...(includeAccounts ? ["with-accounts", accountOwnerUserId === undefined ? "all" : accountOwnerUserId, viewRevision,
+        ...(mountIdentity ? [mountIdentity] : [])] : [])] as const,
 };
 
 /**
@@ -47,10 +62,11 @@ export function useAccounts(params?: {
   includeArchived?: boolean;
   includeHidden?: boolean;
   ownerUserId?: string | null;
-}) {
+}, enabled = true) {
   return useQuery({
     queryKey: accountKeys.list(params),
     queryFn: () => accountsApi.list(params),
+    enabled,
     staleTime: 30_000, // 30 seconds
   });
 }
@@ -69,10 +85,11 @@ export function useAccount(id: string) {
 /**
  * Hook to get net worth summary
  */
-export function useNetWorthSummary() {
+export function useNetWorthSummary(enabled = true) {
   return useQuery({
     queryKey: accountKeys.summary(),
     queryFn: () => accountsApi.getSummary(),
+    enabled,
     staleTime: 60_000, // 1 minute
   });
 }
@@ -97,7 +114,7 @@ export function useCreateAccount() {
     onError: (error: Error) => {
       toast({
         title: "Failed to create account",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -120,7 +137,9 @@ export function useUpdateAccount() {
         accountKeys.detail(updatedAccount.id),
         updatedAccount,
       );
-      queryClient.invalidateQueries({ queryKey: accountKeys.list() });
+      queryClient.invalidateQueries({ queryKey: accountKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: accountKeys.summary() });
+      queryClient.invalidateQueries({ queryKey: accountKeys.netWorthHistories() });
       toast({
         title: "Account updated",
         description: `${updatedAccount.name} has been updated.`,
@@ -136,7 +155,7 @@ export function useUpdateAccount() {
       } else {
         toast({
           title: "Failed to update account",
-          description: error.message,
+          description: userErrorMessage(error, "Please try again."),
           variant: "destructive",
         });
       }
@@ -156,8 +175,9 @@ export function useDeleteAccount() {
     onSuccess: (_, id) => {
       // Remove from cache
       queryClient.removeQueries({ queryKey: accountKeys.detail(id) });
-      queryClient.invalidateQueries({ queryKey: accountKeys.list() });
+      queryClient.invalidateQueries({ queryKey: accountKeys.lists() });
       queryClient.invalidateQueries({ queryKey: accountKeys.summary() });
+      queryClient.invalidateQueries({ queryKey: accountKeys.netWorthHistories() });
       toast({
         title: "Account deleted",
         description: "The account has been removed.",
@@ -166,7 +186,7 @@ export function useDeleteAccount() {
     onError: (error: Error) => {
       toast({
         title: "Failed to delete account",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -189,8 +209,9 @@ export function useAdjustBalance() {
         accountKeys.detail(result.account.id),
         result.account,
       );
-      queryClient.invalidateQueries({ queryKey: accountKeys.list() });
+      queryClient.invalidateQueries({ queryKey: accountKeys.lists() });
       queryClient.invalidateQueries({ queryKey: accountKeys.summary() });
+      queryClient.invalidateQueries({ queryKey: accountKeys.netWorthHistories() });
       toast({
         title: "Balance adjusted",
         description: "Account balance has been updated.",
@@ -199,7 +220,7 @@ export function useAdjustBalance() {
     onError: (error: Error) => {
       toast({
         title: "Failed to adjust balance",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -218,7 +239,9 @@ export function useArchiveAccount() {
       archive ? accountsApi.archive(id) : accountsApi.unarchive(id),
     onSuccess: (account, { archive }) => {
       queryClient.setQueryData(accountKeys.detail(account.id), account);
-      queryClient.invalidateQueries({ queryKey: accountKeys.list() });
+      queryClient.invalidateQueries({ queryKey: accountKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: accountKeys.summary() });
+      queryClient.invalidateQueries({ queryKey: accountKeys.netWorthHistories() });
       toast({
         title: archive ? "Account archived" : "Account restored",
         description: `${account.name} has been ${
@@ -229,7 +252,7 @@ export function useArchiveAccount() {
     onError: (error: Error) => {
       toast({
         title: "Operation failed",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -255,11 +278,21 @@ export function useAccountBalanceHistory(id: string, dateRange: string = "1m") {
 export function useNetWorthHistory(
   dateRange: string = "1m",
   scope: "user" | "household" = "user",
+  enabled = true,
+  includeAccounts = false,
+  accountOwnerUserId?: string | null,
+  viewRevision = 0,
+  mountIdentity?: string,
 ) {
   return useQuery({
-    queryKey: accountKeys.netWorthHistory(dateRange, scope),
-    queryFn: () => accountsApi.getNetWorthHistory(dateRange, scope),
-    staleTime: 60_000, // 1 minute
+    queryKey: accountKeys.netWorthHistory(dateRange, scope, includeAccounts, accountOwnerUserId, viewRevision, mountIdentity),
+    queryFn: () => includeAccounts ? accountOwnerUserId === undefined ? accountsApi.getNetWorthHistory(dateRange, scope, true)
+      : accountsApi.getNetWorthHistory(dateRange, scope, true, accountOwnerUserId) : accountsApi.getNetWorthHistory(dateRange, scope),
+    enabled,
+    staleTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
+    refetchInterval: 60_000,
   });
 }
 
@@ -275,8 +308,9 @@ export function useUpdateAccountSettings() {
       accountsApi.updateSettings(id, settings),
     onSuccess: (account) => {
       queryClient.setQueryData(accountKeys.detail(account.id), account);
-      queryClient.invalidateQueries({ queryKey: accountKeys.list() });
+      queryClient.invalidateQueries({ queryKey: accountKeys.lists() });
       queryClient.invalidateQueries({ queryKey: accountKeys.summary() });
+      queryClient.invalidateQueries({ queryKey: accountKeys.netWorthHistories() });
       toast({
         title: "Settings updated",
         description: "Account settings have been saved.",
@@ -285,7 +319,7 @@ export function useUpdateAccountSettings() {
     onError: (error: Error) => {
       toast({
         title: "Failed to update settings",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -311,6 +345,7 @@ export function useImportBalanceHistory() {
       queryClient.invalidateQueries({
         queryKey: accountKeys.detail(id),
       });
+      queryClient.invalidateQueries({ queryKey: accountKeys.netWorthHistories() });
       toast({
         title: "Balance history imported",
         description: `${result.imported} entries have been added.`,
@@ -319,7 +354,7 @@ export function useImportBalanceHistory() {
     onError: (error: Error) => {
       toast({
         title: "Failed to import balance history",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -334,29 +369,39 @@ export function useImportTransactions() {
   const { toast } = useToast();
 
   return useMutation({
+    onMutate: () => ({ operation: captureOperationLifetime() }),
     mutationFn: ({
       id,
       transactions,
       adjustBalance,
+      decisions,
     }: {
       id: string;
       transactions: TransactionImportRow[];
       adjustBalance: boolean;
-    }) => accountsApi.importTransactions(id, transactions, adjustBalance),
-    onSuccess: (result, { id }) => {
-      queryClient.invalidateQueries({ queryKey: accountKeys.detail(id) });
-      queryClient.invalidateQueries({ queryKey: accountKeys.list() });
-      queryClient.invalidateQueries({ queryKey: accountKeys.summary() });
-      queryClient.invalidateQueries({ queryKey: ["transactions"] });
+      /** A-01: choices for the rows a previous attempt flagged. */
+      decisions?: TransactionImportDecision[];
+    }) => accountsApi.importTransactions(id, transactions, adjustBalance, decisions ?? []),
+    // A failed batch may have committed earlier rows before the error reached the client.
+    onSettled: (_result, _error, _variables, context) => {
+      if (context) return invalidateImportQueries(queryClient, context.operation);
+    },
+    onSuccess: (result) => {
+      // A-01: flagged rows were posted or skipped only by the member's own choice.
+      const skipped = result.reviewSkipped ?? 0;
       toast({
         title: "Transactions imported",
-        description: `${result.imported} transactions have been added.`,
+        description: `${result.imported} transactions have been added.` + (skipped
+          ? ` ${skipped} possible duplicate${skipped === 1 ? " was" : "s were"} skipped.`
+          : ""),
       });
     },
     onError: (error: Error) => {
+      // A-01: a review request is not a failure; the import dialog shows the rows to decide on.
+      if ((error as ApiError).code === IMPORT_REVIEW_REQUIRED) return;
       toast({
         title: "Failed to import transactions",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -377,17 +422,12 @@ export function useExportTransactions() {
       id: string;
       options?: { startDate?: string; endDate?: string };
     }) => {
-      const csvData = await accountsApi.exportTransactions(id, options);
+      const operation = captureOperationLifetime();
+      const csvData = await accountsApi.exportTransactions(id, options, operation);
+      assertOperationLifetime(operation);
       // Trigger download
       const blob = new Blob([csvData], { type: "text/csv" });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "transactions.csv";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
+      downloadProtectedBlob(blob, "transactions.csv", operation);
       return csvData;
     },
     onSuccess: () => {
@@ -399,7 +439,7 @@ export function useExportTransactions() {
     onError: (error: Error) => {
       toast({
         title: "Export failed",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -414,17 +454,12 @@ export function useExportBalanceHistory() {
 
   return useMutation({
     mutationFn: async (id: string) => {
-      const csvData = await accountsApi.exportBalanceHistory(id);
+      const operation = captureOperationLifetime();
+      const csvData = await accountsApi.exportBalanceHistory(id, operation);
+      assertOperationLifetime(operation);
       // Trigger download
       const blob = new Blob([csvData], { type: "text/csv" });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "balance-history.csv";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
+      downloadProtectedBlob(blob, "balance-history.csv", operation);
       return csvData;
     },
     onSuccess: () => {
@@ -436,7 +471,7 @@ export function useExportBalanceHistory() {
     onError: (error: Error) => {
       toast({
         title: "Export failed",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },
@@ -451,17 +486,12 @@ export function useExportAccountsSummary() {
 
   return useMutation({
     mutationFn: async () => {
-      const csvData = await accountsApi.exportSummary();
+      const operation = captureOperationLifetime();
+      const csvData = await accountsApi.exportSummary(operation);
+      assertOperationLifetime(operation);
       // Trigger download
       const blob = new Blob([csvData], { type: "text/csv" });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "accounts-summary.csv";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
+      downloadProtectedBlob(blob, "accounts-summary.csv", operation);
       return csvData;
     },
     onSuccess: () => {
@@ -473,7 +503,7 @@ export function useExportAccountsSummary() {
     onError: (error: Error) => {
       toast({
         title: "Export failed",
-        description: error.message,
+        description: userErrorMessage(error, "Please try again."),
         variant: "destructive",
       });
     },

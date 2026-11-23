@@ -16,6 +16,7 @@ import {
 import { eq, and, lte, or, sql } from "drizzle-orm";
 import { logger } from "../../utils/logger";
 import type { TransactionType } from "../../utils/withTransaction";
+import { EventTypes } from "./eventTypes";
 
 // Re-export EventTypes from centralized location for backwards compatibility
 export { EventTypes } from "./eventTypes";
@@ -29,7 +30,9 @@ export { EventTypes } from "./eventTypes";
  * 3. Retrying failed events with exponential backoff
  * 4. Moving permanently failed events to a dead letter queue for review
  *
- * This pattern provides at-least-once delivery guarantees.
+ * Generic handlers use at-least-once delivery. Security notices use a separate
+ * fenced dispatcher: a possibly dispatched outcome is unknown, never blindly
+ * retried by these generic state helpers.
  */
 
 /**
@@ -128,11 +131,14 @@ class OutboxEventService {
       .where(
         and(
           or(
-            eq(outboxEvents.status, "pending"),
+            and(sql`${outboxEvents.eventType} <> ${EventTypes.SECURITY_NOTICE_REQUESTED}`, eq(outboxEvents.status, "pending")),
             and(
               eq(outboxEvents.status, "failed"),
-              lte(outboxEvents.nextRetryAt, now)
-            )
+              sql`${outboxEvents.eventType} <> ${EventTypes.SECURITY_NOTICE_REQUESTED}`, lte(outboxEvents.nextRetryAt, now)
+            ),
+            and(eq(outboxEvents.eventType, EventTypes.SECURITY_NOTICE_REQUESTED), sql`${outboxEvents.dispatchStartedAt} IS NULL`,
+              or(and(sql`${outboxEvents.status} IN ('pending', 'failed')`, sql`(${outboxEvents.nextRetryAt} IS NULL OR ${outboxEvents.nextRetryAt} <= now())`),
+                and(eq(outboxEvents.status, "processing"), sql`${outboxEvents.dispatchLeaseUntil} <= now()`)))
           )
         )
       )
@@ -156,6 +162,7 @@ class OutboxEventService {
       .where(
         and(
           eq(outboxEvents.id, eventId),
+          sql`${outboxEvents.eventType} <> ${EventTypes.SECURITY_NOTICE_REQUESTED}`,
           or(
             eq(outboxEvents.status, "pending"),
             eq(outboxEvents.status, "failed")
@@ -178,7 +185,7 @@ class OutboxEventService {
         processedAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(outboxEvents.id, eventId));
+      .where(and(eq(outboxEvents.id, eventId), sql`${outboxEvents.eventType} <> ${EventTypes.SECURITY_NOTICE_REQUESTED}`));
   }
 
   /**
@@ -190,7 +197,7 @@ class OutboxEventService {
       .from(outboxEvents)
       .where(eq(outboxEvents.id, eventId));
 
-    if (!event) return;
+    if (!event || event.eventType === EventTypes.SECURITY_NOTICE_REQUESTED) return;
 
     const newRetryCount = event.retryCount + 1;
     const isDead = newRetryCount >= event.maxRetries;
@@ -204,7 +211,7 @@ class OutboxEventService {
         nextRetryAt: isDead ? null : calculateNextRetry(newRetryCount),
         updatedAt: new Date(),
       })
-      .where(eq(outboxEvents.id, eventId));
+      .where(and(eq(outboxEvents.id, eventId), sql`${outboxEvents.eventType} <> ${EventTypes.SECURITY_NOTICE_REQUESTED}`));
 
     /**
      * BUSINESS RULE: Dead Letter Queue
@@ -255,7 +262,8 @@ class OutboxEventService {
       .where(
         and(
           eq(outboxEvents.id, eventId),
-          eq(outboxEvents.status, "dead_letter")
+          eq(outboxEvents.status, "dead_letter"),
+          sql`(${outboxEvents.eventType} <> ${EventTypes.SECURITY_NOTICE_REQUESTED} OR ${outboxEvents.dispatchStartedAt} IS NULL)`
         )
       );
   }
@@ -269,6 +277,8 @@ class OutboxEventService {
     completed: number;
     failed: number;
     deadLetter: number;
+    unknown: number;
+    suppressed: number;
   }> {
     const result = await db
       .select({
@@ -284,6 +294,8 @@ class OutboxEventService {
       completed: 0,
       failed: 0,
       deadLetter: 0,
+      unknown: 0,
+      suppressed: 0,
     };
 
     for (const row of result) {
@@ -303,6 +315,8 @@ class OutboxEventService {
         case "dead_letter":
           stats.deadLetter = row.count;
           break;
+        case "unknown": stats.unknown = row.count; break;
+        case "suppressed": stats.suppressed = row.count; break;
       }
     }
 

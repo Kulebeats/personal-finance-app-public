@@ -3,17 +3,25 @@
  * Handles investment holdings CRUD and sync operations
  */
 import { Request, Response, NextFunction } from "express";
+import { z } from "zod";
 import { investmentService } from "./investments.service";
 import { householdRepository } from "../../repositories/HouseholdRepository";
 import { businessAuditService } from "../../services/BusinessAuditService";
 import { logger } from "../../utils/logger";
 import { success, noContent } from "../../core/http";
-import { ValidationError, NotFoundError } from "../../core/errors";
+import { ValidationError, NotFoundError, UnauthorizedError } from "../../core/errors";
+import type { HoldingReadSession } from "./investmentHoldingRead";
+import { investmentCurrencySelector } from "./investmentCurrencySelector";
 import {
   listHoldingsQuerySchema,
-  createHoldingSchema,
+  createHoldingRequestSchema,
   updateHoldingSchema,
 } from "./investments.validation";
+
+function holdingReadSession(req: Request): HoldingReadSession {
+  if (!req.user || req.session?.userId !== req.user.id || !req.sessionID) throw new UnauthorizedError("Authentication required");
+  return { snapshot: structuredClone(req.user), sessionId: req.sessionID, generation: req.session.securityGeneration };
+}
 
 async function resolveBaseCurrency(
   householdId: string,
@@ -28,7 +36,9 @@ async function resolveBaseCurrency(
 
 async function listHoldings(req: Request, res: Response, next: NextFunction) {
   try {
+    const session = holdingReadSession(req);
     const { householdId } = req.householdContext!;
+    const requestedCurrency = investmentCurrencySelector(req.query);
     const parsed = listHoldingsQuerySchema.safeParse(req.query);
     if (!parsed.success) {
       throw new ValidationError("Invalid request data", parsed.error.errors);
@@ -36,13 +46,14 @@ async function listHoldings(req: Request, res: Response, next: NextFunction) {
 
     const baseCurrency = await resolveBaseCurrency(
       householdId,
-      parsed.data.currency,
+      requestedCurrency,
     );
 
     const holdings = await investmentService.getHoldings(
-      householdId,
+      req.householdContext!,
       parsed.data,
       baseCurrency,
+      session,
     );
 
     success(res, holdings, 200, { baseCurrency });
@@ -54,10 +65,14 @@ async function listHoldings(req: Request, res: Response, next: NextFunction) {
 
 async function getHoldingById(req: Request, res: Response, next: NextFunction) {
   try {
-    const { householdId } = req.householdContext!;
+    const session = holdingReadSession(req);
     const { id } = req.params;
 
-    const holding = await investmentService.getHoldingById(id, householdId);
+    const holding = await investmentService.getVisibleHoldingById(
+      id,
+      req.householdContext!,
+      session,
+    );
 
     if (!holding) {
       return res.status(404).json({
@@ -74,32 +89,21 @@ async function getHoldingById(req: Request, res: Response, next: NextFunction) {
 
 async function createHolding(req: Request, res: Response, next: NextFunction) {
   try {
-    const { householdId, userId } = req.householdContext!;
-    const parsed = createHoldingSchema.safeParse(req.body);
+    const actor = req.householdContext!;
+    const session = { snapshot: { ...req.user! }, sessionId: req.sessionID, generation: req.session.securityGeneration };
+    const parsed = createHoldingRequestSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new ValidationError("Invalid request data", parsed.error.errors);
     }
 
     const holding = await investmentService.createHolding(
       parsed.data,
-      householdId,
+      actor,
+      businessAuditService.getIpAddress(req),
+      session,
     );
 
-    await businessAuditService.logCreate({
-      userId,
-      householdId,
-      entityType: "holding",
-      entityId: holding.id,
-      newValue: {
-        accountId: holding.accountId,
-        securityId: holding.securityId,
-        quantity: holding.quantity,
-        costBasis: holding.costBasis,
-      },
-      ipAddress: businessAuditService.getIpAddress(req),
-    });
-
-    logger.info("Created holding", { householdId, holdingId: holding.id });
+    logger.info("Created holding", { householdId: actor.householdId, holdingId: holding.id });
     success(res, holding, 201);
     return;
   } catch (error) {
@@ -109,45 +113,27 @@ async function createHolding(req: Request, res: Response, next: NextFunction) {
 
 async function updateHolding(req: Request, res: Response, next: NextFunction) {
   try {
-    const { householdId, userId } = req.householdContext!;
+    const actor = req.householdContext!;
+    const session = { snapshot: { ...req.user! }, sessionId: req.sessionID, generation: req.session.securityGeneration };
     const { id } = req.params;
     const parsed = updateHoldingSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new ValidationError("Invalid request data", parsed.error.errors);
     }
 
-    const oldHolding = await investmentService.getHoldingById(id, householdId);
-    if (!oldHolding) {
-      throw new NotFoundError("Holding not found");
-    }
-
     const updated = await investmentService.updateHolding(
       id,
       parsed.data,
-      householdId,
+      actor,
+      businessAuditService.getIpAddress(req),
+      session,
     );
 
     if (!updated) {
       throw new NotFoundError("Holding not found");
     }
 
-    await businessAuditService.logUpdate({
-      userId,
-      householdId,
-      entityType: "holding",
-      entityId: id,
-      oldValue: {
-        quantity: oldHolding.quantity,
-        costBasis: oldHolding.costBasis,
-      },
-      newValue: {
-        quantity: updated.quantity,
-        costBasis: updated.costBasis,
-      },
-      ipAddress: businessAuditService.getIpAddress(req),
-    });
-
-    logger.info("Updated holding", { householdId, holdingId: id });
+    logger.info("Updated holding", { householdId: actor.householdId, holdingId: id });
     return success(res, updated);
   } catch (error) {
     next(error);
@@ -156,35 +142,26 @@ async function updateHolding(req: Request, res: Response, next: NextFunction) {
 
 async function deleteHolding(req: Request, res: Response, next: NextFunction) {
   try {
-    const { householdId, userId } = req.householdContext!;
+    const actor = req.householdContext!;
+    const session = { snapshot: { ...req.user! }, sessionId: req.sessionID, generation: req.session.securityGeneration };
     const { id } = req.params;
-
-    const holding = await investmentService.getHoldingById(id, householdId);
-    if (!holding) {
-      throw new NotFoundError("Holding not found");
+    // The app parses JSON and form bodies. Unparsed wire bytes must not be
+    // silently canonicalized to an empty DELETE intent, including chunked
+    // requests without a Content-Length. An actually bodyless call is valid.
+    const bodyOnWire = Number(req.get("content-length") ?? "0") > 0 || req.get("transfer-encoding") !== undefined;
+    const mediaType = (req.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+    if (bodyOnWire && !["application/json", "application/x-www-form-urlencoded"].includes(mediaType)) {
+      throw new ValidationError("Holding deletion does not accept an unsupported request body");
     }
-
-    const deleted = await investmentService.deleteHolding(id, householdId);
-
-    if (!deleted) {
-      throw new NotFoundError("Holding not found");
-    }
-
-    await businessAuditService.logDelete({
-      userId,
-      householdId,
-      entityType: "holding",
-      entityId: id,
-      oldValue: {
-        accountId: holding.accountId,
-        securityId: holding.securityId,
-        quantity: holding.quantity,
-        costBasis: holding.costBasis,
-      },
-      ipAddress: businessAuditService.getIpAddress(req),
+    const intent = z.object({ body: z.object({}).strict(), query: z.object({}).strict() }).safeParse({
+      body: req.body === undefined ? {} : req.body, query: req.query,
     });
-
-    logger.info("Deleted holding", { householdId, holdingId: id });
+    if (!intent.success) throw new ValidationError("Holding deletion does not accept financial fields or query options", intent.error.errors);
+    const deleted = await investmentService.deleteHolding(id, actor, businessAuditService.getIpAddress(req), session);
+    if (!deleted) {
+      throw new NotFoundError("Holding");
+    }
+    logger.info("Deleted holding", { householdId: actor.householdId, holdingId: id });
     return noContent(res);
   } catch (error) {
     next(error);

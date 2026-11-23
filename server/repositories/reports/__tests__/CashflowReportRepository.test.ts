@@ -223,6 +223,7 @@ describe("CashflowReportRepository", () => {
       const result = await repository.getExpenseClassification("household-1", {
         from: "2024-01-01",
         to: "2024-01-31",
+        userId: "user-1",
       });
 
       expect(result.total.amount).toBe("2800.00");

@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useReportPreferenceAction } from "@/hooks/use-report-preference-action";
 import {
   Dialog,
   DialogContent,
@@ -11,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Label } from "@/components/ui/label";
-import { ReportWidgetPreferences, WidgetPreference } from "@shared/reports";
+import { ReportWidgetPreferencesPatch, WidgetPreference } from "@shared/reports";
 import {
   CORE_WIDGET_METADATA,
   OPTIONAL_WIDGET_METADATA,
@@ -20,7 +21,7 @@ import {
 interface WidgetOnboardingModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onComplete: (preferences: Partial<ReportWidgetPreferences>) => void;
+  onComplete: (preferences: ReportWidgetPreferencesPatch) => Promise<unknown>;
 }
 
 export function WidgetOnboardingModal({
@@ -32,6 +33,8 @@ export function WidgetOnboardingModal({
   const [selectedOptionalWidgets, setSelectedOptionalWidgets] = useState<
     Record<string, boolean>
   >({});
+  const { run, pending, error } = useReportPreferenceAction(open);
+  const [lastAction, setLastAction] = useState<"save" | "skip">("save");
 
   const toggleWidget = (widgetId: string, checked: boolean) => {
     setSelectedOptionalWidgets((prev) => ({
@@ -91,68 +94,67 @@ export function WidgetOnboardingModal({
       };
     });
 
-    onComplete({
-      coreWidgets,
-      optionalWidgets,
-    });
+    setLastAction("save");
+    void run(() => onComplete({ coreWidgets, optionalWidgets }), () => onOpenChange(false));
   };
 
   const handleSkip = () => {
     // Just close with defaults (which are already set in backend, but we confirm 'setup complete')
     // We pass empty object so the hook just sets hasCompletedWidgetSetup: true
-    onComplete({});
+    setLastAction("skip");
+    void run(() => onComplete({}), () => onOpenChange(false));
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[700px] max-h-[90vh] flex flex-col">
-        <DialogHeader>
+    <Dialog open={open} onOpenChange={next => { if (!pending) onOpenChange(next); }}>
+      <DialogContent className="sm:max-w-[700px] h-[90dvh] overflow-hidden flex flex-col">
+        <DialogHeader className="shrink-0">
           <DialogTitle>Welcome to Your Reports Dashboard</DialogTitle>
           <DialogDescription>
             Choose the widgets you want to see. You can customize this later.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex flex-col gap-6 py-4 flex-1 overflow-hidden">
-          {/* Presets */}
-          <div className="grid grid-cols-3 gap-4">
-            <Button
-              variant="outline"
-              className="h-auto py-4 flex flex-col gap-2 hover:bg-primary/5 hover:text-primary border-2"
-              onClick={() => applyPreset("quick")}
-            >
-              <span className="font-semibold">Quick Overview</span>
-              <span className="text-xs font-normal text-muted-foreground text-center">
-                Summary Cards + Monthly Trends
-              </span>
-            </Button>
-            <Button
-              variant="outline"
-              className="h-auto py-4 flex flex-col gap-2 hover:bg-primary/5 hover:text-primary border-2"
-              onClick={() => applyPreset("detailed")}
-            >
-              <span className="font-semibold">Detailed Analysis</span>
-              <span className="text-xs font-normal text-muted-foreground text-center">
-                Includes Income, Expense, & Debt details
-              </span>
-            </Button>
-            <Button
-              variant="outline"
-              className="h-auto py-4 flex flex-col gap-2 hover:bg-primary/5 hover:text-primary border-2"
-              onClick={() => applyPreset("complete")}
-            >
-              <span className="font-semibold">Complete</span>
-              <span className="text-xs font-normal text-muted-foreground text-center">
-                Enable all available widgets
-              </span>
-            </Button>
-          </div>
+        <fieldset disabled={pending} className="min-h-0 min-w-0 flex-1 overflow-hidden">
+          <ScrollArea className="h-full min-h-0">
+            <div className="space-y-6 py-4 pr-4">
+              {/* Presets */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <Button
+                  variant="outline"
+                  className="h-auto w-full min-w-0 whitespace-normal py-4 flex flex-col gap-2 hover:bg-primary/5 hover:text-primary border-2"
+                  onClick={() => applyPreset("quick")}
+                >
+                  <span className="font-semibold">Quick Overview</span>
+                  <span className="text-xs font-normal text-muted-foreground text-center">
+                    Summary Cards + Monthly Trends
+                  </span>
+                </Button>
+                <Button
+                  variant="outline"
+                  className="h-auto w-full min-w-0 whitespace-normal py-4 flex flex-col gap-2 hover:bg-primary/5 hover:text-primary border-2"
+                  onClick={() => applyPreset("detailed")}
+                >
+                  <span className="font-semibold">Detailed Analysis</span>
+                  <span className="text-xs font-normal text-muted-foreground text-center">
+                    Includes Income, Expense, & Debt details
+                  </span>
+                </Button>
+                <Button
+                  variant="outline"
+                  className="h-auto w-full min-w-0 whitespace-normal py-4 flex flex-col gap-2 hover:bg-primary/5 hover:text-primary border-2"
+                  onClick={() => applyPreset("complete")}
+                >
+                  <span className="font-semibold">Complete</span>
+                  <span className="text-xs font-normal text-muted-foreground text-center">
+                    Enable all available widgets
+                  </span>
+                </Button>
+              </div>
 
-          <div className="h-px bg-border my-2" />
+              <div className="h-px bg-border" />
 
-          {/* Widget Selection */}
-          <ScrollArea className="flex-1 pr-4">
-            <div className="space-y-6">
+              {/* Widget Selection */}
               {/* Core Widgets (Read Only) */}
               <div className="space-y-3">
                 <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
@@ -214,14 +216,15 @@ export function WidgetOnboardingModal({
               </div>
             </div>
           </ScrollArea>
-        </div>
+        </fieldset>
 
-        <DialogFooter className="gap-2 sm:gap-0">
-          <Button variant="ghost" onClick={handleSkip}>
-            Skip for Now
+        <DialogFooter className="relative z-10 shrink-0 gap-2 sm:gap-0 bg-card">
+          <Button variant="ghost" onClick={handleSkip} disabled={pending}>
+            {error && lastAction === "skip" ? "Retry Skip" : "Skip for Now"}
           </Button>
-          <Button onClick={handleSave}>Save & Continue</Button>
+          <Button onClick={handleSave} disabled={pending}>{pending ? "Saving…" : error && lastAction === "save" ? "Retry Save" : "Save & Continue"}</Button>
         </DialogFooter>
+        {error && <p role="alert">{error}</p>}
       </DialogContent>
     </Dialog>
   );

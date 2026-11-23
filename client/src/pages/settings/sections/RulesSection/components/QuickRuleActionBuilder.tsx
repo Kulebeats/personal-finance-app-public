@@ -9,13 +9,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { OwnerSelector } from "@/components/OwnerSelector";
-import { ACTION_TYPES } from "../constants";
+import { TagsMultiSelect } from "@/components/tags";
+import { ACTION_TYPES, toTagIds } from "../constants";
 
 type EntityOption = { id: string; name: string };
 
 type RuleAction = {
   type: string;
-  value: string;
+  // add_tags carries a list of tag ids; every other action a single string.
+  value: string | string[];
 };
 
 type QuickRuleActionBuilderProps = {
@@ -26,6 +28,14 @@ type QuickRuleActionBuilderProps = {
   onChange: (action: RuleAction) => void;
 };
 
+// Switching to or from add_tags changes the value's shape (id list vs string),
+// so a stale value from the previous type must not leak across: a category id
+// is not a tag id, so add_tags always starts empty.
+function defaultValueFor(newType: string, previous: RuleAction): string | string[] {
+  if (newType === "add_tags") return [];
+  return Array.isArray(previous.value) ? "" : previous.value;
+}
+
 export function QuickRuleActionBuilder({
   action,
   categories,
@@ -34,6 +44,7 @@ export function QuickRuleActionBuilder({
   onChange,
 }: QuickRuleActionBuilderProps) {
   const currentActionType = action.type;
+  const stringValue = typeof action.value === "string" ? action.value : "";
 
   return (
     <div>
@@ -41,8 +52,8 @@ export function QuickRuleActionBuilder({
       <div className="flex gap-2">
         <Select
           value={action.type}
-          onValueChange={(value) =>
-            onChange({ ...action, type: value })
+          onValueChange={(type) =>
+            onChange({ type, value: defaultValueFor(type, action) })
           }
         >
           <SelectTrigger className="w-[150px]">
@@ -59,7 +70,7 @@ export function QuickRuleActionBuilder({
 
         {currentActionType === "categorize" ? (
           <Select
-            value={action.value}
+            value={stringValue}
             onValueChange={(value) =>
               onChange({ ...action, value })
             }
@@ -77,7 +88,7 @@ export function QuickRuleActionBuilder({
           </Select>
         ) : currentActionType === "set_merchant" ? (
           <Select
-            value={action.value}
+            value={stringValue}
             onValueChange={(value) =>
               onChange({ ...action, value })
             }
@@ -96,7 +107,7 @@ export function QuickRuleActionBuilder({
         ) : currentActionType === "set_owner" ? (
           <div className="flex-1">
             <OwnerSelector
-              value={action.value === "shared" ? null : action.value}
+              value={stringValue === "shared" ? null : stringValue}
               onChange={(value) =>
                 onChange({
                   ...action,
@@ -107,7 +118,7 @@ export function QuickRuleActionBuilder({
           </div>
         ) : currentActionType === "link_goal" ? (
           <Select
-            value={action.value}
+            value={stringValue}
             onValueChange={(value) =>
               onChange({ ...action, value })
             }
@@ -123,6 +134,14 @@ export function QuickRuleActionBuilder({
               ))}
             </SelectContent>
           </Select>
+        ) : currentActionType === "add_tags" ? (
+          <div className="flex-1">
+            <TagsMultiSelect
+              value={toTagIds(action.value)}
+              onChange={(tagIds) => onChange({ ...action, value: tagIds })}
+              placeholder="Select tags..."
+            />
+          </div>
         ) : currentActionType === "set_category_from_merchant" ? (
           <p className="flex-1 text-sm text-muted-foreground py-2">
             Uses the selected merchant's default category.
@@ -143,7 +162,7 @@ export function QuickRuleActionBuilder({
                 ? "Alias name..."
                 : "Value..."
             }
-            value={action.value}
+            value={stringValue}
             onChange={(event) =>
               onChange({ ...action, value: event.target.value })
             }

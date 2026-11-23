@@ -6,14 +6,30 @@
  * @module services/notification/email
  */
 
+import { escapeHtml } from "./escape";
+
+export interface EmailHtmlOptions {
+  /** Text on the action button. */
+  buttonLabel?: string;
+  /** Show the "notification preferences" footer. Off for transactional mail such as verification. */
+  showPreferencesFooter?: boolean;
+}
+
 /**
  * Build HTML email for a notification
  */
 export function buildEmailHtml(
   title: string,
   body: string,
-  actionUrl: string | null
+  actionUrl: string | null,
+  { buttonLabel = "View Details", showPreferencesFooter = true }: EmailHtmlOptions = {},
 ): string {
+  // Every interpolated value is user- or caller-controlled text: escaped here, once.
+  const safeTitle = escapeHtml(title);
+  const safeBody = escapeHtml(body);
+  const safeLabel = escapeHtml(buttonLabel);
+  const safeHref = actionUrl ? escapeHtml(actionUrl) : null;
+  const preferencesUrl = escapeHtml(`${process.env.APP_URL || "http://localhost:5000"}/settings/notifications`);
   return `
     <!DOCTYPE html>
     <html>
@@ -23,15 +39,15 @@ export function buildEmailHtml(
     </head>
     <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
       <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 10px 10px 0 0; text-align: center;">
-        <h1 style="color: white; margin: 0; font-size: 24px;">${title}</h1>
+        <h1 style="color: white; margin: 0; font-size: 24px;">${safeTitle}</h1>
       </div>
       <div style="background: #f9fafb; padding: 30px; border-radius: 0 0 10px 10px; border: 1px solid #e5e7eb; border-top: none;">
-        <p style="margin-top: 0; font-size: 16px;">${body}</p>
+        <p style="margin-top: 0; font-size: 16px;">${safeBody}</p>
         ${
-          actionUrl
+          safeHref
             ? `
         <div style="text-align: center; margin: 30px 0;">
-          <a href="${actionUrl}"
+          <a href="${safeHref}"
              style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                     color: white;
                     padding: 14px 28px;
@@ -39,21 +55,25 @@ export function buildEmailHtml(
                     border-radius: 8px;
                     font-weight: 600;
                     display: inline-block;">
-            View Details
+            ${safeLabel}
           </a>
         </div>
         `
             : ""
         }
+        ${
+          showPreferencesFooter
+            ? `
         <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 20px 0;">
         <p style="font-size: 12px; color: #9ca3af; margin-bottom: 0;">
           You received this email because of your notification preferences.
-          <a href="${
-            process.env.APP_URL || "http://localhost:5000"
-          }/settings/notifications" style="color: #667eea;">
+          <a href="${preferencesUrl}" style="color: #667eea;">
             Manage preferences
           </a>
         </p>
+        `
+            : ""
+        }
       </div>
     </body>
     </html>

@@ -8,6 +8,7 @@
  */
 
 import { Money } from "../../core/money";
+import type { HouseholdContext } from "../../middleware/householdGuard";
 
 // ============================================================================
 // REQUEST/RESPONSE TYPES
@@ -15,13 +16,27 @@ import { Money } from "../../core/money";
 
 // ChatRequest is exported from ai.validation.ts (Zod-validated type)
 
+import type { AIServiceState, ProviderStatus } from './ai.health.service';
+
 export interface ChatResponse {
   reply: string;
-  conversationId: string;
+  /** The thread the reply was stored in; absent when there is none (Astra #255 r4). */
+  conversationId?: string;
   toolsUsed: string[];
   tokenCount: number;
   remainingQueries: number;
   provenance?: ResponseProvenance;
+  /**
+   * R17 (17e): how the reply was produced. `claude` / `gemini` are external
+   * answers, `local` is the labelled limited summary, `unavailable` is an
+   * honest non-answer (nothing was persisted as an assistant reply).
+   */
+  answerMode: "claude" | "gemini" | "local" | "unavailable";
+  /** Which provider handled each stage; null when the stage did not run. */
+  providers: {
+    analysis: "anthropic" | "gemini" | "local" | null;
+    answer: "anthropic" | "gemini" | "local" | null;
+  };
 }
 
 export interface ResponseProvenance {
@@ -42,6 +57,10 @@ export interface ResponseProvenance {
 export interface AIStatusResponse {
   available: boolean;
   degraded: boolean;
+  /** R17: real health, from the attempt ledger for the configured models. */
+  state: AIServiceState;
+  quotaLimited: boolean;
+  providers: ProviderStatus[];
   rateLimit: {
     remaining: number;
     resetTime: string;
@@ -89,20 +108,59 @@ export interface Message {
 
 export interface SpendingByCategoryResult {
   category: string;
-  amount: Money;
+  /** Null when any included flow lacks captured denomination or trusted dated FX. */
+  amount: Money | null;
   transactionCount: number;
-  percentOfTotal: number;
+  percentOfTotal: number | null;
 }
 
-export interface GoalStatusResult {
+interface GoalStatusBase {
   goalId: string;
   name: string;
-  target: Money;
-  current: Money;
-  status: 'on_track' | 'behind' | 'ahead' | 'completed';
   projectedCompletion: string | null;
-  monthlyContribution: Money;
 }
+
+/**
+ * A shared goal and its target stay visible to every member. Progress that
+ * depends on a source the current member cannot see is unavailable, never a number.
+ */
+export type GoalStatusResult =
+  | (GoalStatusBase & {
+      progressAvailability?: "available";
+      target: Money;
+      current: Money;
+      status: 'on_track' | 'behind' | 'ahead' | 'completed';
+      monthlyContribution: Money;
+    })
+  | (GoalStatusBase & {
+      progressAvailability: "unavailable";
+      /** Null for a pay-down goal: its target is the hidden debt balance. */
+      target: Money | null;
+      current: null;
+      status: null;
+      monthlyContribution: null;
+    });
+
+interface GoalAssignmentBase {
+  goalId: string;
+  goalName: string;
+  /** Null for a pay-down goal whose progress is unavailable: its target is the hidden debt balance. */
+  target: Money | null;
+}
+
+export type GoalAssignmentResult =
+  | (GoalAssignmentBase & {
+      progressAvailability?: "available";
+      accountId: string | null;
+      accountName: string | null;
+      current: Money;
+    })
+  | (GoalAssignmentBase & {
+      progressAvailability: "unavailable";
+      accountId: null;
+      accountName: null;
+      current: null;
+    });
 
 export interface UpcomingRecurringResult {
   ruleId: string;
@@ -126,17 +184,26 @@ export interface BudgetStatusResult {
 export interface TopMerchantResult {
   merchantId: string;
   merchantName: string;
-  totalSpent: Money;
+  totalSpent: Money | null;
   transactionCount: number;
-  avgTransactionAmount: Money;
+  avgTransactionAmount: Money | null;
+  /** Set on every returned row if any eligible merchant cannot be valued. */
+  rankingAvailability?: "unavailable";
+}
+
+export interface CategoryTrendResult {
+  categoryId: string;
+  categoryName: string;
+  points: Array<{ month: string; amount: Money | null }>;
+  trendDirection: "up" | "down" | "flat" | "unavailable";
 }
 
 export interface MonthlyTrendResult {
   month: string; // YYYY-MM format
-  income: Money;
-  expenses: Money;
-  netSavings: Money;
-  savingsRate: number; // Percentage
+  income: Money | null;
+  expenses: Money | null;
+  netSavings: Money | null;
+  savingsRate: number | null; // Percentage
 }
 
 export interface RecentTransactionResult {
@@ -152,7 +219,9 @@ export interface AccountBalanceResult {
   accountId: string;
   accountName: string;
   accountType: string;
+  /** In the account's own currency (`currency`), not the household's. */
   balance: Money;
+  currency: string;
   isActive: boolean;
 }
 
@@ -165,6 +234,8 @@ export interface QueryContext {
   householdId: string;
   currency: string;
   ipAddress?: string;
+  /** Resolved signed caller. Source-scoped financial readers fail closed without it. */
+  actor?: HouseholdContext;
 }
 
 export interface ToolResult {
@@ -189,21 +260,23 @@ export interface ToolResult {
  */
 export interface SanitizedSpendingData {
   categories: Array<{
-    name: string; // Category name (not PII)
-    amount: string; // String representation, not raw Money object
+    name: string; // Category label, filtered again when the provider prompt is built
+    amount: string | null; // Null is unavailable, never a partial category total.
     count: number;
   }>;
-  total: string;
+  total: string | null;
   period: string;
+  rankingAvailability?: "unavailable";
 }
 
 export interface SanitizedGoalData {
   goals: Array<{
     name: string; // Goal name (sanitized)
-    targetAmount: string;
-    currentAmount: string;
-    progressPercent: number;
-    status: string;
+    targetAmount: string | null;
+    currentAmount: string | null;
+    progressPercent: number | null;
+    status: string | null;
+    progressAvailability: "available" | "unavailable";
   }>;
 }
 
@@ -238,11 +311,12 @@ export interface SanitizedBudgetData {
 }
 
 export interface SanitizedMerchantData {
+  rankingAvailability?: "unavailable";
   merchants: Array<{
     name: string; // Masked merchant name, no internal merchantId
-    totalSpent: string;
+    totalSpent: string | null;
     transactionCount: number;
-    avgAmount: string;
+    avgAmount: string | null;
   }>;
 }
 
@@ -251,6 +325,7 @@ export interface SanitizedAccountData {
     type: string;
     name: string; // Generic name, no internal accountId or raw account name
     balance: string;
+    currency: string; // The account's own currency
     isActive: boolean;
   }>;
 }
@@ -258,34 +333,36 @@ export interface SanitizedAccountData {
 export interface SanitizedCategoryTrendData {
   trends: Array<{
     categoryName: string; // No internal categoryId
-    points: Array<{ month: string; amount: string }>;
+    points: Array<{ month: string; amount: string | null }>;
     trendDirection: string;
   }>;
 }
 
 export interface SanitizedMonthlySummaryData {
   month: string;
-  income: string;
-  expenses: string;
-  netSavings: string;
-  savingsRate: number;
+  income: string | null;
+  expenses: string | null;
+  netSavings: string | null;
+  savingsRate: number | null;
 }
 
 export interface SanitizedGoalAssignmentData {
   assignments: Array<{
     goalName: string; // Sanitized, no internal goalId
     accountName: string | null; // Generalized, no internal accountId
-    target: string;
-    current: string;
+    target: string | null;
+    current: string | null;
+    progressAvailability: "available" | "unavailable";
   }>;
 }
 
 export interface SanitizedCashFlowData {
   projections: Array<{
     month: string;
-    inflow: string;
-    outflow: string;
-    net: string;
+    /** Null when a total depends on a missing conversion. */
+    inflow: string | null;
+    outflow: string | null;
+    net: string | null;
     projectedEndingBalance: string | null;
   }>;
 }

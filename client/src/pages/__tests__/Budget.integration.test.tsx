@@ -34,6 +34,11 @@ vi.mock("@/hooks/use-mobile", () => ({
   useIsMobile: () => false,
 }));
 
+// Existing editor tests do not authorize historical-preview requests.
+vi.mock("@/contexts/SessionContext", () => ({
+  useSession: () => ({ status: null, lifetime: null, loading: true }),
+}));
+
 // Mock budget hooks
 const mockBudgetProgress = vi.fn();
 const mockBudgetSettings = vi.fn();
@@ -65,6 +70,7 @@ vi.mock("@/hooks/useBudgets", () => ({
 
 vi.mock("@/hooks/use-settings", () => ({
   useCategories: () => mockCategories(),
+  useHousehold: () => ({ data: { household: { currency: "ZMW" }, preferences: null } }),
 }));
 
 vi.mock("@/hooks/useGoals", () => ({

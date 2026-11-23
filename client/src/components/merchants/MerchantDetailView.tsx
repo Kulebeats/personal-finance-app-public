@@ -4,7 +4,7 @@
  * Main dialog component for viewing merchant details.
  */
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useLocation } from "wouter";
 import {
   Dialog,
@@ -31,6 +31,7 @@ import {
   MerchantDetailFilters,
 } from "./detail";
 import { useMerchantDetailState } from "./detail/useMerchantDetailState";
+import { ConfirmActionDialog } from "@/components/ConfirmActionDialog";
 
 interface MerchantDetailViewProps {
   merchantId: string | null;
@@ -46,12 +47,15 @@ export function MerchantDetailView({
   const [, setLocation] = useLocation();
   const merchantDetailState = useMerchantDetailState(merchantId);
   const { state, data, mutations, actions } = merchantDetailState;
+  const [isArchiveConfirmOpen, setIsArchiveConfirmOpen] = useState(false);
 
   // Keyboard shortcuts
   useEffect(() => {
     if (!merchantId) return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      // The archive confirm dialog owns the keyboard while it is open.
+      if (isArchiveConfirmOpen) return;
       // Don't trigger if user is typing in an input
       if (
         event.target instanceof HTMLInputElement ||
@@ -66,13 +70,13 @@ export function MerchantDetailView({
         onClose();
       } else if (event.key === "d" && data.merchant && !mutations.deleteMerchant.isPending) {
         event.preventDefault();
-        actions.handleDeleteMerchant(onClose);
+        setIsArchiveConfirmOpen(true);
       }
     };
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [merchantId, data.merchant, onEdit, onClose, actions, mutations.deleteMerchant.isPending]);
+  }, [merchantId, data.merchant, onEdit, onClose, mutations.deleteMerchant.isPending, isArchiveConfirmOpen]);
 
   return (
     <Dialog open={!!merchantId} onOpenChange={(open) => !open && onClose()}>
@@ -129,7 +133,7 @@ export function MerchantDetailView({
                   type="button"
                   variant="ghost"
                   size="sm"
-                  onClick={() => actions.handleDeleteMerchant(onClose)}
+                  onClick={() => setIsArchiveConfirmOpen(true)}
                   disabled={!data.merchant || mutations.deleteMerchant.isPending}
                 >
                   Delete
@@ -201,6 +205,15 @@ export function MerchantDetailView({
           onPageChange={actions.setPage}
           onExport={actions.handleExport}
           onViewAll={() => setLocation("/transactions")}
+        />
+
+        <ConfirmActionDialog
+          open={isArchiveConfirmOpen}
+          onOpenChange={setIsArchiveConfirmOpen}
+          title="Archive merchant?"
+          description={`"${data.merchant?.name ?? "This merchant"}" is hidden from lists and matching. Its transactions, aliases and logo are kept, and you can switch it back on from Settings → Merchants.`}
+          confirmLabel="Archive merchant"
+          onConfirm={() => actions.handleDeleteMerchant(onClose)}
         />
       </DialogContent>
     </Dialog>

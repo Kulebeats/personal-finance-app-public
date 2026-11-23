@@ -6,6 +6,7 @@ import { Button } from "../ui/button";
 import { Progress } from "../ui/progress";
 import { useUploadReceipt } from "../../hooks/useReceipts";
 import { toast } from "sonner";
+import { userErrorMessage } from "@/lib/errorCopy";
 
 interface ReceiptScanModalProps {
   open: boolean;
@@ -70,8 +71,7 @@ export function ReceiptScanModal({
         handleClose();
       }
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Failed to upload receipt";
+      const message = userErrorMessage(err, "The receipt could not be uploaded.");
       toast.error(message);
       if ((err as { status?: number }).status === 401) {
         window.location.href = "/login";

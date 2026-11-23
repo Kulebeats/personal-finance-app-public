@@ -25,6 +25,7 @@ import {
   getTestApp,
 } from "../../../__tests__/fixtures";
 import { hashPassword } from "../../../auth";
+import { isStored, removeStoredUnder } from "../../../__tests__/stored-upload-fixture";
 
 const UPLOADS_ROOT = path.resolve(process.cwd(), "uploads");
 const PASSWORD = "TestPassword123!";
@@ -34,18 +35,6 @@ const PNG_BUFFER = Buffer.from(
   "base64",
 );
 
-function diskPathFor(url: string): string {
-  return path.join(UPLOADS_ROOT, url.replace(/^\/uploads\//, ""));
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 describe("Goal images upload stored-XSS regression", () => {
   let app: Express;
@@ -107,6 +96,7 @@ describe("Goal images upload stored-XSS regression", () => {
   });
 
   afterAll(async () => {
+    await removeStoredUnder(`goals/${householdId}/`);
     await fs.rm(path.join(UPLOADS_ROOT, "goals", householdId), {
       recursive: true,
       force: true,
@@ -203,7 +193,7 @@ describe("Goal images upload stored-XSS regression", () => {
     expect(upload.status).toBe(201);
     const url: string = upload.body.data.image.url;
     expect(url).toMatch(/\.png$/);
-    expect(await fileExists(diskPathFor(url))).toBe(true);
+    expect(await isStored(url)).toBe(true);
 
     const list = await request(app)
       .get("/api/goals/images")

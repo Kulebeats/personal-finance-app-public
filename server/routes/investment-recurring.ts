@@ -1,82 +1,51 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { investmentAutomationService } from "../services/InvestmentAutomationService";
 import { householdGuard, requireRole, requireAuth } from "../middleware/auth";
-import { generalLimiter } from "../middleware/rateLimit";
-import { z } from "zod";
-import { getErrorMessage } from "../core/errors";
+import { UnauthorizedError } from "../core/errors";
+import type { InvestmentSourceSession } from "../modules/investments/investmentTransactionAccess";
 
 const router = Router();
 
-// SEC-AUTH-009: Apply authentication, rate limiting, and household guard
 router.use(requireAuth);
-router.use(generalLimiter);
 router.use(householdGuard);
 
-const createRecurringInvestmentSchema = z.object({
-  accountId: z.string().uuid(),
-  securityId: z.string().uuid().optional().nullable(),
-  type: z.enum(["sip", "rollover"]),
-  frequency: z.enum([
-    "daily",
-    "weekly",
-    "biweekly",
-    "monthly",
-    "quarterly",
-    "semi_annually",
-    "annually",
-    "yearly",
-    "custom",
-  ]),
-  amount: z
-    .string()
-    .regex(/^\d+(\.\d{1,2})?$/, "Invalid amount format")
-    .refine((val) => parseFloat(val) > 0, "Amount must be positive"),
-  currency: z.string().length(3).optional(),
-  nextExecutionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-});
+/** Capture the actual authenticated identity before the first handler await.
+ * Service locks must recheck this snapshot, never adopt a newer credential. */
+function signedSession(req: Request): InvestmentSourceSession {
+  if (!req.user || req.session?.userId !== req.user.id || !req.sessionID) throw new UnauthorizedError("Authentication required");
+  return { snapshot: structuredClone(req.user), sessionId: req.sessionID, generation: req.session.securityGeneration };
+}
 
-router.get("/", async (req, res) => {
+router.get("/", async (req, res, next) => {
   try {
-    const { householdId } = req.householdContext!;
-    const plans = await investmentAutomationService.getAllPlans(householdId);
+    const session = signedSession(req), actor = { ...req.householdContext! };
+    const plans = await investmentAutomationService.getAllPlans(actor, session);
     res.json({ success: true, data: plans });
-  } catch (error: unknown) {
-    res.status(500).json({ success: false, message: getErrorMessage(error) });
-  }
+  } catch (error) { next(error); }
 });
 
-// FIX AUTH-INV-REC-002: Pass householdId to validate account ownership
-router.post("/", requireRole("member"), async (req, res) => {
+router.post("/", requireRole("member"), async (req, res, next) => {
   try {
-    const { householdId } = req.householdContext!;
-    const parsed = createRecurringInvestmentSchema.parse(req.body);
-    const plan = await investmentAutomationService.createPlan(
-      {
-        ...parsed,
-        amount: parsed.amount,
-        currency: parsed.currency?.toUpperCase() || "ZMW",
-        householdId,
-      },
-      householdId
-    );
+    const session = signedSession(req), actor = { ...req.householdContext! };
+    const plan = await investmentAutomationService.createPlan(req.body, actor, session);
     res.json({ success: true, data: plan });
-  } catch (error: unknown) {
-    if (error instanceof z.ZodError) {
-      return res.status(400).json({ success: false, error: error.errors });
-    }
-    res.status(500).json({ success: false, message: getErrorMessage(error) });
-  }
+  } catch (error) { next(error); }
 });
 
-// FIX AUTH-INV-REC-001: Pass householdId to enforce isolation
-router.delete("/:id", requireRole("member"), async (req, res) => {
+router.post("/:id/authorize", requireRole("member"), async (req, res, next) => {
   try {
-    const { householdId } = req.householdContext!;
-    await investmentAutomationService.deactivatePlan(req.params.id, householdId);
+    const session = signedSession(req), actor = { ...req.householdContext! };
+    const plan = await investmentAutomationService.authorizePlan(req.params.id, req.body, actor, session);
+    res.json({ success: true, data: plan });
+  } catch (error) { next(error); }
+});
+
+router.delete("/:id", requireRole("member"), async (req, res, next) => {
+  try {
+    const session = signedSession(req), actor = { ...req.householdContext! };
+    await investmentAutomationService.deactivatePlan(req.params.id, actor, session);
     res.json({ success: true, message: "Plan deactivated" });
-  } catch (error: unknown) {
-    res.status(500).json({ success: false, message: getErrorMessage(error) });
-  }
+  } catch (error) { next(error); }
 });
 
 export default router;

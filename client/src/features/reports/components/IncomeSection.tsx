@@ -52,7 +52,7 @@ export function IncomeSection({ data, isLoading, onSegmentClick }: IncomeSection
         <FileText className="w-5 h-5 shrink-0" />
         <p className="text-sm">
           <strong>Tax Season?</strong> View your{" "}
-          <Link to="/investments/tax" className="underline hover:text-blue-600">
+          <Link to="/investments?tab=tax" className="underline hover:text-blue-600">
             Investment Tax Reports
           </Link>{" "}
           for detailed dividend and interest schedules.

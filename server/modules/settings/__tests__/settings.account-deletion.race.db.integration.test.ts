@@ -54,7 +54,7 @@ import {
   auditLogs,
 } from "@shared/schema";
 import { createTestUser } from "../../../__tests__/fixtures";
-import { householdRepository } from "../../../repositories/HouseholdRepository";
+import { acceptInvitation } from "../../household/invitations.accept";
 import { eraseAccount } from "../settings.account-deletion.service";
 import { ConflictError } from "../../../core/errors";
 
@@ -146,12 +146,13 @@ describe("Household membership lifecycle race safety", () => {
     await addMember(householdId, owner.id, "owner");
 
     const invitationId = randomUUID();
+    const inviteCode = `race-g2-${randomUUID().slice(0, 12)}`;
     await db.insert(householdInvitations).values({
       id: invitationId,
       householdId,
       email: joiner.email,
       role: "member",
-      inviteCode: `race-g2-${randomUUID().slice(0, 12)}`,
+      inviteCode,
       invitedBy: owner.id,
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     });
@@ -173,8 +174,7 @@ describe("Household membership lifecycle race safety", () => {
       // acquires the household FOR UPDATE lock and THEN blocks on the pinned
       // invitation row — so when eraseAccount starts below it must wait for the
       // household lock acceptInvite already holds (ordering it after acceptInvite).
-      const acceptPromise = householdRepository
-        .acceptInvite(invitationId, householdId, joiner.id, "member")
+      const acceptPromise = acceptInvitation({ userId: joiner.id }, inviteCode)
         .then(
           () => ({ status: "fulfilled" }) as PromiseFulfilledResult<void>,
           (reason) =>

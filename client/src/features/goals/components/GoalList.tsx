@@ -8,6 +8,7 @@ import { type Goal, useGoalsSummary } from "@/hooks/useGoals";
 import { useFormatters } from "@/contexts/SettingsContext";
 import { useGoalsData } from "../hooks/useGoalsData";
 import { parseMoney } from "@/lib/utils";
+import { toMoneyNumber } from "@/lib/money";
 import { EmptyState } from "@/components/ui/empty-state";
 
 interface GoalListProps {
@@ -44,7 +45,7 @@ export function GoalList({
                   Total Saved
                 </div>
                 <div className="text-2xl font-bold text-emerald-900 dark:text-emerald-100">
-                  {summary ? formatCurrency(summary.saveUp.totalSaved) : "..."}
+                  {summary ? formatCurrency(toMoneyNumber(summary.saveUp.totalSaved)) : "..."}
                 </div>
               </Card>
               <Card className="p-4 bg-blue-50/50 border-blue-100 dark:bg-blue-950/20 dark:border-blue-900/50">
@@ -96,7 +97,7 @@ export function GoalList({
                   Total Debt
                 </div>
                 <div className="text-2xl font-bold text-orange-900 dark:text-orange-100">
-                  {summary ? formatCurrency(summary.payDown.totalDebt) : "..."}
+                  {summary ? formatCurrency(toMoneyNumber(summary.payDown.totalDebt)) : "..."}
                 </div>
               </Card>
               <Card className="p-4 bg-slate-50/50 border-slate-100 dark:bg-slate-950/20 dark:border-slate-800/50">

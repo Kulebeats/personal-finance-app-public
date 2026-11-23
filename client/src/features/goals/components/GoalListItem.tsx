@@ -1,3 +1,4 @@
+import { ProtectedImage } from "@/components/session/ProtectedImage";
 import { GoalStatusBadge } from "./GoalStatusBadge";
 import { GoalProgressBar } from "./GoalProgressBar";
 import { useFormatters } from "@/contexts/SettingsContext";
@@ -17,6 +18,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { cn, parseMoney } from "@/lib/utils";
+import { GoalProgressHidden, isGoalProgressHidden } from "./GoalProgressHidden";
 import { Button } from "@/components/ui/button";
 
 const GOAL_TYPE_ICONS: Record<
@@ -118,7 +120,7 @@ export function GoalListItem({ goal, onClick }: GoalListItemProps) {
           }
         >
           {hasCustomImage ? (
-            <img
+            <ProtectedImage
               src={goal.customImageUrl ?? ""}
               alt=""
               className="w-full h-full object-cover"
@@ -165,6 +167,9 @@ export function GoalListItem({ goal, onClick }: GoalListItemProps) {
       </div>
 
       {/* Progress Section (Desktop: Wide, Mobile: Condensed) */}
+      {isGoalProgressHidden(goal) ? (
+        <GoalProgressHidden className="hidden sm:block w-1/3 max-w-[240px] px-4" />
+      ) : (
       <div className="hidden sm:block w-1/3 max-w-[240px] px-4 space-y-2">
         <div className="flex justify-between text-xs font-medium">
           <span
@@ -189,11 +194,12 @@ export function GoalListItem({ goal, onClick }: GoalListItemProps) {
           color={goal.color}
         />
       </div>
+      )}
 
       {/* Amounts */}
       <div className="text-right shrink-0">
         <div className="font-bold text-lg text-foreground tracking-tight">
-          {formatCurrency(currentAmount)}
+          {isGoalProgressHidden(goal) ? "—" : formatCurrency(currentAmount)}
         </div>
         <div className="text-xs text-muted-foreground font-medium">
           of {formatCurrency(targetAmount)}

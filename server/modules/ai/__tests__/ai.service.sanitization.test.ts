@@ -104,6 +104,7 @@ vi.mock('../ai.analytics.service', () => {
             accountName: RAW_ACCOUNT_NAME,
             accountType: 'savings',
             balance: Money.from('123456.78', currency),
+            currency,
             isActive: true
           }
         ];

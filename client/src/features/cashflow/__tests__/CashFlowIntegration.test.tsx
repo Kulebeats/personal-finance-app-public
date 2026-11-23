@@ -77,6 +77,8 @@ const mockExportMutation = vi.fn();
 // Mock fetch delegate: apiCall's CSRF token fetch is served transparently by
 // the global.fetch wrapper installed in beforeEach; real requests land here.
 const mockFetch = vi.fn();
+const downloadFetch = vi.fn();
+const downloadClick = vi.fn();
 
 // Spread the real module first so requestReportExport (the export path under
 // test, which attaches x-csrf-token via apiCall) stays genuine; the entries
@@ -129,6 +131,10 @@ describe("CashFlow Integration Tests", () => {
     // Store original location
     originalLocation = window.location;
     installMockLocation(originalLocation);
+    downloadFetch.mockReset().mockImplementation(async () => new Response("date,amount", { headers: { "Content-Disposition": 'attachment; filename="cashflow.csv"' } }));
+    downloadClick.mockReset();
+    vi.stubGlobal("URL", class extends URL { static createObjectURL = vi.fn(() => "blob:cashflow"); static revokeObjectURL = vi.fn(); });
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) { downloadClick({ href: this.href, filename: this.download }); });
 
     // Mock fetch for export. Serve apiCall's CSRF token fetch transparently so
     // it neither consumes per-test once-mocks nor shows up in assertions;
@@ -141,6 +147,7 @@ describe("CashFlow Integration Tests", () => {
           json: () => Promise.resolve({ csrfToken: "test-csrf" }),
         } as unknown as Response);
       }
+      if (String(input).endsWith("/download")) return downloadFetch(input, init);
       return mockFetch(input, init);
     }) as unknown as typeof fetch;
 
@@ -199,6 +206,8 @@ describe("CashFlow Integration Tests", () => {
 
   afterEach(() => {
     restoreLocation(originalLocation);
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   describe("Forecast to Budget Comparison Flow", () => {
@@ -489,9 +498,10 @@ describe("CashFlow Integration Tests", () => {
       expect(exportBody).not.toHaveProperty("includeForecast");
       expect(exportBody).not.toHaveProperty("forecastMonths");
 
-      // Verify download redirect
+      // Preserve the genuine guarded binary download after export generation.
       await waitFor(() => {
-        expect(window.location.href).toBe("/api/reports/exports/export-123/download");
+        expect(downloadFetch).toHaveBeenCalledWith("/api/reports/exports/export-123/download", expect.objectContaining({ credentials: "include" }));
+        expect(downloadClick).toHaveBeenCalledWith({ href: "blob:cashflow", filename: "cashflow.csv" });
       });
 
       // Verify success toast
@@ -785,7 +795,8 @@ describe("CashFlow Integration Tests", () => {
 
       // Step 7: Verify successful export
       await waitFor(() => {
-        expect(window.location.href).toBe("/api/reports/exports/export-final/download");
+        expect(downloadFetch).toHaveBeenCalledWith("/api/reports/exports/export-final/download", expect.objectContaining({ credentials: "include" }));
+        expect(downloadClick).toHaveBeenCalledWith({ href: "blob:cashflow", filename: "cashflow.csv" });
       });
 
       expect(mockToast).toHaveBeenCalledWith(

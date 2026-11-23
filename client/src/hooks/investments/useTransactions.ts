@@ -6,6 +6,7 @@
  * @module hooks/investments/useTransactions
  */
 
+import { userErrorMessage } from "@/lib/errorCopy";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "../../lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -77,7 +78,7 @@ export function useCreateInvestmentTransaction() {
     onError: (error: Error) => {
       toast({
         title: "Error",
-        description: error.message || "Failed to record transaction",
+        description: userErrorMessage(error, "Failed to record transaction"),
         variant: "destructive",
       });
     },

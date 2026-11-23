@@ -31,6 +31,8 @@ export interface BudgetInput {
   amount: string;
   currency: string;
   periodType: BudgetPeriodType;
+  /** Resolved against the report window, including explicit month limits. */
+  periodAmount?: string;
 }
 
 /**
@@ -99,6 +101,7 @@ export function normalizeBudgetToInterval(
   targetInterval: "day" | "week" | "month",
   periodDays: number
 ): Money {
+  if (budget.periodAmount !== undefined) return new Money(budget.periodAmount, budget.currency);
   // Preserve the budget's currency so downstream Money arithmetic does not
   // mismatch against the report's base currency (defaulting drops it to ZMW).
   const budgetMoney = new Money(budget.amount, budget.currency);

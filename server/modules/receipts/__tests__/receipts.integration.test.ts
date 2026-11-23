@@ -7,11 +7,13 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import express, { Request, Response, NextFunction } from "express";
 import request from "supertest";
+import { receiptRow } from "./receipt-row.fixture";
 
 // Hoist mocks
 const mockReceiptService = vi.hoisted(() => ({
   getPendingReceipts: vi.fn(),
   getReceipt: vi.fn(),
+  getVisibleReceipt: vi.fn(),
   uploadReceipt: vi.fn(),
   attemptMatch: vi.fn(),
   storeOcrResults: vi.fn(),
@@ -117,18 +119,8 @@ describe("Receipts API Integration Tests", () => {
   describe("GET /api/receipts", () => {
     it("returns paginated receipts for household", async () => {
       const mockReceipts = [
-        {
-          id: TEST_RECEIPT_ID,
-          fileName: "receipt1.jpg",
-          matchStatus: "pending",
-          uploadedAt: new Date().toISOString(),
-        },
-        {
-          id: "receipt-2",
-          fileName: "receipt2.jpg",
-          matchStatus: "matched",
-          uploadedAt: new Date().toISOString(),
-        },
+        receiptRow({ id: TEST_RECEIPT_ID, originalFilename: "receipt1.jpg" }),
+        receiptRow({ id: "receipt-2", originalFilename: "receipt2.jpg", matchStatus: "matched" }),
       ];
 
       mockReceiptService.getPendingReceipts.mockResolvedValue({
@@ -145,7 +137,7 @@ describe("Receipts API Integration Tests", () => {
       expect(response.body.data).toHaveLength(2);
       expect(response.body.pagination.total).toBe(2);
       expect(mockReceiptService.getPendingReceipts).toHaveBeenCalledWith(
-        TEST_HOUSEHOLD_ID,
+        expect.objectContaining({ householdId: TEST_HOUSEHOLD_ID }),
         expect.objectContaining({ limit: 10, offset: 0 })
       );
     });
@@ -175,7 +167,7 @@ describe("Receipts API Integration Tests", () => {
         .expect(200);
 
       expect(mockReceiptService.getPendingReceipts).toHaveBeenCalledWith(
-        TEST_HOUSEHOLD_ID,
+        expect.objectContaining({ householdId: TEST_HOUSEHOLD_ID }),
         expect.objectContaining({ status: "pending" })
       );
     });
@@ -192,7 +184,7 @@ describe("Receipts API Integration Tests", () => {
         .expect(200);
 
       expect(mockReceiptService.getPendingReceipts).toHaveBeenCalledWith(
-        TEST_HOUSEHOLD_ID,
+        expect.objectContaining({ householdId: TEST_HOUSEHOLD_ID }),
         expect.objectContaining({ search: "grocery" })
       );
     });
@@ -203,15 +195,9 @@ describe("Receipts API Integration Tests", () => {
   // =========================================================================
   describe("GET /api/receipts/:id", () => {
     it("returns receipt when found", async () => {
-      const mockReceipt = {
-        id: TEST_RECEIPT_ID,
-        householdId: TEST_HOUSEHOLD_ID,
-        fileName: "receipt.jpg",
-        matchStatus: "pending",
-        ocrData: { amount: "99.99", merchant: "Test Store" },
-      };
+      const mockReceipt = receiptRow({ id: TEST_RECEIPT_ID, ocrData: { amount: "99.99", merchantName: "Test Store" } });
 
-      mockReceiptService.getReceipt.mockResolvedValue(mockReceipt);
+      mockReceiptService.getVisibleReceipt.mockResolvedValue(mockReceipt);
 
       const response = await request(app)
         .get(`/api/receipts/${TEST_RECEIPT_ID}`)
@@ -219,11 +205,12 @@ describe("Receipts API Integration Tests", () => {
 
       expect(response.body.success).toBe(true);
       expect(response.body.data.id).toBe(TEST_RECEIPT_ID);
-      expect(response.body.data.fileName).toBe("receipt.jpg");
+      expect(response.body.data.originalFilename).toBe("receipt.jpg");
+      expect(response.body.data).not.toHaveProperty("storagePath");
     });
 
     it("returns 404 when receipt not found", async () => {
-      mockReceiptService.getReceipt.mockRejectedValue(
+      mockReceiptService.getVisibleReceipt.mockRejectedValue(
         Object.assign(new Error("Receipt not found"), { statusCode: 404 })
       );
 
@@ -235,7 +222,7 @@ describe("Receipts API Integration Tests", () => {
     });
 
     it("returns 404 for receipt from different household", async () => {
-      mockReceiptService.getReceipt.mockRejectedValue(
+      mockReceiptService.getVisibleReceipt.mockRejectedValue(
         Object.assign(new Error("Receipt not found"), { statusCode: 404 })
       );
 
@@ -252,7 +239,7 @@ describe("Receipts API Integration Tests", () => {
   // =========================================================================
   describe("POST /api/receipts/:id/match", () => {
     it("matches receipt to transaction successfully", async () => {
-      mockReceiptService.linkReceiptToTransaction.mockResolvedValue(undefined);
+      mockReceiptService.linkReceiptToTransaction.mockResolvedValue(true);
 
       const response = await request(app)
         .post(`/api/receipts/${TEST_RECEIPT_ID}/match`)
@@ -366,7 +353,7 @@ describe("Receipts API Integration Tests", () => {
 
       expect(response.body.success).toBe(true);
       expect(response.body.data.transactionId).toBe(TEST_TRANSACTION_ID);
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalled();
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
 
     it("returns 400 when required fields missing", async () => {
@@ -435,7 +422,7 @@ describe("Receipts API Integration Tests", () => {
       expect(response.body.success).toBe(true);
       expect(mockReceiptService.deleteReceipt).toHaveBeenCalledWith(
         TEST_RECEIPT_ID,
-        TEST_HOUSEHOLD_ID
+        expect.objectContaining({ householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID })
       );
       expect(mockBusinessAuditService.logDelete).toHaveBeenCalled();
     });
@@ -478,7 +465,7 @@ describe("Receipts API Integration Tests", () => {
   // Audit Logging Tests
   // =========================================================================
   describe("Audit Logging", () => {
-    it("logs create action when transaction created from receipt", async () => {
+    it("passes the audit context to the receipt posting transaction", async () => {
       mockReceiptService.createTransactionFromReceipt.mockResolvedValue({
         transactionId: TEST_TRANSACTION_ID,
       });
@@ -493,14 +480,11 @@ describe("Receipts API Integration Tests", () => {
         })
         .expect(201);
 
-      // Controller logs with entityType: "transaction" for the created transaction
-      expect(mockBusinessAuditService.logCreate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          householdId: TEST_HOUSEHOLD_ID,
-          entityType: "transaction",
-          entityId: TEST_TRANSACTION_ID,
-        })
+      expect(mockReceiptService.createTransactionFromReceipt).toHaveBeenCalledWith(
+        TEST_RECEIPT_ID, TEST_HOUSEHOLD_ID, expect.any(String),
+        expect.objectContaining({ accountId: TEST_ACCOUNT_ID, amount: "150.00" }), { ipAddress: "127.0.0.1" },
       );
+      expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
 
     it("logs delete action when receipt deleted", async () => {

@@ -1,3 +1,4 @@
+import { protectedFetch } from "@/lib/protected-fetch";
 /**
  * Category Hooks
  *
@@ -8,6 +9,7 @@ import { useQuery } from "@tanstack/react-query";
 
 // Types matching server response
 import { Category } from "@/lib/api";
+import { throwIfResNotOk } from "@/lib/queryClient";
 export type { Category };
 
 // Types matching server response
@@ -38,14 +40,22 @@ async function fetchCategories(
   includeArchived = false
 ): Promise<{ categories: Category[]; groups: CategoryGroup[] }> {
   const query = includeArchived ? "?includeArchived=true" : "";
-  const response = await fetch(`/api/categories${query}`, {
+  const response = await protectedFetch(`/api/categories${query}`, {
     credentials: "include",
   });
+  await throwIfResNotOk(response);
   const data: CategoriesApiResponse = await response.json();
-  if (!response.ok) {
-    throw new Error("Failed to fetch categories");
-  }
-  return data.data;
+  // The endpoint returns groups separately; picker filtering needs their type.
+  // Resolve only references supplied for this category's own household.
+  const groupsById = new Map(data.data.groups.map(group => [group.id, group]));
+  return {
+    ...data.data,
+    categories: data.data.categories.map(category => {
+      const candidate = category.groupId ? groupsById.get(category.groupId) : undefined;
+      const group = candidate && candidate.householdId === category.householdId ? candidate : undefined;
+      return { ...category, groupName: group?.name ?? null, groupType: group?.type ?? null };
+    }),
+  };
 }
 
 // Query keys

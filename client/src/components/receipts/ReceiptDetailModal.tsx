@@ -1,4 +1,6 @@
+import { calendarToday } from "@/lib/calendarZone";
 import { useState, useMemo, useEffect } from "react";
+import { withProtectedBlob, reportProtectedMediaError } from "@/lib/protected-media";
 import { format, subDays, addDays, parseISO } from "date-fns";
 import { Loader2 } from "lucide-react";
 
@@ -146,11 +148,9 @@ export function ReceiptDetailModal({
     );
   };
 
-  const handleRunOcr = () => {
-    if (!receipt) return;
-    const imageUrl = `/api/receipts/${receipt.id}/ocr-image`;
-    processImage(imageUrl);
-  };
+  const handleRunOcr = () => receipt && void withProtectedBlob(
+    receipt.imageUrl, processImage,
+  ).catch(reportProtectedMediaError);
 
   const handleCreateTransaction = (data: OcrExtractedData) => {
     if (!receiptId) return;
@@ -166,7 +166,7 @@ export function ReceiptDetailModal({
         accountId: selectedAccountId,
         name: data.merchantName || "Unknown Merchant",
         amount: data.amount || "0",
-        date: data.date || new Date().toISOString().split("T")[0],
+        date: data.date || calendarToday(),
         notes: "Created from receipt scan",
       },
     });

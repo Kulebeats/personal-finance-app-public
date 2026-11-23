@@ -6,6 +6,7 @@
  * @module modules/categories/categories.validation
  */
 
+import { strictBooleanSchema } from "../../core/validation/query-boolean";
 import { z } from "zod";
 import { moneyAmountStringSchema } from "../../core/validation/money";
 
@@ -65,7 +66,7 @@ export const updateCategorySchema = createCategorySchema.partial();
 // ============================================================================
 
 export const categoryQuerySchema = z.object({
-  includeArchived: z.coerce.boolean().default(false),
+  includeArchived: strictBooleanSchema.default(false),
   groupType: categoryGroupTypeSchema.optional(),
 });
 

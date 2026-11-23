@@ -31,7 +31,10 @@ import {
   households,
 } from "@shared/schema";
 import { recurringService } from "../RecurringService";
+// RecurringProcessingService.RECURRING_CATCH_UP_LIMIT: missed occurrences one trusted run may book.
+const RECURRING_CATCH_UP_LIMIT = 12;
 import { Money } from "../../../core/money";
+import { recordRecurringDenomination } from "../RecurringDenomination";
 import {
   createTestUser,
   createTestHousehold,
@@ -137,6 +140,7 @@ describe("processRecurring materialization: locks, idempotency, audit (R5) — R
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error("R5 cleanup error", error);
+      throw error;
     }
   });
 
@@ -174,22 +178,25 @@ describe("processRecurring materialization: locks, idempotency, audit (R5) — R
       .where(eq(accounts.id, accountId));
   });
 
-  async function seedRule(nextDueDate: string): Promise<string> {
+  async function seedRule(nextDueDate: string, amount = "100.00", proven = true): Promise<string> {
     const ruleId = randomUUID();
-    await db.insert(recurringTransactions).values({
+    const [rule] = await db.insert(recurringTransactions).values({
       id: ruleId,
       householdId,
       accountId,
       categoryId,
       name: "r5-rule",
-      amount: "100.00",
+      amount,
       type: "expense",
       frequency: "monthly",
       startDate: "2024-01-01",
       nextDueDate,
       isActive: true,
       isPaused: false,
-    });
+    }).returning();
+    // This positive arithmetic/concurrency fixture explicitly authors a known ZMW amount.
+    // Legacy unknown-unit behavior has its own signed/trusted regression suite.
+    if (proven) await db.transaction(tx => recordRecurringDenomination(tx, rule, "ZMW", userId, "trusted_recovery"));
     return ruleId;
   }
 
@@ -257,6 +264,20 @@ describe("processRecurring materialization: locks, idempotency, audit (R5) — R
     expect(appliedDelta.toString()).toBe("100.00");
   });
 
+  // FIN-05: a projection is money in the rule's proven unit, from its stored
+  // decimal string (no Number()), never a bare number with no currency.
+  it("projects each occurrence as Money in the rule's proven currency, to the stored cent", async () => {
+    const ruleId = await seedRule("2030-01-15", "100.10");
+    await seedRule("2030-01-20", "55.55", false);
+
+    const projected = await recurringService.getProjections(householdId, "2030-01-01", "2030-02-28");
+
+    expect(projected.map((p) => [p.date, p.ruleId, p.amount instanceof Money, p.amount.currency, p.amount.toString()])).toEqual([
+      ["2030-01-15", ruleId, true, "ZMW", "100.10"],
+      ["2030-02-15", ruleId, true, "ZMW", "100.10"],
+    ]);
+  });
+
   it("idempotency backstop: replaying the SAME occurrence is a clean skip, not a 500 or a double-create", async () => {
     const ruleId = await seedRule("2024-06-01");
 
@@ -319,5 +340,41 @@ describe("processRecurring materialization: locks, idempotency, audit (R5) — R
     expect(auditRows.length).toBeGreaterThanOrEqual(1);
     expect(auditRows[0].action).toBe("CREATE");
     expect(auditRows[0].householdId).toBe(householdId);
+  });
+
+  const ledgerDates = async (ruleId: string): Promise<string[]> =>
+    (await db.select({ date: transactions.date }).from(transactions)
+      .where(eq(transactions.recurringTransactionId, ruleId))).map((row) => row.date).sort();
+
+  it("catch-up (NEW-30): a trusted run books each missed occurrence once, oldest first, and a re-run books nothing", async () => {
+    const ruleId = await seedRule("2024-01-01");
+    const balanceBefore = await balanceOf(accountId);
+
+    const first = await recurringService.processRecurring(householdId, "2024-04-15");
+    expect(first).toMatchObject({ created: 4, errors: [] });
+    expect(await ledgerDates(ruleId)).toEqual(["2024-01-01", "2024-02-01", "2024-03-01", "2024-04-01"]);
+    expect(await nextDueOf(ruleId)).toBe("2024-05-01");
+    expect(new Money(balanceBefore).subtract(new Money(await balanceOf(accountId))).toString()).toBe("400.00");
+
+    const rerun = await recurringService.processRecurring(householdId, "2024-04-15");
+    expect(rerun).toMatchObject({ created: 0, errors: [] });
+    expect(await txnCountForRule(ruleId)).toBe(4);
+  });
+
+  it("catch-up (NEW-30): one run books at most the cap, and the next run continues from the cursor", async () => {
+    const ruleId = await seedRule("2023-01-01");
+
+    const first = await recurringService.processRecurring(householdId, "2024-06-15");
+    expect(first).toMatchObject({ created: RECURRING_CATCH_UP_LIMIT, errors: [] });
+    expect(await nextDueOf(ruleId)).toBe("2024-01-01");
+
+    const second = await recurringService.processRecurring(householdId, "2024-06-15");
+    expect(second).toMatchObject({ created: 6, errors: [] });
+    expect(await nextDueOf(ruleId)).toBe("2024-07-01");
+    const dates = await ledgerDates(ruleId);
+    expect(dates).toHaveLength(18);
+    expect(new Set(dates).size).toBe(18);
+    expect(dates[0]).toBe("2023-01-01");
+    expect(dates[17]).toBe("2024-06-01");
   });
 });

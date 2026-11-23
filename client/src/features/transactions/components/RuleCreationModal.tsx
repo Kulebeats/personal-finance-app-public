@@ -4,12 +4,13 @@
  * Modal for creating auto-categorization rules.
  */
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -25,15 +26,16 @@ import {
   SelectGroup,
   SelectLabel,
 } from "@/components/ui/select";
-import { Tag, X, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCategories, type Category } from "@/hooks/useCategories";
+import { useTags } from "@/hooks/useTags";
+import { RuleTagSelector } from "./RuleTagSelector";
 
 // Rule data structure for the onSubmit callback
 export interface RuleData {
   merchant: string;
-  category: string;
-  tags: string[];
+  categoryId: string | null;
+  tagIds: string[];
   matchType?: "exact" | "contains";
   applyToExisting?: boolean;
 }
@@ -43,8 +45,8 @@ interface RuleCreationModalProps {
   onOpenChange: (open: boolean) => void;
   initialMerchant: string;
   initialCategory: string;
-  availableTags?: string[];
-  onSubmit?: (rule: RuleData) => void;
+  initialCategoryId: string | null;
+  onSubmit?: (rule: RuleData) => void | Promise<void>;
 }
 
 export function RuleCreationModal({
@@ -52,16 +54,37 @@ export function RuleCreationModal({
   onOpenChange,
   initialMerchant,
   initialCategory,
-  availableTags = [],
+  initialCategoryId,
   onSubmit,
 }: RuleCreationModalProps) {
   const { data: categoriesData } = useCategories();
   const categories = categoriesData?.categories || [];
+  const { data: availableTags = [] } = useTags();
 
   const [isAmountExpanded, setIsAmountExpanded] = useState(false);
   const [isTagsExpanded, setIsTagsExpanded] = useState(false);
-  const [tags, setTags] = useState<string[]>([]);
+  const [tagIds, setTagIds] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState("");
+  const [tagError, setTagError] = useState("");
+  const [categoryId, setCategoryId] = useState(initialCategoryId || "");
+  const [merchant, setMerchant] = useState(initialMerchant);
+  const [matchType, setMatchType] = useState<"exact" | "contains">("exact");
+  const [applyToExisting, setApplyToExisting] = useState(false);
+  const pendingRef = useRef(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setMerchant(initialMerchant);
+    setCategoryId(initialCategoryId || "");
+    setTagIds([]);
+    setTagInput("");
+    setTagError("");
+    setIsTagsExpanded(false);
+    setIsAmountExpanded(false);
+    setMatchType("exact");
+    setApplyToExisting(false);
+  }, [open, initialMerchant, initialCategoryId]);
 
   const groupedCategories = useMemo(() => {
     return categories.reduce(
@@ -75,34 +98,54 @@ export function RuleCreationModal({
     );
   }, [categories]);
 
-  const handleAddTag = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter" && tagInput.trim()) {
-      e.preventDefault();
-      if (!tags.includes(tagInput.trim())) {
-        setTags([...tags, tagInput.trim()]);
-      }
-      setTagInput("");
+  const handleAddTag = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter" || !tagInput.trim()) return;
+    event.preventDefault();
+    const matches = availableTags.filter((tag) => tag.name.toLowerCase() === tagInput.trim().toLowerCase());
+    if (matches.length !== 1) {
+      setTagError(matches.length === 0
+        ? "Select an existing tag. Create new tags in Settings first."
+        : "Multiple tags have that name. Choose a distinct tag in Settings first.");
+      return;
+    }
+    const [match] = matches;
+    setTagIds((ids) => ids.includes(match.id) ? ids : [...ids, match.id]);
+    setTagInput("");
+    setTagError("");
+  };
+
+  const hasPendingTag = !!tagInput.trim() || !!tagError;
+
+  const handleSave = async () => {
+    if (pendingRef.current || !onSubmit || !merchant.trim() || (!categoryId && tagIds.length === 0) || hasPendingTag) return;
+    pendingRef.current = true;
+    setIsSubmitting(true);
+    try {
+      await onSubmit({
+        merchant: merchant.trim(),
+        categoryId: categoryId || null,
+        tagIds,
+        matchType,
+        applyToExisting,
+      });
+    } catch {
+      // The caller reports the save error; retain this draft for an explicit retry.
+    } finally {
+      pendingRef.current = false;
+      setIsSubmitting(false);
     }
   };
 
-  const handleRemoveTag = (tagToRemove: string) => {
-    setTags(tags.filter((t) => t !== tagToRemove));
-  };
-
-  const handleSave = () => {
-    onSubmit?.({
-      merchant: initialMerchant,
-      category: initialCategory,
-      tags,
-    });
-    onOpenChange(false);
-  };
-
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(nextOpen) => {
+      if (!pendingRef.current) onOpenChange(nextOpen);
+    }}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>New rule</DialogTitle>
+          <DialogDescription>
+            Choose the merchant condition and category or existing tags for this rule.
+          </DialogDescription>
           <div className="flex gap-4 text-sm font-medium mt-2 border-b">
             <button className="pb-2 border-b-2 border-primary text-foreground px-1">
               Settings
@@ -125,10 +168,10 @@ export function RuleCreationModal({
               <div className="border rounded-lg p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <Label className="font-medium">Merchants</Label>
-                  <Switch defaultChecked />
+                  <Switch defaultChecked disabled={isSubmitting} />
                 </div>
                 <div className="space-y-2">
-                  <Select defaultValue="exact">
+                  <Select value={matchType} onValueChange={(value) => setMatchType(value as "exact" | "contains")} disabled={isSubmitting}>
                     <SelectTrigger className="h-9 text-sm">
                       <SelectValue />
                     </SelectTrigger>
@@ -138,7 +181,9 @@ export function RuleCreationModal({
                     </SelectContent>
                   </Select>
                   <Input
-                    defaultValue={initialMerchant}
+                    value={merchant}
+                    onChange={(event) => setMerchant(event.target.value)}
+                    disabled={isSubmitting}
                     className="h-9 text-sm"
                   />
                 </div>
@@ -164,6 +209,7 @@ export function RuleCreationModal({
                 <Switch
                   checked={isAmountExpanded}
                   onCheckedChange={setIsAmountExpanded}
+                    disabled={isSubmitting}
                 />
               </div>
             </div>
@@ -178,80 +224,61 @@ export function RuleCreationModal({
             <div className="space-y-4">
               {/* Category Update */}
               <div className="border rounded-lg p-4 space-y-3 bg-muted/10">
-                <div className="flex items-center justify-between">
-                  <Label className="font-medium">Update category</Label>
-                  <Switch defaultChecked />
-                </div>
-                <div className="flex items-center gap-2 p-2 bg-background border rounded-md">
-                  <span className="text-sm">{initialCategory}</span>
-                  <ChevronDown className="ml-auto w-4 h-4 text-muted-foreground" />
-                </div>
+                <Label htmlFor="rule-category" className="font-medium">Update category</Label>
+                <Select value={categoryId || "none"} onValueChange={(value) => setCategoryId(value === "none" ? "" : value)} disabled={isSubmitting}>
+                  <SelectTrigger id="rule-category" className="text-sm">
+                    <span>{categoryId
+                      ? categories.find((category) => category.id === categoryId)?.name || initialCategory || "Category"
+                      : "Uncategorized"}</span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">Uncategorized</SelectItem>
+                    {Object.entries(groupedCategories).map(([group, groupCategories]) => (
+                      <SelectGroup key={group}>
+                        <SelectLabel>{group}</SelectLabel>
+                        {groupCategories.map((category) => (
+                          <SelectItem key={category.id} value={category.id}>{category.name}</SelectItem>
+                        ))}
+                      </SelectGroup>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
               {/* Tags Update */}
-              <div
-                className={cn(
-                  "border rounded-lg p-4",
-                  isTagsExpanded
-                    ? "space-y-3"
-                    : "flex items-center justify-between",
-                )}
-              >
-                {isTagsExpanded ? (
-                  <>
-                    <div className="flex items-center justify-between">
-                      <Label className="font-medium">Add tags</Label>
-                      <Switch
-                        checked={isTagsExpanded}
-                        onCheckedChange={setIsTagsExpanded}
-                      />
-                    </div>
-                    <div className="flex flex-wrap gap-2 p-2 border border-dashed rounded-md min-h-[40px]">
-                      {tags.map((tag) => (
-                        <div
-                          key={tag}
-                          className="bg-muted px-2 py-1 rounded text-xs font-medium flex items-center gap-1"
-                        >
-                          <Tag className="w-3 h-3" />
-                          {tag}
-                          <button onClick={() => handleRemoveTag(tag)}>
-                            <X className="w-3 h-3" />
-                          </button>
-                        </div>
-                      ))}
-                      <Input
-                        value={tagInput}
-                        onChange={(e) => setTagInput(e.target.value)}
-                        onKeyDown={handleAddTag}
-                        className="flex-1 min-w-[100px] h-7 border-0 shadow-none"
-                        placeholder="Type tag..."
-                      />
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <Label className="font-medium text-muted-foreground">
-                      Add tags
-                    </Label>
-                    <Switch
-                      checked={isTagsExpanded}
-                      onCheckedChange={setIsTagsExpanded}
-                    />
-                  </>
-                )}
-              </div>
+              <RuleTagSelector
+                availableTags={availableTags}
+                tagIds={tagIds}
+                input={tagInput}
+                error={tagError}
+                expanded={isTagsExpanded}
+                disabled={isSubmitting}
+                onExpandedChange={(checked) => {
+                  setIsTagsExpanded(checked);
+                  if (!checked) {
+                    setTagIds([]);
+                    setTagInput("");
+                    setTagError("");
+                  }
+                }}
+                onInputChange={(value) => { setTagInput(value); setTagError(""); }}
+                onInputKeyDown={handleAddTag}
+                onRemoveTag={(id) => setTagIds((ids) => ids.filter((tagId) => tagId !== id))}
+              />
             </div>
           </div>
         </div>
 
         <DialogFooter className="border-t pt-4">
           <div className="flex items-center gap-2 mr-auto">
-            <Switch id="apply-existing" />
+            <Switch id="apply-existing" checked={applyToExisting} onCheckedChange={setApplyToExisting} disabled={isSubmitting} />
             <Label htmlFor="apply-existing" className="text-sm font-normal">
               Apply to existing transactions
             </Label>
           </div>
-          <Button onClick={handleSave}>Save</Button>
+          <Button onClick={handleSave} disabled={isSubmitting || !onSubmit || !merchant.trim() || (!categoryId && tagIds.length === 0) || hasPendingTag}>
+            {isSubmitting ? "Saving..." : "Save"}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

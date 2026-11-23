@@ -49,21 +49,24 @@ export function TransactionSearch({
 
   return (
     <div className={cn("relative", className)}>
-      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" aria-hidden="true" />
       <Input
         type="text"
         value={localValue}
         onChange={(e) => setLocalValue(e.target.value)}
         placeholder={placeholder}
-        className="pl-9 pr-8 h-9"
+        aria-label="Search transactions"
+        className="pl-9 pr-8 max-md:pr-12 h-9 max-md:h-11"
         data-search-input
       />
       {localValue && (
         <button
+          type="button"
           onClick={handleClear}
-          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-muted rounded"
+          aria-label="Clear search"
+          className="absolute right-2 max-md:right-0 top-1/2 -translate-y-1/2 p-1 max-md:h-11 max-md:w-11 inline-flex items-center justify-center hover:bg-muted rounded"
         >
-          <X className="h-3 w-3 text-muted-foreground" />
+          <X className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
         </button>
       )}
     </div>

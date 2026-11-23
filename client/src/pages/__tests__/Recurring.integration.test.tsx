@@ -2,11 +2,12 @@
  * Recurring Page Integration Tests
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import Recurring from "@/pages/Recurring";
+import { setCalendarTimeZone, setHouseholdCalendarTimeZone } from "@/lib/calendarZone";
 
 // Mock Layout
 vi.mock("@/components/Layout", () => ({
@@ -28,6 +29,12 @@ vi.mock("@/contexts/SettingsContext", () => ({
   useFormatters: () => ({ currency: "USD" }),
 }));
 
+// RecurringPatternsModal reads the data lifetime from the session; the real
+// SessionProvider is not under test here (same pattern as Investments tests).
+vi.mock("@/contexts/SessionContext", () => ({
+  useSession: () => ({ status: null, lifetime: null }),
+}));
+
 // Mock format utilities
 vi.mock("@/lib/format", () => ({
   formatCurrency: (val: number, _currency?: string) => `$${val.toFixed(2)}`,
@@ -36,6 +43,12 @@ vi.mock("@/lib/format", () => ({
 // Mock recurring hooks
 const mockRecurring = vi.fn();
 const mockUpcomingBills = vi.fn();
+const mockCalendarRequest = vi.hoisted(() => vi.fn());
+
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/api")>(),
+  apiCall: mockCalendarRequest,
+}));
 
 // Partial mock: override only the hooks this page exercises and spread the rest
 // of the real module. importOriginal keeps every other export (useDetectPatterns,
@@ -49,7 +62,6 @@ vi.mock("@/hooks/useRecurring", async (importOriginal) => {
     useUpcomingBills: () => mockUpcomingBills(),
     useDeleteRecurring: () => ({ mutate: vi.fn() }),
     usePauseRecurring: () => ({ mutate: vi.fn() }),
-    useUpdateRecurring: () => ({ mutate: vi.fn(), isPending: false }),
     useSkipRecurring: () => ({ mutate: vi.fn() }),
   };
 });
@@ -87,6 +99,7 @@ const createMockRecurring = (overrides = {}) => ({
 describe("Recurring Page Integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockCalendarRequest.mockReset().mockResolvedValue({ success: true, data: [] });
 
     // Default mock responses
     mockRecurring.mockReturnValue({
@@ -126,6 +139,14 @@ describe("Recurring Page Integration", () => {
           amount: { amount: "9.99", currency: "USD" },
         }),
       ],
+    });
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    await act(async () => {
+      setCalendarTimeZone(null);
+      setHouseholdCalendarTimeZone(null);
     });
   });
 
@@ -180,6 +201,113 @@ describe("Recurring Page Integration", () => {
   });
 
   describe("Calendar View", () => {
+    it.each([
+      { zone: null, month: "November 2026", from: "2026-11-01", to: "2026-11-30", today: 30 },
+      { zone: "Africa/Lusaka", month: "December 2026", from: "2026-12-01", to: "2026-12-31", today: 1 },
+    ])("opens the server's month at the UTC boundary with household zone $zone", async ({ zone, month, from, to, today }) => {
+      vi.setSystemTime(new Date("2026-11-30T22:15:00Z"));
+      await act(async () => {
+        setCalendarTimeZone("Africa/Lusaka");
+        setHouseholdCalendarTimeZone(zone);
+      });
+      renderWithProviders(<Recurring />);
+      expect(screen.getByRole("heading", { name: month })).toBeInTheDocument();
+      expect(screen.getByRole("gridcell", { name: `Day ${today}, today` })).toBeInTheDocument();
+      await waitFor(() => expect(mockCalendarRequest).toHaveBeenCalledWith(
+        `/recurring/calendar?from=${from}&to=${to}`, expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      ));
+      await waitFor(() => expect(screen.queryByText("Loading calendar status…")).not.toBeInTheDocument());
+    });
+
+    it("switches the mounted calendar from legacy UTC when the matching household zone arrives", async () => {
+      vi.setSystemTime(new Date("2026-11-30T22:15:00Z"));
+      await act(async () => {
+        setCalendarTimeZone("Africa/Lusaka");
+        setHouseholdCalendarTimeZone(null);
+      });
+      renderWithProviders(<Recurring />);
+      expect(screen.getByRole("heading", { name: "November 2026" })).toBeInTheDocument();
+      expect(screen.getByRole("gridcell", { name: "Day 30, today" })).toBeInTheDocument();
+
+      await act(async () => { setHouseholdCalendarTimeZone("Africa/Lusaka"); });
+
+      expect(screen.getByRole("heading", { name: "December 2026" })).toBeInTheDocument();
+      expect(screen.getByRole("gridcell", { name: "Day 1, today" })).toBeInTheDocument();
+      await waitFor(() => expect(mockCalendarRequest).toHaveBeenCalledWith(
+        "/recurring/calendar?from=2026-12-01&to=2026-12-31", expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      ));
+    });
+
+    it("reads back the mounted calendar after saving a rule from its occurrence", async () => {
+      vi.setSystemTime(new Date("2026-11-22T12:00:00Z"));
+      const before = createMockRecurring({ id: "edited", name: "Before edit", nextDueDate: "2026-11-24" });
+      const after = { ...before, name: "After edit", nextDueDate: "2026-11-26" };
+      let saved = false;
+      mockCalendarRequest.mockImplementation(async (path: string, options?: RequestInit) => {
+        if (path === "/recurring/edited" && options?.method === "PUT") {
+          expect(JSON.parse(String(options.body))).toMatchObject({ name: after.name, nextDueDate: after.nextDueDate });
+          saved = true;
+          return { success: true, data: after };
+        }
+        const rule = saved ? after : before;
+        return { success: true, data: [{ id: rule.id, date: rule.nextDueDate, status: "upcoming", rule, amount: rule.amount }] };
+      });
+
+      renderWithProviders(<Recurring />);
+      fireEvent.click(await screen.findByRole("button", { name: /Before edit.*Upcoming/ }));
+      const dialog = within(screen.getByRole("dialog", { name: "Edit Recurring Transaction" }));
+      fireEvent.change(dialog.getByLabelText("Name"), { target: { value: after.name } });
+      fireEvent.change(dialog.getByLabelText("Next Due Date"), { target: { value: after.nextDueDate } });
+      fireEvent.click(dialog.getByRole("button", { name: "Save Changes" }));
+
+      expect(await screen.findByRole("button", { name: /After edit.*Upcoming/ })).toBeInTheDocument();
+      expect(within(screen.getByRole("gridcell", { name: /^Day 26,/ })).getByRole("button", {
+        name: /After edit.*Upcoming/,
+      })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Before edit.*Upcoming/ })).not.toBeInTheDocument();
+      expect(mockCalendarRequest.mock.calls.filter(([path]) => String(path).startsWith("/recurring/calendar?"))).toHaveLength(2);
+    });
+
+    it("shows overdue, due today, upcoming, paid and skipped on their own occurrence dates", async () => {
+      vi.setSystemTime(new Date(2026, 10, 22, 12));
+      const overdue = createMockRecurring({ id: "overdue", name: "Rent", nextDueDate: "2026-11-20" });
+      const due = createMockRecurring({ id: "today", name: "Internet", nextDueDate: "2026-11-22" });
+      const upcoming = createMockRecurring({ id: "upcoming", name: "Phone", nextDueDate: "2026-11-24" });
+      const paid = createMockRecurring({ id: "paid", name: "Insurance", nextDueDate: "2026-12-13" });
+      const skipped = createMockRecurring({ id: "skipped", name: "Gym", nextDueDate: "2026-12-15" });
+      mockRecurring.mockReturnValue({ data: [overdue, due, upcoming, paid, skipped] });
+      mockCalendarRequest.mockResolvedValue({
+        success: true,
+        data: [
+          { id: overdue.id, date: overdue.nextDueDate, status: "overdue", rule: overdue, amount: overdue.amount },
+          { id: due.id, date: due.nextDueDate, status: "due", rule: due, amount: due.amount },
+          { id: upcoming.id, date: upcoming.nextDueDate, status: "upcoming", rule: upcoming, amount: upcoming.amount },
+          { id: "payment", date: "2026-11-13", status: "paid", rule: paid, amount: paid.amount },
+          { id: "skip", date: "2026-11-15", status: "skipped", rule: skipped, amount: skipped.amount },
+        ],
+      });
+
+      renderWithProviders(<Recurring />);
+      await screen.findByRole("button", { name: /Rent.*Overdue/ });
+      expect(within(screen.getByRole("gridcell", { name: /^Day 22,/ })).getByRole("button", {
+        name: /Internet.*Due today/,
+      })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Phone.*Upcoming/ })).toBeInTheDocument();
+      expect(within(screen.getByRole("gridcell", { name: /^Day 13,/ })).getByRole("button", {
+        name: /Insurance.*Paid/,
+      })).toBeInTheDocument();
+      expect(within(screen.getByRole("gridcell", { name: /^Day 15,/ })).getByRole("button", {
+        name: /Gym.*Skipped/,
+      })).toBeInTheDocument();
+    });
+
+    it("reports calendar status unavailable when the occurrence read fails", async () => {
+      mockCalendarRequest.mockRejectedValue(new Error("Unavailable"));
+      renderWithProviders(<Recurring />);
+      expect(await screen.findByText("Calendar status is unavailable.")).toBeInTheDocument();
+      expect(screen.queryByRole("grid")).not.toBeInTheDocument();
+    });
+
     it("renders calendar with day headers", () => {
       renderWithProviders(<Recurring />);
       expect(screen.getByText("Sun")).toBeInTheDocument();

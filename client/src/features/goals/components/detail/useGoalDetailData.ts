@@ -17,6 +17,7 @@ import {
   type PayoffScenario,
 } from "@/hooks/useGoals";
 import { parseMoney } from "@/lib/utils";
+import { isGoalProgressHidden } from "../GoalProgressHidden";
 import type { ScenarioKey } from "../GoalDetailTypes";
 
 function parseAmount(value?: string | number | null) {
@@ -125,7 +126,8 @@ export function useGoalDetailData({ goalId, open }: UseGoalDetailDataProps) {
   const debtInputs = useMemo(
     () =>
       payDownGoals
-        .filter((item) => item.interestRate && item.minimumPayment)
+        // A withheld balance would enter the strategy as zero.
+        .filter((item) => item.interestRate && item.minimumPayment && !isGoalProgressHidden(item))
         .map((item) => ({
           id: item.id,
           balance: Math.abs(parseAmount(item.currentAmount)),

@@ -51,9 +51,11 @@ export class BudgetPeriodRepository {
     );
 
     if (existing) {
+      // A manual save invalidates a displayed confirmation even when the
+      // submitted amount is unchanged. Never reset or retain its version.
       const [updated] = await queryRunner
         .update(budgetPeriods)
-        .set({ ...data, updatedAt: new Date() })
+        .set({ ...data, version: sql`${budgetPeriods.version} + 1`, updatedAt: new Date() })
         .where(eq(budgetPeriods.id, existing.id))
         .returning();
       return updated;
@@ -77,7 +79,7 @@ export class BudgetPeriodRepository {
         if (retryExisting) {
           const [updated] = await queryRunner
             .update(budgetPeriods)
-            .set({ ...data, updatedAt: new Date() })
+            .set({ ...data, version: sql`${budgetPeriods.version} + 1`, updatedAt: new Date() })
             .where(eq(budgetPeriods.id, retryExisting.id))
             .returning();
           return updated;

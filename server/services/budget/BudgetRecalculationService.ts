@@ -1,4 +1,5 @@
-﻿import { and, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
+﻿import { randomUUID } from "node:crypto";
+import { and, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import { db } from "../../db";
 import { withTransaction } from "../../utils/withTransaction";
 import { Money } from "../../core/money";
@@ -11,6 +12,8 @@ import {
   transactionSplits,
 } from "@shared/schema";
 import { BudgetForecastService } from "./BudgetForecastService";
+import { businessAuditService } from "../BusinessAuditService";
+import { lockAccountHousehold } from "../../repositories/AccountCreationGrant";
 // BUDGET-TIME-001: Import timezone-safe date utilities
 import { getMonthStart, getMonthEnd } from "../../utils/dateUtils";
 
@@ -400,16 +403,41 @@ export class BudgetRecalculationService extends BudgetForecastService {
     return { updated, created, cleared };
   }
 
-  async clearBudgets(householdId: string): Promise<number> {
-    const result = await db
-      .delete(budgets)
-      .where(
-        and(
-          eq(budgets.householdId, householdId),
-          eq(budgets.isFlexBucket, false),
-        ),
-      )
-      .returning({ id: budgets.id });
-    return result.length;
+  async clearBudgets({
+    householdId,
+    userId,
+    ipAddress,
+  }: {
+    householdId: string;
+    userId: string;
+    ipAddress?: string;
+  }): Promise<number> {
+    return withTransaction(async (tx) => {
+      // Household first, as the confirmed apply locks it (P1-1): the audit FK takes KEY SHARE on it.
+      await lockAccountHousehold(tx, householdId);
+      const removed = await tx
+        .delete(budgets)
+        .where(
+          and(
+            eq(budgets.householdId, householdId),
+            eq(budgets.isFlexBucket, false),
+          ),
+        )
+        .returning({ id: budgets.id });
+      const cleared = removed.length;
+      if (cleared > 0) {
+        await businessAuditService.logDelete({
+          tx,
+          householdId,
+          userId,
+          ipAddress,
+          entityId: randomUUID(),
+          entityType: "budget",
+          oldValue: { cleared, budgetIds: removed.map(({ id }) => id).sort() },
+          metadata: { operation: "clear" },
+        });
+      }
+      return cleared;
+    });
   }
 }

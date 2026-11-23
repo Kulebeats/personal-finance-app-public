@@ -12,6 +12,7 @@ import { EventBus } from "./EventBus";
 import { createEvent } from "./DomainEvent";
 import { logger } from "../../utils/logger";
 import type { OutboxEvent } from "../../../shared/schema";
+import { dispatchSecurityNotice } from "../../services/security-notice-dispatch";
 
 /**
  * Event handler type
@@ -76,6 +77,10 @@ export async function processEvents(batchSize = 10): Promise<number> {
 
   for (const event of events) {
     try {
+      if (event.eventType === EventTypes.SECURITY_NOTICE_REQUESTED) {
+        if (await dispatchSecurityNotice(event.id)) processed++;
+        continue;
+      }
       // Atomically claim the event - skip if already claimed by another worker
       const claimed = await outboxEventService.markProcessing(event.id);
       if (!claimed) {
@@ -87,13 +92,20 @@ export async function processEvents(batchSize = 10): Promise<number> {
       await processEvent(event);
       processed++;
     } catch (error) {
+      if (event.eventType === EventTypes.SECURITY_NOTICE_REQUESTED) {
+        // Its dispatcher owns fenced transitions. In particular an uncertain
+        // transport outcome must never fall through to generic retry.
+        logger.error("Security notice processing failed", { eventId: event.id, error });
+        continue;
+      }
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       await outboxEventService.markFailed(event.id, errorMessage);
       logger.error("Event processing failed", {
         eventId: event.id,
         eventType: event.eventType,
-        error: errorMessage,
+        // The Error itself: redaction keeps its scrubbed message (OPS-014).
+        error,
       });
     }
   }

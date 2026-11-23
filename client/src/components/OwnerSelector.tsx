@@ -1,3 +1,4 @@
+import { forwardRef, type ComponentPropsWithoutRef } from "react";
 import {
   Select,
   SelectContent,
@@ -6,23 +7,25 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useHouseholdMembers, useProfile } from "@/hooks/use-settings";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
 import { Users, User } from "lucide-react";
 
-interface OwnerSelectorProps {
+interface OwnerSelectorProps extends Pick<ComponentPropsWithoutRef<typeof SelectTrigger>,
+  "id" | "aria-describedby" | "aria-invalid" | "aria-label" | "aria-labelledby" | "onBlur"> {
   value: string | null; // null = Shared, string = userId
   onChange: (value: string | null) => void;
   disabled?: boolean;
   className?: string;
 }
 
-export function OwnerSelector({
+export const OwnerSelector = forwardRef<HTMLButtonElement, OwnerSelectorProps>(function OwnerSelector({
   value,
   onChange,
   disabled,
   className,
-}: OwnerSelectorProps) {
+  ...triggerProps
+}, ref) {
   const { data: members = [] } = useHouseholdMembers();
   const { data: profile } = useProfile();
 
@@ -30,9 +33,7 @@ export function OwnerSelector({
   const sortedMembers = [...members].sort((a, b) => {
     if (a.userId === profile?.id) return -1;
     if (b.userId === profile?.id) return 1;
-    return (a.user?.fullName || a.user?.username || "").localeCompare(
-      b.user?.fullName || b.user?.username || ""
-    );
+    return a.name.localeCompare(b.name);
   });
 
   return (
@@ -41,7 +42,7 @@ export function OwnerSelector({
       onValueChange={(val) => onChange(val === "shared" ? null : val)}
       disabled={disabled}
     >
-      <SelectTrigger className={cn("w-full", className)}>
+      <SelectTrigger ref={ref} className={cn("w-full", className)} {...triggerProps}>
         <SelectValue placeholder="Select owner" />
       </SelectTrigger>
       <SelectContent>
@@ -61,17 +62,14 @@ export function OwnerSelector({
           >
             <div className="flex items-center gap-2">
               <Avatar className="h-6 w-6">
-                <AvatarImage
-                  src={member.user?.profilePictureUrl || undefined}
-                />
                 <AvatarFallback className="text-[10px]">
-                  {member.user?.username?.substring(0, 2).toUpperCase() || "U"}
+                  {member.name.substring(0, 2).toUpperCase() || "U"}
                 </AvatarFallback>
               </Avatar>
               <span>
                 {member.userId === profile?.id
                   ? "Me"
-                  : member.user?.fullName || member.user?.username || "Unknown"}
+                  : member.name}
               </span>
             </div>
           </SelectItem>
@@ -79,4 +77,4 @@ export function OwnerSelector({
       </SelectContent>
     </Select>
   );
-}
+});

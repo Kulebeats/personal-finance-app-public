@@ -30,16 +30,19 @@ import { authMfaService } from "./auth.mfa.service";
 import { authSecurityMonitor } from "./auth.security.monitor";
 import { authEmailService } from "./auth.email.service";
 import { authSessionService } from "./auth.session.service";
+import { mfaCompliance, type MfaCompliance } from "./auth.mfa-compliance";
 import {
   UnauthorizedError,
+  InvalidCredentialsError,
   NotFoundError,
   ConflictError,
   ForbiddenError,
+  EmailVerificationRequiredError,
   ValidationError,
 } from "../../core/errors";
 import { sha256Hex } from "../../core/tokenHash";
-import { toPublicUser } from "./auth.types";
 import type { User } from "@shared/schema";
+import { toPublicUserDto } from "./auth.dto";
 
 // Re-export split services for backwards compatibility
 export { authEmailService } from "./auth.email.service";
@@ -142,10 +145,11 @@ export const authService = {
       emailVerified: false,
     });
 
-    // Create default display settings
+    // Create default display settings. New accounts start on the light theme;
+    // users can switch to dark or "system" afterwards.
     await userRepository.createDisplaySettings({
       userId: user.id,
-      theme: "system",
+      theme: "light",
       currency: "ZMW",
       numberFormat: "US",
       dateFormat: "MM/DD/YYYY",
@@ -159,12 +163,14 @@ export const authService = {
     // FIX AUTH-SESSION-002: Regenerate session on registration to prevent session fixation
     await authSessionService.regenerateSession(req);
     req.session.userId = user.id;
+    req.session.securityGeneration = user.securityGeneration ?? 0;
 
     // Create session record for tracking
     const { parseDeviceInfo } = await import("./auth.device");
     const deviceInfo = parseDeviceInfo(req.headers["user-agent"] || "");
     try {
-      await userRepository.upsertSession({
+      const { registerSessionIdentity } = await import("../../services/session-identity");
+      await registerSessionIdentity(user, {
         userId: user.id,
         sessionToken: req.sessionID,
         deviceName: deviceInfo.deviceName,
@@ -188,6 +194,8 @@ export const authService = {
       logger.warn("Failed to create session record on registration", {
         userId: user.id?.substring(0, 8) + "...",
       });
+      delete req.session.userId;
+      throw sessionError;
     }
 
     // Audit log
@@ -204,17 +212,17 @@ export const authService = {
     });
 
     // Send verification email
-    await authEmailService.sendVerificationEmail(data.email, verificationToken);
+    await authEmailService.sendVerificationEmail(data.email, verificationToken, user.id);
 
-    return { user: toPublicUser(user) };
+    return { user: toPublicUserDto(user) };
   },
 
   /**
    * Verify email address
    * @deprecated Use authEmailService.verifyEmail instead
    */
-  async verifyEmail(token: string): Promise<void> {
-    return authEmailService.verifyEmail(token);
+  async verifyEmail(token: string, req?: Request): Promise<void> {
+    return authEmailService.verifyEmail(token, req);
   },
 
   /**
@@ -239,7 +247,7 @@ export const authService = {
     user?: Record<string, unknown>;
     requiresMfa?: boolean;
     maskedEmail?: string;
-    suggestMfa?: boolean;
+    mfa?: MfaCompliance;
   }> {
     const ipAddress = req.ip || req.socket?.remoteAddress || "unknown";
     const userAgent = req.headers["user-agent"] || "unknown";
@@ -252,7 +260,7 @@ export const authService = {
        * Perform a dummy password verification to prevent timing attacks.
        */
       await verifyPassword(data.password, DUMMY_HASH);
-      throw new UnauthorizedError("Invalid email or password");
+      throw new InvalidCredentialsError("Invalid email or password");
     }
 
     /**
@@ -270,14 +278,12 @@ export const authService = {
     const isValid = await verifyPassword(data.password, user.passwordHash);
     if (!isValid) {
       await this.handleFailedLogin(user.id, ipAddress, userAgent);
-      throw new UnauthorizedError("Invalid email or password");
+      throw new InvalidCredentialsError("Invalid email or password");
     }
 
     // SECURITY: Email Verification Check
     if (!user.emailVerified) {
-      throw new ForbiddenError(
-        "Email not verified. Please check your inbox.",
-      );
+      throw new EmailVerificationRequiredError();
     }
 
     // Reset failed login attempts on successful login
@@ -305,10 +311,6 @@ export const authService = {
       return { requiresMfa: true, maskedEmail };
     }
 
-    // Check if MFA should be suggested
-    const { checkMfaPolicy } = await import("./auth.mfa-policy");
-    const mfaPolicy = await checkMfaPolicy(user.id);
-
     // Complete login immediately when MFA is not required
     await authSessionService.finalizeLogin(
       user,
@@ -318,9 +320,10 @@ export const authService = {
       userAgent,
     );
 
+    // AH-11: the session is created either way; after the grace the client shows the enrol step.
     return {
-      user: toPublicUser(user),
-      suggestMfa: mfaPolicy.suggestEnrollment,
+      user: toPublicUserDto(user),
+      mfa: mfaCompliance(user),
     };
   },
 
@@ -338,6 +341,9 @@ export const authService = {
     const user = await userRepository.findById(pendingUserId);
     if (!user) {
       throw new NotFoundError("User not found");
+    }
+    if ((req.session.mfaPendingSecurityGeneration ?? 0) !== (user.securityGeneration ?? 0) || user.erasedAt) {
+      throw new UnauthorizedError("Authentication changed; sign in again");
     }
 
     const ipAddress = req.ip || req.socket?.remoteAddress || "unknown";
@@ -378,7 +384,7 @@ export const authService = {
       result.userAgent,
     );
 
-    return { user: toPublicUser(result.user) };
+    return { user: toPublicUserDto(result.user) };
   },
 
   /**
@@ -477,6 +483,6 @@ export const authService = {
       throw new NotFoundError("User not found");
     }
 
-    return toPublicUser(user);
+    return toPublicUserDto(user);
   },
 };

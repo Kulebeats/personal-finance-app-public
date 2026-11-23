@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
 import { Input } from "@/components/ui/input";
 import { TransactionFormValues } from "./schema";
+import { RecurringToggleField } from "./RecurringToggleField";
 
 interface RecurringSettingsSectionProps {
   form: UseFormReturn<TransactionFormValues>;
@@ -48,26 +49,7 @@ export function RecurringSettingsSection({
 
   return (
     <div className="rounded-lg border p-4 space-y-4">
-      <FormField
-        control={form.control}
-        name="isRecurring"
-        render={({ field }) => (
-          <FormItem className="flex flex-row items-start space-x-3 space-y-0">
-            <FormControl>
-              <Checkbox
-                checked={field.value}
-                onCheckedChange={field.onChange}
-              />
-            </FormControl>
-            <div className="space-y-1 leading-none">
-              <FormLabel>Recurring Transaction</FormLabel>
-              <FormDescription>
-                This is a repeating transaction (e.g. subscription, rent)
-              </FormDescription>
-            </div>
-          </FormItem>
-        )}
-      />
+      <RecurringToggleField form={form} />
 
       {isRecurring && (
         <div className="pl-7 space-y-4 pt-2">

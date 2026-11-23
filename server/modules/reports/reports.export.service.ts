@@ -2,29 +2,26 @@ import { and, desc, eq } from "drizzle-orm";
 import { db } from "../../db";
 import { dataExports } from "@shared/schema";
 import { exportService } from "../../services/ExportService";
-import { withTransaction } from "../../utils/withTransaction";
-import { businessAuditService } from "../../services/BusinessAuditService";
+import { csvMoney, type CsvDecimal } from "../../core/csv";
 import {
   cashflowReportRepository,
   cashflowBudgetComparisonRepository,
   spendingReportRepository,
   netWorthReportRepository,
-  transactionReportRepository,
 } from "../../repositories/reports";
 import {
   validateDateRange,
   type ExportReportInput,
 } from "./reports.validation";
 import type { ReportScope } from "./reports.types";
+import type { TransactionType } from "../../utils/withTransaction";
+import { buildTransactionCsvData } from "./transactionCsvData";
 import type { MoneyDto } from "@shared/money";
 import type {
   ReportsExportItem,
   ReportsExportsResponse,
   ReportsCashflowResponse,
 } from "@shared/reports";
-
-const MAX_EXPORT_ROWS = 5000;
-const TRANSACTION_EXPORT_BATCH = 1000;
 
 type ExportListOptions = {
   householdId: string;
@@ -38,6 +35,7 @@ type ExportDataResult = {
   rows: Record<string, unknown>[];
   columns?: string[];
   fileName: string;
+  transactionIds?: string[];
 };
 
 /**
@@ -66,10 +64,9 @@ const toIsoDateTime = (value?: Date | string | null) => {
   return value;
 };
 
-const toNumber = (value?: MoneyDto) => (value ? Number(value.amount) || 0 : 0);
-
-const toExportItem = (
+export const toExportItem = (
   row: typeof dataExports.$inferSelect,
+  requesterId?: string,
 ): ReportsExportItem => ({
   id: row.id,
   userId: row.userId,
@@ -79,9 +76,9 @@ const toExportItem = (
   fileUrl: row.fileUrl ?? undefined,
   dateRangeStart: toIsoDate(row.dateRangeStart),
   dateRangeEnd: toIsoDate(row.dateRangeEnd),
-  recordCount: row.recordCount ?? null,
+  recordCount: row.exportType === "transactions" && requesterId !== undefined && requesterId !== row.userId ? null : row.recordCount ?? null,
   // FIX REPORTS-EXPORT-002: Include stored parameters for reproducible downloads
-  parameters: row.parameters as Record<string, unknown> | null,
+  parameters: row.exportType === "transactions" && requesterId !== undefined && requesterId !== row.userId ? null : row.parameters as Record<string, unknown> | null,
   status: row.status || "pending",
   createdAt: toIsoDateTime(row.createdAt),
 });
@@ -89,6 +86,7 @@ const toExportItem = (
 export class ReportsExportService {
   async listExports(
     options: ExportListOptions,
+    tx?: TransactionType,
   ): Promise<ReportsExportsResponse> {
     const {
       householdId,
@@ -102,19 +100,20 @@ export class ReportsExportService {
     if (!includeHousehold) conditions.push(eq(dataExports.userId, userId));
     if (status) conditions.push(eq(dataExports.status, status));
 
-    const rows = await db
+    const rows = await (tx ?? db)
       .select()
       .from(dataExports)
       .where(and(...conditions))
       .orderBy(desc(dataExports.createdAt))
       .limit(limit);
 
-    return { exports: rows.map(toExportItem) };
+    return { exports: rows.map(row => toExportItem(row, userId)) };
   }
 
   async getExportById(
     exportId: string,
     householdId: string,
+    requesterId?: string,
   ): Promise<ReportsExportItem | null> {
     const rows = await db
       .select()
@@ -128,105 +127,7 @@ export class ReportsExportService {
       .limit(1);
 
     if (!rows[0]) return null;
-    return toExportItem(rows[0]);
-  }
-
-  async createExport(
-    householdId: string,
-    userId: string,
-    scope: ReportScope,
-    input: ExportReportInput,
-    ipAddress?: string,
-  ): Promise<ReportsExportItem> {
-    validateDateRange(input.startDate, input.endDate);
-
-    const created = await db
-      .insert(dataExports)
-      .values({
-        userId,
-        householdId,
-        exportType: input.reportType,
-        fileFormat: input.format,
-        dateRangeStart: input.startDate,
-        dateRangeEnd: input.endDate,
-        // FIX REPORTS-EXPORT-002: Store export parameters for reproducible downloads
-        parameters: { ...input, scope },
-        status: "pending",
-      })
-      .returning();
-
-    const exportRow = created[0];
-    if (!exportRow) {
-      throw new Error("Failed to create export");
-    }
-
-    try {
-      // 30 second timeout for exports
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(
-          () => reject(new Error("Export timed out (max 30s)")),
-          30000,
-        ),
-      );
-
-      const exportData = await Promise.race([
-        this.buildExportData(householdId, userId, scope, input),
-        timeoutPromise,
-      ]);
-
-      // DPA audit (SCP-336): a produced financial+PII export must never commit
-      // unlogged. The initial insert above is left as "pending" so failed builds
-      // are still recorded; here, at completion, recordCount is known, so the
-      // completion write and the CREATE audit row are made atomic via one
-      // transaction. If the audit insert fails it propagates, rolling back the
-      // completion (the export stays pending → marked "failed" in catch) — so no
-      // completed export can exist without its audit row. Metadata only: never
-      // the exported rows (which carry merchant/account/category names + notes).
-      await withTransaction(async (tx) => {
-        await tx
-          .update(dataExports)
-          .set({
-            status: "completed",
-            recordCount: exportData.rows.length,
-            fileUrl: `/api/reports/exports/${exportRow.id}?download=true`,
-          })
-          .where(eq(dataExports.id, exportRow.id));
-
-        await businessAuditService.log({
-          userId,
-          householdId,
-          action: "CREATE",
-          entityType: "data_export",
-          entityId: exportRow.id,
-          details: {
-            reportType: input.reportType,
-            fileFormat: input.format,
-            scope,
-            dateRangeStart: input.startDate,
-            dateRangeEnd: input.endDate,
-            recordCount: exportData.rows.length,
-            fileName: exportData.fileName,
-          },
-          ipAddress,
-          tx,
-        });
-      });
-
-      const updated = await this.getExportById(exportRow.id, householdId);
-      if (!updated) throw new Error("Failed to load export record");
-      return updated;
-    } catch (error) {
-      await db
-        .update(dataExports)
-        .set({ status: "failed" })
-        .where(eq(dataExports.id, exportRow.id));
-
-      // Update error status properly if timeout
-      if (error instanceof Error && error.message.includes("timed out")) {
-        // Log specifically or handle differently if needed, but 'failed' status is set above
-      }
-      throw error;
-    }
+    return toExportItem(rows[0], requesterId);
   }
 
   async generateExportFile(
@@ -234,13 +135,15 @@ export class ReportsExportService {
     userId: string,
     scope: ReportScope,
     input: ExportReportInput,
-  ): Promise<{ content: string; fileName: string }> {
+    tx?: TransactionType,
+  ): Promise<{ content: string; fileName: string; recordCount: number; transactionIds?: string[] }> {
     validateDateRange(input.startDate, input.endDate);
     const exportData = await this.buildExportData(
       householdId,
       userId,
       scope,
       input,
+      tx,
     );
 
     if (input.format !== "csv") {
@@ -251,7 +154,7 @@ export class ReportsExportService {
       exportData.rows,
       exportData.columns,
     );
-    return { content, fileName: exportData.fileName };
+    return { content, fileName: exportData.fileName, recordCount: exportData.rows.length, transactionIds: exportData.transactionIds };
   }
 
   private async buildExportData(
@@ -259,6 +162,7 @@ export class ReportsExportService {
     userId: string,
     scope: ReportScope,
     input: ExportReportInput,
+    tx?: TransactionType,
   ): Promise<ExportDataResult> {
     const from = input.startDate;
     const to = input.endDate;
@@ -287,7 +191,7 @@ export class ReportsExportService {
         const rows = breakdown.items.map((item) => ({
           groupBy,
           label: item.label,
-          amount: toNumber(item.value),
+          amount: csvMoney(item.value),
           currency: item.value.currency,
           percent: Number(item.percent.toFixed(2)),
         }));
@@ -317,6 +221,7 @@ export class ReportsExportService {
               includePending: input.includePending,
               includeTransfers: input.includeTransfers,
               merchantId: input.merchantId,
+              includeForecast,
               forecastMonths,
             },
           );
@@ -341,10 +246,10 @@ export class ReportsExportService {
           const baseRow = {
             periodStart: item.periodStart,
             periodEnd: item.periodEnd,
-            income: toNumber(item.income),
-            expenses: toNumber(item.expenses),
-            savings: toNumber(item.savings),
-            debt: toNumber(item.debt),
+            income: csvMoney(item.income),
+            expenses: csvMoney(item.expenses),
+            savings: csvMoney(item.savings),
+            debt: csvMoney(item.debt),
             savingsRate: Number(item.savingsRate.toFixed(2)),
             currency: item.income.currency,
             dataType: item.isForecast ? "forecast" : "actual",
@@ -354,12 +259,12 @@ export class ReportsExportService {
           if (item.confidence) {
             return {
               ...baseRow,
-              incomeLow: toNumber(item.confidence.income?.low),
-              incomeHigh: toNumber(item.confidence.income?.high),
-              expensesLow: toNumber(item.confidence.expenses?.low),
-              expensesHigh: toNumber(item.confidence.expenses?.high),
-              savingsLow: toNumber(item.confidence.savings?.low),
-              savingsHigh: toNumber(item.confidence.savings?.high),
+              incomeLow: csvMoney(item.confidence.income?.low),
+              incomeHigh: csvMoney(item.confidence.income?.high),
+              expensesLow: csvMoney(item.confidence.expenses?.low),
+              expensesHigh: csvMoney(item.confidence.expenses?.high),
+              savingsLow: csvMoney(item.confidence.savings?.low),
+              savingsHigh: csvMoney(item.confidence.savings?.high),
               confidenceLevel: item.confidence.level,
             };
           }
@@ -417,9 +322,9 @@ export class ReportsExportService {
         const rows = comparison.comparison.map((item) => ({
           period: item.period,
           category: item.categoryName,
-          budgeted: toNumber(item.budgeted),
-          actual: toNumber(item.actual),
-          variance: toNumber(item.variance),
+          budgeted: csvMoney(item.budgeted),
+          actual: csvMoney(item.actual),
+          variance: csvMoney(item.variance),
           variancePercent: item.variancePercent,
           status: item.status,
           currency: item.budgeted.currency,
@@ -456,9 +361,9 @@ export class ReportsExportService {
           string,
           {
             date: string;
-            netWorth?: number;
-            assets?: number;
-            liabilities?: number;
+            netWorth?: CsvDecimal;
+            assets?: CsvDecimal;
+            liabilities?: CsvDecimal;
             currency: string;
           }
         >();
@@ -470,11 +375,11 @@ export class ReportsExportService {
               currency: netWorth.range.baseCurrency,
             };
             if (series.id === "Net Worth") {
-              existing.netWorth = toNumber(point.y);
+              existing.netWorth = csvMoney(point.y);
             } else if (series.id === "Assets") {
-              existing.assets = toNumber(point.y);
+              existing.assets = csvMoney(point.y);
             } else if (series.id === "Liabilities") {
-              existing.liabilities = toNumber(point.y);
+              existing.liabilities = csvMoney(point.y);
             }
             rowsByDate.set(point.x, existing);
           }
@@ -491,79 +396,7 @@ export class ReportsExportService {
         };
       }
       case "transactions": {
-        const rows: Record<string, unknown>[] = [];
-        let cursor: string | undefined;
-        const maxRows = Math.min(
-          input.limit ?? MAX_EXPORT_ROWS,
-          MAX_EXPORT_ROWS,
-        );
-        const includePending = input.includePending ?? false;
-        const includeTransfers = input.includeTransfers ?? false;
-
-        while (rows.length < maxRows) {
-          const remaining = maxRows - rows.length;
-          const limit = Math.min(TRANSACTION_EXPORT_BATCH, remaining);
-          const result = await transactionReportRepository.getTransactions(
-            householdId,
-            {
-              from,
-              to,
-              categoryId: input.categoryId,
-              categoryGroupId: input.categoryGroupId,
-              merchantId: input.merchantId,
-              accountId: input.accountId,
-              tagId: input.tagId,
-              type: input.type,
-              search: input.search,
-              sort: input.sort,
-              limit,
-              cursor,
-              scope,
-              includePending,
-              includeTransfers,
-              userId,
-            },
-          );
-
-          for (const item of result.items) {
-            rows.push({
-              date: item.date,
-              name: item.name,
-              merchant: item.merchant?.name ?? "",
-              category: item.category?.name ?? "",
-              account: item.account?.name ?? "",
-              type: item.type,
-              amount: toNumber(item.amount),
-              currency: item.amount.currency,
-              amountBase: toNumber(item.amountBase),
-              baseCurrency: item.baseCurrency,
-              isPending: item.isPending,
-              notes: item.notes ?? "",
-            });
-          }
-
-          cursor = result.page.nextCursor ?? undefined;
-          if (!cursor || result.items.length === 0) break;
-        }
-
-        return {
-          rows,
-          columns: [
-            "date",
-            "name",
-            "merchant",
-            "category",
-            "account",
-            "type",
-            "amount",
-            "currency",
-            "amountBase",
-            "baseCurrency",
-            "isPending",
-            "notes",
-          ],
-          fileName: `transactions_${from}_${to}.csv`,
-        };
+        return buildTransactionCsvData(householdId, userId, scope, input, tx);
       }
       default:
         throw new Error("Unsupported export type");

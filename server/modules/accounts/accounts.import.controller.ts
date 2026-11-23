@@ -8,6 +8,7 @@
 
 import { Request, Response } from "express";
 import { accountService } from "./accounts.service";
+import { businessAuditService } from "../../services/BusinessAuditService";
 import { logger } from "../../utils/logger";
 import { success } from "../../core/http";
 import { ValidationError } from "../../core/errors";
@@ -88,11 +89,13 @@ export async function importBalanceHistory(
     throw new ValidationError("Invalid import data", parseResult.error.errors);
   }
 
+  // The snapshots and their audit row commit in one transaction (NEW-32).
   const result = await accountService.importBalanceHistory(
     id,
     parseResult.data.data,
     householdId,
-    userId
+    userId,
+    businessAuditService.getIpAddress(req),
   );
 
   logger.request(req, "Imported balance history", {
@@ -157,7 +160,8 @@ export async function importTransactions(
     parseResult.data.transactions,
     parseResult.data.adjustBalance,
     householdId,
-    userId
+    userId,
+    parseResult.data.possibleDuplicateDecisions,
   );
 
   logger.request(req, "Imported transactions", {

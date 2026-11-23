@@ -87,18 +87,26 @@ export type TrendDirection = "up" | "down" | "steady";
  * Net worth data section of weekly recap.
  */
 export interface NetWorthData {
+  /** Snapshot coverage; legacy numeric fixtures may omit this field. */
+  status?: "available" | "partial" | "unavailable";
+  currency?: string | null;
+  asOf?: string | null;
+  previousAsOf?: string | null;
+  currentMoney?: MoneyDto | null;
+  previousMoney?: MoneyDto | null;
+  changeMoney?: MoneyDto | null;
   /** Current net worth value */
-  current: number;
+  current: number | null;
   /** Previous week's net worth value */
-  previous: number;
+  previous: number | null;
   /** Net worth change from previous week */
-  change: number;
+  change: number | null;
   /** Percentage change from previous week */
-  changePercent: number;
+  changePercent: number | null;
   /** Daily net worth series data */
-  series: Array<{ date: string; value: number }>;
+  series: Array<{ date: string; value: number; currency?: string }>;
   /** Trend direction indicator */
-  trend: TrendDirection;
+  trend: TrendDirection | null;
 }
 
 // ============================================================================
@@ -153,6 +161,17 @@ export interface WeeklyRecapData {
   spending: SpendingData;
   /** Recurring transactions data for the week */
   recurring: RecurringData;
+  /**
+   * Which sections the recipient chose to receive (OPS-007). The server always
+   * sends it; a reader treats an absent value as every section included.
+   */
+  sections?: RecapSections;
+}
+
+/** Saved recap content toggles, as they govern one generated recap. */
+export interface RecapSections {
+  goals: boolean;
+  recurring: boolean;
 }
 
 /**

@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { downloadProtectedResource, reportProtectedMediaError, useProtectedObjectUrl } from "@/lib/protected-media";
 import {
   Dialog,
   DialogContent,
@@ -48,6 +49,8 @@ export function AttachmentPreviewModal({
   const currentAttachment = attachments[currentIndex];
   const isImage = currentAttachment?.mimeType.startsWith("image/");
   const isPdf = currentAttachment?.mimeType === "application/pdf";
+  const source = open && currentAttachment ? `/api/transactions/${transactionId}/attachments/${currentAttachment.id}/download` : null;
+  const { url: previewUrl, error: previewError } = useProtectedObjectUrl(source);
 
   // Navigation handlers
   const goToNext = () => {
@@ -98,17 +101,10 @@ export function AttachmentPreviewModal({
   // Download handler
   const handleDownload = () => {
     const url = `/api/transactions/${transactionId}/attachments/${currentAttachment.id}/download`;
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = currentAttachment.originalFilename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    void downloadProtectedResource(url, currentAttachment.originalFilename).catch(reportProtectedMediaError);
   };
 
   if (!currentAttachment) return null;
-
-  const previewUrl = `/api/transactions/${transactionId}/attachments/${currentAttachment.id}/download`;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -173,6 +169,7 @@ export function AttachmentPreviewModal({
 
         {/* Content area */}
         <div className="flex-1 overflow-hidden bg-muted/30 flex items-center justify-center relative">
+          {previewError && <p role="alert">{previewError.message}</p>}
           {isImage && (
             <>
               {imageLoading && (
@@ -180,13 +177,13 @@ export function AttachmentPreviewModal({
                   <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
                 </div>
               )}
-              <img
+              {previewUrl && <img
                 src={previewUrl}
                 alt={currentAttachment.originalFilename}
                 className="max-w-full max-h-full object-contain"
                 onLoad={() => setImageLoading(false)}
                 onError={() => setImageLoading(false)}
-              />
+              />}
             </>
           )}
 
@@ -202,14 +199,14 @@ export function AttachmentPreviewModal({
                     Download to view
                   </Button>
                 </div>
-              ) : (
+              ) : previewUrl ? (
                 <iframe
                   src={`${previewUrl}#view=FitH`}
                   className="w-full h-full border-0"
                   title={currentAttachment.originalFilename}
                   onError={() => setPdfError(true)}
                 />
-              )}
+              ) : <p role="status">Loading attachment…</p>}
             </>
           )}
         </div>

@@ -24,7 +24,8 @@ const useInfiniteTransactionsMock = vi.fn((..._args: unknown[]) => ({
   error: null,
 }));
 
-vi.mock("@/hooks/useTransactions", () => ({
+vi.mock("@/hooks/useTransactions", async importOriginal => ({
+  useTransactionSummary: (await importOriginal<typeof import("@/hooks/useTransactions")>()).useTransactionSummary,
   useInfiniteTransactions: (...args: unknown[]) => useInfiniteTransactionsMock(...args),
   useUpdateTransaction: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
   useReviewTransaction: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),

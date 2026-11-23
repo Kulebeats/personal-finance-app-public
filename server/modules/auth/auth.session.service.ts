@@ -15,6 +15,7 @@ import { logger } from "../../utils/logger";
 import { parseDeviceInfo, isKnownDeviceSession } from "./auth.device";
 import { authSecurityMonitor } from "./auth.security.monitor";
 import type { User } from "@shared/schema";
+import { assertCurrentCredential, registerSessionIdentity, revokeLoginSession } from "../../services/session-identity";
 
 /**
  * Auth Session Service
@@ -35,10 +36,12 @@ export const authSessionService = {
     userAgent: string,
   ): Promise<void> {
     const deviceInfo = parseDeviceInfo(userAgent);
+    await assertCurrentCredential(user);
 
     // Regenerate session to prevent session fixation
     await this.regenerateSession(req);
     req.session.userId = user.id;
+    req.session.securityGeneration = user.securityGeneration ?? 0;
 
     // Apply remember-me session TTL
     req.session.cookie.maxAge = rememberMe
@@ -75,7 +78,7 @@ export const authSessionService = {
         });
       }
 
-      await userRepository.upsertSession({
+      await registerSessionIdentity(user, {
         userId: user.id,
         sessionToken: req.sessionID,
         deviceName: deviceInfo.deviceName,
@@ -104,6 +107,8 @@ export const authSessionService = {
       logger.warn("Failed to create session record", {
         userId: user.id?.substring(0, 8) + "...",
       });
+      delete req.session.userId;
+      throw sessionError;
     }
 
     // Audit log
@@ -120,8 +125,12 @@ export const authSessionService = {
    * Regenerate session (prevent session fixation)
    */
   async regenerateSession(req: Request): Promise<void> {
+    const oldSession = { ...req.session };
+    const oldUserId = oldSession.userId || oldSession.mfaPendingUserId;
+    // The base store destroys the row but cannot fence a delayed set. Retire
+    // the exact old identity before rotating; other device generations stay put.
+    if (oldUserId) await revokeLoginSession(oldUserId, req.sessionID);
     return new Promise((resolve, reject) => {
-      const oldSession = { ...req.session };
       req.session.regenerate((err) => {
         if (err) {
           reject(err);
@@ -140,7 +149,10 @@ export const authSessionService = {
    * Logout user
    */
   async logout(req: Request): Promise<void> {
-    const userId = req.session.userId;
+    const userId = req.session.userId || req.session.mfaPendingUserId;
+    if (userId) {
+      await revokeLoginSession(userId, req.sessionID);
+    }
 
     return new Promise((resolve, reject) => {
       req.session.destroy((err) => {

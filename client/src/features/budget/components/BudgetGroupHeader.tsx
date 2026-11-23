@@ -6,8 +6,9 @@
 
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { cn, parseMoney } from "@/lib/utils";
-import { useFormatters } from "@/contexts/SettingsContext";
+import { useBudgetMoneyDisplay } from "../budgetMoneyDisplay";
 import type { BudgetGroup } from "../types";
+import { groupActual, groupBudgetLimit, remainingBudget } from "../budgetLimits";
 
 interface BudgetGroupHeaderProps {
   group: BudgetGroup;
@@ -24,19 +25,16 @@ export function BudgetGroupHeader({
   onUpdateBudget,
   onCommitBudget,
 }: BudgetGroupHeaderProps) {
-  const { formatCurrency } = useFormatters();
+  const { formatCurrency, formatLimit } = useBudgetMoneyDisplay(group.currency);
+  const editCurrency = group.budgetEditCurrency === undefined ? group.currency : group.budgetEditCurrency;
+  const { prefix } = useBudgetMoneyDisplay(editCurrency);
 
-  const totalBudget =
-    (group.isFlexible || group.isGroupBudget) && group.budget !== undefined
-      ? group.budget
-      : group.items.reduce((acc, item) => acc + item.budget, 0);
-
-  const totalActual = group.items.reduce((acc, item) => acc + item.actual, 0);
-
-  const totalRemaining =
-    group.isFlexible || group.isGroupBudget
-      ? totalBudget - totalActual
-      : group.items.reduce((acc, item) => acc + item.remaining, 0);
+  const totalBudget = groupBudgetLimit(group);
+  const totalActual = groupActual(group);
+  const incomplete = group.actualIncomplete || group.currency === null || group.hasWithheldLimit;
+  const totalRemaining = remainingBudget(totalBudget, incomplete ? null : totalActual);
+  const editBudget = editCurrency !== null && (group.isFlexible || (group.isGroupBudget && !group.hasWithheldLimit))
+    ? onUpdateBudget : undefined;
 
   return (
     <div className="contents">
@@ -47,7 +45,7 @@ export function BudgetGroupHeader({
           tabIndex={0}
           aria-expanded={group.expanded}
           aria-label={`${group.name} budget group, ${group.expanded ? 'expanded' : 'collapsed'}`}
-          className="col-span-5 flex items-center gap-2 font-bold text-foreground cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded"
+          className="col-span-5 flex items-center gap-2 font-bold text-foreground cursor-pointer select-none max-md:min-h-11 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded"
           onClick={onToggle}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
@@ -76,57 +74,63 @@ export function BudgetGroupHeader({
 
         {/* Budget Total */}
         <div className="col-span-3 text-right pr-4 font-bold text-sm text-foreground">
-          {(group.isFlexible || group.isGroupBudget) && onUpdateBudget ? (
+          {editBudget ? (
             <div
               className="relative inline-block w-28"
               onClick={(e) => e.stopPropagation()}
             >
-              <span className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground/50 text-xs pointer-events-none">
-                K
-              </span>
-              <input
-                type="text"
-                value={group.budget || 0}
-                onChange={(e) => {
-                  const val = parseMoney(e.target.value) || 0;
-                  onUpdateBudget(val);
-                }}
-                onBlur={(event) => {
-                  if (!onCommitBudget) return;
-                  const val = parseMoney(event.currentTarget.value);
-                  if (Number.isFinite(val)) {
-                    onCommitBudget(val);
-                  }
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter" || !onCommitBudget) return;
-                  const val = parseMoney(event.currentTarget.value);
-                  if (Number.isFinite(val)) {
-                    onCommitBudget(val);
-                  }
-                }}
-                aria-label={`Budget amount for ${group.name} group`}
-                className="w-full text-right py-1 px-2 rounded-md border border-border/60 bg-background dark:bg-card focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm font-bold transition-all shadow-sm hover:border-border"
-              />
+              {group.hasWithheldLimit && <span className="block text-xs">{formatLimit(totalBudget, true)}</span>}
+              <div className="relative">
+                <span className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground/50 text-xs pointer-events-none">
+                  {prefix}
+                </span>
+                <input
+                  type="text"
+                  disabled={group.budgetEditPending}
+                  value={group.budgetDraft ?? (group.hasWithheldLimit ? "" : group.budget ?? "")}
+                  placeholder={group.hasWithheldLimit ? "Set limit" : "Unbudgeted"}
+                  onChange={(e) => {
+                    const val = parseMoney(e.target.value) || 0;
+                    editBudget(val);
+                  }}
+                  onBlur={(event) => {
+                    if (!onCommitBudget || event.currentTarget.value.trim() === "") return;
+                    const val = parseMoney(event.currentTarget.value);
+                    if (Number.isFinite(val)) {
+                      onCommitBudget(val);
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" || !onCommitBudget || event.currentTarget.value.trim() === "") return;
+                    const val = parseMoney(event.currentTarget.value);
+                    if (Number.isFinite(val)) {
+                      onCommitBudget(val);
+                    }
+                  }}
+                  aria-label={`Budget amount for ${group.name} group`}
+                  className="w-full text-right py-1 px-2 max-md:min-h-11 rounded-md border border-border/60 bg-background dark:bg-card focus:border-primary focus:ring-1 focus:ring-primary outline-none text-sm font-bold transition-all shadow-sm hover:border-border disabled:opacity-60"
+                />
+              </div>
+              {group.budgetEditPending && <span role="status" className="block text-xs text-muted-foreground">Saving flexible budget…</span>}
             </div>
           ) : (
-            formatCurrency(totalBudget)
+            formatLimit(totalBudget, group.hasWithheldLimit)
           )}
         </div>
 
         {/* Actual Total */}
         <div className="col-span-2 text-right pr-8 font-bold text-sm text-foreground">
-          {formatCurrency(totalActual)}
+          {group.actualIncomplete && group.currency !== null ? `At least ${formatCurrency(totalActual)}` : formatCurrency(totalActual)}
         </div>
 
         {/* Remaining Total */}
         <div className="col-span-2 text-right font-bold text-sm">
           <span
             className={cn(
-              totalRemaining >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"
+              totalRemaining === null ? "text-muted-foreground" : totalRemaining >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"
             )}
           >
-            {formatCurrency(totalRemaining)}
+            {incomplete ? "Incomplete" : totalRemaining === null ? "Unbudgeted" : formatCurrency(totalRemaining)}
           </span>
         </div>
       </div>

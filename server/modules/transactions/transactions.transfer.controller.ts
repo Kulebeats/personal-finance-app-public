@@ -48,23 +48,8 @@ export async function createTransfer(
       amount,
       householdId,
       userId,
-      options,
+      { ...options, audit: { ipAddress: businessAuditService.getIpAddress(req) } },
     );
-
-  await businessAuditService.logCreate({
-    userId,
-    householdId,
-    entityId: outflow.id,
-    entityType: "transaction",
-    newValue: {
-      fromAccountId,
-      toAccountId,
-      amount,
-      inflowTransactionId: inflow.id,
-    },
-    ipAddress: businessAuditService.getIpAddress(req),
-    metadata: { isTransfer: true },
-  });
 
   logger.request(req, "Created transfer", { isDuplicate });
 
@@ -97,40 +82,13 @@ export async function updateTransfer(
     );
   }
 
-  const beforeTransfer = await transactionService.getTransferPair(
-    id,
-    householdId,
-    userId,
-  );
-  const beforeOutflow = beforeTransfer.outflow;
-  const beforeToAccountId =
-    beforeOutflow.transferAccountId ?? beforeTransfer.inflow.accountId;
-
   const updated = await transactionService.updateTransfer(
     id,
     parseResult.data,
     householdId,
     userId,
+    { ipAddress: businessAuditService.getIpAddress(req) },
   );
-
-  await businessAuditService.logUpdate({
-    userId,
-    householdId,
-    entityId: id,
-    entityType: "transaction",
-    oldValue: {
-      fromAccountId: beforeOutflow.accountId,
-      toAccountId: beforeToAccountId,
-      amount: beforeOutflow.amount,
-      currency: beforeOutflow.currency,
-      date: beforeOutflow.date,
-      name: beforeOutflow.name,
-      notes: beforeOutflow.notes,
-    },
-    newValue: parseResult.data,
-    ipAddress: businessAuditService.getIpAddress(req),
-    metadata: { transfer: true },
-  });
 
   logger.request(req, "Updated transfer");
 

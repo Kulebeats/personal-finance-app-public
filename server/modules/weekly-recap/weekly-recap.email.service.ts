@@ -7,19 +7,47 @@
  */
 
 import { sendEmail } from "../../services/emailService";
-import { weeklyRecapService } from "./weekly-recap.service";
+import { and, eq } from "drizzle-orm";
+import { householdMembers, households, userNotificationPreferences, users } from "@shared/schema";
+import { can } from "../../core/authz/capabilities";
+import { Money } from "../../core/money";
+import { requireRecapRecipient } from "./weekly-recap.service";
 import { logger } from "../../utils/logger";
-import type { WeeklyRecapData } from "@shared/weekly-recap";
 import { db } from "../../db";
 import { businessAuditService } from "../../services/BusinessAuditService";
+import { effectiveRecapEmail } from "../../repositories/UserNotificationPreferences";
+import { readDigestRelease, type DigestData } from "./digest-release";
+import { getWeeklyRecapSettings } from "../../repositories/UserDisplayPreferences";
+import { previousCompleteWeek, readHouseholdToday, upcomingBillsWindow, type RecapWeek } from "./recap-week";
+import { deliverWeeklyRecapOnce, isRecapDay } from "./recap-schedule";
+import { escapeHtml } from "../../services/notification/escape";
 
 /** Outcome of attempting to send one weekly-recap digest. */
-export type RecapSendOutcome = "sent" | "skipped_no_consent" | "failed";
+export type RecapSendOutcome = "sent" | "skipped_no_consent" | "skipped_preference" | "failed";
+
+// The shared helper also escapes quotes, which the previous inline version did not.
+const htmlText = escapeHtml;
+
+function billAmount(bill: DigestData["bills"][number]): string {
+  const raw = htmlText(bill.amount);
+  const amount = bill.currency ? `${bill.currency} ${raw}` : `${raw} (currency unrecorded)`;
+  if (bill.amountType === "variable") return `Estimated ${amount}`;
+  return bill.amountType === "fixed" ? amount : `${amount} (amount type unrecorded)`;
+}
+
+function billTotal(bills: DigestData["bills"]): string {
+  const currency = bills[0]?.currency;
+  if (!currency || bills.some(bill => bill.currency !== currency)) return "Total unavailable because bill currency was not recorded";
+  if (bills.some(bill => bill.amountType !== "fixed" && bill.amountType !== "variable")) return "Total unavailable because bill amount type was not recorded";
+  const total = bills.reduce((sum, bill) => sum.add(new Money(bill.amount, currency)), Money.zero(currency));
+  const label = bills.some(bill => bill.amountType === "variable") ? "Estimated total: " : "";
+  return `${label}${currency} ${total.toString()}`;
+}
 
 /**
  * Generate HTML email template for weekly recap
  */
-function generateEmailTemplate(data: WeeklyRecapData, currency: string): string {
+function generateEmailTemplate(data: DigestData, currency: string): string {
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat("en-US", {
       style: "currency",
@@ -32,8 +60,15 @@ function generateEmailTemplate(data: WeeklyRecapData, currency: string): string 
     return `${sign}${value.toFixed(1)}%`;
   };
 
-  const netWorthTrend = data.netWorth.change >= 0 ? "↑" : "↓";
-  const netWorthColor = data.netWorth.change >= 0 ? "#10b981" : "#f43f5e";
+  const worthCurrency = data.netWorth.currency || currency;
+  const formatWorth = (amount: number | string, denomination = worthCurrency) => new Intl.NumberFormat("en-US", {
+    style: "currency", currency: denomination, currencyDisplay: "code",
+  }).format(typeof amount === "string" ? Number(amount) : amount);
+  const previousWorth = data.netWorth.previousMoney
+    ? formatWorth(data.netWorth.previousMoney.amount, data.netWorth.previousMoney.currency)
+    : data.netWorth.previous === null ? null : formatWorth(data.netWorth.previous);
+  const netWorthTrend = (data.netWorth.change ?? 0) >= 0 ? "↑" : "↓";
+  const netWorthColor = (data.netWorth.change ?? 0) >= 0 ? "#10b981" : "#f43f5e";
   const spendingTrend = data.spending.changePercent && data.spending.changePercent > 0 ? "↑" : "↓";
   const spendingColor = data.spending.changePercent && data.spending.changePercent > 0 ? "#f43f5e" : "#10b981";
 
@@ -166,11 +201,15 @@ function generateEmailTemplate(data: WeeklyRecapData, currency: string): string 
 
     <div class="metric-card">
       <div class="metric-title">Net Worth</div>
-      <div class="metric-value">${formatCurrency(data.netWorth.current)}</div>
-      <div class="metric-change" style="color: ${netWorthColor}">
-        ${netWorthTrend} ${formatCurrency(Math.abs(data.netWorth.change))}
-        (${formatPercent(data.netWorth.changePercent)})
-      </div>
+      ${data.netWorth.current === null
+        ? '<p>Historical net worth is unavailable</p>'
+        : `<div class="metric-value">${formatWorth(data.netWorth.currentMoney?.amount ?? data.netWorth.current, data.netWorth.currentMoney?.currency)}</div>
+           ${data.netWorth.asOf ? `<p>Snapshot: ${data.netWorth.asOf} (${worthCurrency})</p>` : ''}
+           ${data.netWorth.change === null ? '' :
+             `<div class="metric-change" style="color: ${netWorthColor}">${netWorthTrend} ${formatWorth(Math.abs(data.netWorth.change))}
+              ${data.netWorth.changePercent === null ? '' : `(${formatPercent(data.netWorth.changePercent)})`}</div>`}`}
+      ${data.netWorth.change === null ? `<p>${previousWorth === null ? 'Previous period unavailable' : 'Comparison unavailable'}</p>` : ''}
+      ${data.netWorth.change === null && previousWorth !== null ? `<p>Previous snapshot ${data.netWorth.previousAsOf || ''}: ${previousWorth}</p>` : ''}
     </div>
 
     <div class="metric-card">
@@ -178,7 +217,7 @@ function generateEmailTemplate(data: WeeklyRecapData, currency: string): string 
       <div class="metric-value">${formatCurrency(data.spending.total)}</div>
       ${data.spending.changePercent ? `
         <div class="metric-change" style="color: ${spendingColor}">
-          ${spendingTrend} ${formatPercent(Math.abs(data.spending.changePercent))} vs last week
+          ${spendingTrend} ${formatPercent(data.spending.changePercent)} vs last week
         </div>
       ` : ''}
 
@@ -186,7 +225,7 @@ function generateEmailTemplate(data: WeeklyRecapData, currency: string): string 
         <ul class="category-list">
           ${data.spending.topCategories.slice(0, 3).map(cat => `
             <li class="category-item">
-              <span class="category-name">${cat.name}</span>
+              <span class="category-name">${htmlText(cat.name)}</span>
               <span class="category-amount">${formatCurrency(cat.amount)}</span>
             </li>
           `).join('')}
@@ -194,16 +233,16 @@ function generateEmailTemplate(data: WeeklyRecapData, currency: string): string 
       ` : '<p style="margin-top: 12px; color: #6b7280;">No spending this week</p>'}
     </div>
 
-    ${data.recurring.upcoming.length > 0 ? `
+    ${data.bills.length > 0 ? `
       <div class="metric-card">
-        <div class="metric-title">Upcoming Bills (${data.recurring.count})</div>
-        <div class="metric-value">${formatCurrency(data.recurring.totalAmount)}</div>
+        <div class="metric-title">Upcoming Bills (${data.bills.length})</div>
+        <div class="metric-value">${billTotal(data.bills)}</div>
         <ul class="bill-list">
-          ${data.recurring.upcoming.slice(0, 3).map(bill => `
+          ${data.bills.slice(0, 3).map(bill => `
             <li class="bill-item">
-              <div class="bill-name">${bill.name}</div>
+              <div class="bill-name">${htmlText(bill.name)}</div>
               <div class="bill-details">
-                ${formatCurrency(bill.amount)} • Due ${bill.dueDate}
+                ${billAmount(bill)} • Due ${bill.nextDueDate}
               </div>
             </li>
           `).join('')}
@@ -232,53 +271,54 @@ function generateEmailTemplate(data: WeeklyRecapData, currency: string): string 
   `;
 }
 
+async function readDeliveryGrant(userId: string, householdId: string, email: string) {
+  const grants = await db.select({
+    role: householdMembers.role, currency: households.currency, consent: households.aiConsentGiven,
+    email: users.email, verified: users.emailVerified, emailEnabled: userNotificationPreferences.emailEnabled,
+  }).from(householdMembers)
+    .innerJoin(households, eq(households.id, householdMembers.householdId))
+    .innerJoin(users, eq(users.id, householdMembers.userId))
+    .leftJoin(userNotificationPreferences, and(
+      eq(userNotificationPreferences.userId, users.id),
+      eq(userNotificationPreferences.notificationType, "weekly_recap"),
+    ))
+    .where(and(eq(householdMembers.householdId, householdId), eq(householdMembers.userId, userId)));
+  const recipient = grants[0];
+  if (!recipient || !can(recipient.role, "financial.read") || !recipient.verified || recipient.email !== email) return { outcome: "failed" } as const;
+  if (!recipient.consent) return { outcome: "skipped_no_consent" } as const;
+  if (!effectiveRecapEmail(grants)) return { outcome: "skipped_preference" } as const;
+  return { outcome: "ready", role: recipient.role, currency: recipient.currency } as const;
+}
+
 /**
- * Send weekly recap email to a user
+ * Send weekly recap email to a user. Spending covers weekStart..weekEnd; the
+ * bills are those due in `bills`, by default the same dates. The scheduled
+ * digest passes the household's next seven dates (A-26).
  */
 export async function sendWeeklyRecapEmail(
   userId: string,
   householdId: string,
   email: string,
   weekStart: string,
-  weekEnd: string
+  weekEnd: string,
+  bills?: RecapWeek,
 ): Promise<RecapSendOutcome> {
   try {
     // SCP-319: DPA consent gate. A weekly recap is a financial-PII digest, so it
     // must NEVER be emailed without the household's explicit consent
     // (households.aiConsentGiven, which covers AI + recap egress). Consent
     // defaults to false, so an un-consented household is silently excluded.
-    const household = await db.query.households.findFirst({
-      where: (h, { eq }) => eq(h.id, householdId),
-      columns: { aiConsentGiven: true },
-    });
+    const grant = await readDeliveryGrant(userId, householdId, email);
+    if (grant.outcome !== "ready") return grant.outcome;
+    if (!grant.currency) throw new Error("Missing household currency for recap");
+    const actor = await requireRecapRecipient(householdId, userId);
+    // OPS-007: excluded upcoming bills are never read for the digest.
+    const { includeRecurring } = await getWeeklyRecapSettings(userId);
+    const billsWindow = bills ?? { from: weekStart, to: weekEnd };
+    const release = await readDigestRelease(actor, email, weekStart, weekEnd, grant.currency, { includeRecurring, bills: billsWindow });
+    if (release.outcome !== "ready") return release.outcome;
+    const html = generateEmailTemplate(release.data, grant.currency);
 
-    if (!household?.aiConsentGiven) {
-      logger.info("Weekly recap skipped — DPA consent not given", {
-        userId: userId.substring(0, 8) + "...",
-        householdId,
-      });
-      return "skipped_no_consent";
-    }
-
-    // Get user settings for currency
-    const settings = await db.query.userDisplaySettings.findFirst({
-      where: (settings, { eq }) => eq(settings.userId, userId),
-    });
-
-    const currency = settings?.currency || "ZMW";
-
-    // Generate recap data
-    const recapData = await weeklyRecapService.getRecap(
-      householdId,
-      userId,
-      weekStart,
-      weekEnd
-    );
-
-    // Generate email HTML
-    const html = generateEmailTemplate(recapData, currency);
-
-    // Send email
     const sent = await sendEmail({
       to: email,
       subject: `📊 Your Weekly Financial Recap (${weekStart} to ${weekEnd})`,
@@ -321,45 +361,23 @@ export async function sendWeeklyRecapEmail(
  * Process weekly recap emails for all users who have it enabled
  */
 export async function processWeeklyRecapEmails(
-  dayOfWeek: number
+  now: Date = new Date(),
 ): Promise<{ sent: number; failed: number; skipped: number }> {
   let sent = 0;
   let failed = 0;
   let skipped = 0;
 
   try {
-    // Calculate current week dates based on the specified day of week
-    const now = new Date();
-    const currentDay = now.getDay();
-
-    // Calculate offset to get to the start of the week (assuming week starts on specified day)
-    let offset = currentDay - dayOfWeek;
-    if (offset < 0) offset += 7;
-
-    const weekStart = new Date(now);
-    weekStart.setDate(now.getDate() - offset - 7); // Previous week
-    weekStart.setHours(0, 0, 0, 0);
-
-    const weekEnd = new Date(weekStart);
-    weekEnd.setDate(weekStart.getDate() + 6);
-
-    const weekStartStr = weekStart.toISOString().split("T")[0];
-    const weekEndStr = weekEnd.toISOString().split("T")[0];
-
-    logger.info("Weekly recap email job triggered", {
-      dayOfWeek,
-      weekStart: weekStartStr,
-      weekEnd: weekEndStr,
-    });
+    // OPS-007: a user is sent on their chosen day of their household's
+    // calendar; the digest covers the complete week that ended the day before.
+    logger.info("Weekly recap email job triggered");
 
     // Query notification preferences to find users with weekly recap email enabled
-    const enabledSettings = await db.query.userNotificationPreferences.findMany({
-      where: (prefs, { and, eq }) =>
-        and(
-          eq(prefs.notificationType, "weekly_recap"),
-          eq(prefs.emailEnabled, true)
-        ),
-    });
+    const enabledSettings = await db.selectDistinct({ userId: userNotificationPreferences.userId })
+      .from(userNotificationPreferences).where(and(
+        eq(userNotificationPreferences.notificationType, "weekly_recap"),
+        eq(userNotificationPreferences.emailEnabled, true),
+      ));
 
     logger.info("Found users with weekly recap email enabled", {
       count: enabledSettings.length,
@@ -402,21 +420,20 @@ export async function processWeeklyRecapEmails(
           continue;
         }
 
-        const outcome = await sendWeeklyRecapEmail(
-          user.id,
-          householdMember.householdId,
-          user.email,
-          weekStartStr,
-          weekEndStr
-        );
+        const householdId = householdMember.householdId;
+        const today = await readHouseholdToday(householdId, now);
+        const { dayOfWeek } = await getWeeklyRecapSettings(user.id);
+        if (!isRecapDay(today, dayOfWeek)) continue;
+        // A-26: spending is the week that ended; bills are the next seven household dates.
+        const week = previousCompleteWeek(today, dayOfWeek);
+        const address = user.email;
+        const outcome = await deliverWeeklyRecapOnce(user.id, today, () => sendWeeklyRecapEmail(
+          user.id, householdId, address, week.from, week.to, upcomingBillsWindow(today),
+        ));
 
-        if (outcome === "sent") {
-          sent++;
-        } else if (outcome === "skipped_no_consent") {
-          skipped++;
-        } else {
-          failed++;
-        }
+        if (outcome === "sent") sent++;
+        else if (outcome === "skipped") skipped++;
+        else if (outcome === "failed") failed++;
       } catch (error) {
         logger.error("Failed to send email to user", { userId: pref.userId ?? "unknown" }, error as Error);
         failed++;

@@ -8,6 +8,7 @@
  */
 
 import React from "react";
+import { useReportPreferenceAction } from "@/hooks/use-report-preference-action";
 import {
   Dialog,
   DialogContent,
@@ -31,6 +32,7 @@ import {
 import {
   useReportWidgetPreferences,
   useWidgetToggle,
+  useResetReportWidgetPreferences,
 } from "@/hooks/use-report-widget-preferences";
 import { cn } from "@/lib/utils";
 
@@ -104,22 +106,36 @@ export function WidgetGalleryModal({
 }) {
   const { data: preferences } = useReportWidgetPreferences();
   const { toggleWidget } = useWidgetToggle();
+  const { mutateAsync: resetPreferences } = useResetReportWidgetPreferences();
   const [internalOpen, setInternalOpen] = React.useState(false);
 
   const isControlled = controlledOpen !== undefined;
   const open = isControlled ? controlledOpen : internalOpen;
   const setOpen = isControlled ? controlledOnOpenChange! : setInternalOpen;
+  const { run, pending, error } = useReportPreferenceAction(open);
+  const lastAction = React.useRef<() => Promise<unknown>>(() => Promise.resolve());
+  const [resetting, setResetting] = React.useState(false);
+  const changeWidget = (section: "coreWidgets" | "optionalWidgets", id: string, enabled: boolean) => {
+    setResetting(false);
+    lastAction.current = () => toggleWidget(section, id, enabled);
+    void run(lastAction.current);
+  };
+  const reset = () => {
+    setResetting(true);
+    lastAction.current = resetPreferences;
+    void run(lastAction.current, () => setOpen(false));
+  };
 
   if (!preferences) return null;
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={next => { if (!pending) setOpen(next); }}>
       {children && <DialogTrigger asChild>{children}</DialogTrigger>}
       <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>Customize Dashboard</DialogTitle>
           <DialogDescription>
-            Choose which widgets to display on your annual report.
+            Choose which widgets to display on your annual report. Reset restores the default layout. Custom charts are retained.
           </DialogDescription>
         </DialogHeader>
 
@@ -163,9 +179,11 @@ export function WidgetGalleryModal({
                           </div>
                         </div>
                         <Switch
+                          aria-label={`Show ${info.title}`}
+                          disabled={pending}
                           checked={config.enabled}
                           onCheckedChange={(checked) =>
-                            toggleWidget("coreWidgets", id, checked)
+                            changeWidget("coreWidgets", id, checked)
                           }
                         />
                       </div>
@@ -212,9 +230,11 @@ export function WidgetGalleryModal({
                           </div>
                         </div>
                         <Switch
+                          aria-label={`Show ${info.title}`}
+                          disabled={pending}
                           checked={config.enabled}
                           onCheckedChange={(checked) =>
-                            toggleWidget("optionalWidgets", id, checked)
+                            changeWidget("optionalWidgets", id, checked)
                           }
                         />
                       </div>
@@ -231,13 +251,15 @@ export function WidgetGalleryModal({
             variant="ghost"
             size="sm"
             className="text-muted-foreground"
-            disabled
+            disabled={pending}
+            onClick={reset}
           >
             <RefreshCw className="h-3 w-3 mr-2" />
-            Reset Defaults
+            {resetting && pending ? "Resetting…" : resetting && error ? "Retry Reset" : "Reset Defaults"}
           </Button>
-          <Button onClick={() => setOpen(false)}>Done</Button>
+          <Button onClick={() => setOpen(false)} disabled={pending}>Done</Button>
         </div>
+        {error && <div><p role="alert">{error}</p>{!resetting && <Button onClick={() => { void run(lastAction.current); }} disabled={pending}>Retry Change</Button>}</div>}
       </DialogContent>
     </Dialog>
   );

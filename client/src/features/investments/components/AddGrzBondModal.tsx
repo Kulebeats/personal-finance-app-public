@@ -1,3 +1,4 @@
+import Decimal from "decimal.js";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -5,6 +6,7 @@ import * as z from "zod";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -28,9 +30,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useCreateGrzBond } from "@/hooks/useGrzSecurities";
-import { addYears, format } from "date-fns";
+import { useAccounts } from "@/hooks/useAccounts";
 import {
-  RECENT_AUCTION_RATES,
   grzBondFormSchema,
 } from "./AddGrzBondModalData";
 import { AddGrzBondModalFooter } from "./AddGrzBondModalFooter";
@@ -55,32 +56,31 @@ export function AddGrzBondModal({
   const setOpen = isControlled ? setControlledOpen : setInternalOpen;
 
   const createBond = useCreateGrzBond();
+  const { data: accounts = [] } = useAccounts(undefined, open);
+  const custodyAccounts = accounts.filter(account => account.currency === "ZMW" && account.isAsset && !account.isArchived);
 
   const form = useForm<z.infer<typeof grzBondFormSchema>>({
     resolver: zodResolver(grzBondFormSchema),
     defaultValues: {
       bondName: "",
       isin: "",
+      accountId: null,
       tenorYears: 5,
       faceValue: 0,
       purchasePrice: 0,
       purchaseDate: new Date().toISOString().split("T")[0],
-      couponRate: 0,
-      maturityDate: addYears(new Date(), 5).toISOString().split("T")[0],
+      firstCouponDate: "",
+      maturityDate: "",
     },
   });
 
-  // Auto-calculate maturity date when tenor/purchase date changes
-  const watchTenor = form.watch("tenorYears");
-  const watchPurchaseDate = form.watch("purchaseDate");
-
-  // Effect to update maturity? (Might be complex with react-hook-form, user can just edit it)
-
   async function onSubmit(values: z.infer<typeof grzBondFormSchema>) {
     try {
+      const { accountId, ...acquisition } = values;
       await createBond.mutateAsync({
-        ...values,
-        couponRate: (values.couponRate / 100).toString(), // Convert % to decimal
+        ...acquisition,
+        ...(accountId ? { accountId } : {}),
+        couponRate: new Decimal(values.couponRate).div(100).toString(), // Convert % to decimal
         faceValue: values.faceValue.toString(),
         purchasePrice: values.purchasePrice.toString(),
         status: "active",
@@ -97,9 +97,10 @@ export function AddGrzBondModal({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>{children}</DialogTrigger>
-      <DialogContent className="sm:max-w-[425px]">
+      <DialogContent className="sm:max-w-[425px] max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Add Government Bond</DialogTitle>
+          <DialogDescription>Use the purchase price from your confirmation and the coupon and dates for this specific bond.</DialogDescription>
         </DialogHeader>
 
         <Form {...form}>
@@ -117,6 +118,21 @@ export function AddGrzBondModal({
                 </FormItem>
               )}
             />
+
+            <FormField control={form.control} name="accountId" render={({ field }) => (
+              <FormItem>
+                <FormLabel>Custody account (optional)</FormLabel>
+                <Select value={field.value ?? "none"} onValueChange={value => field.onChange(value === "none" ? null : value)}>
+                  <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                  <SelectContent>
+                    <SelectItem value="none">No custody account</SelectItem>
+                    {custodyAccounts.map(account => <SelectItem key={account.id} value={account.id}>{account.name} (ZMW)</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                <FormDescription>Links this existing holding to an account for valuation. Recording it does not deduct the purchase price.</FormDescription>
+                <FormMessage />
+              </FormItem>
+            )} />
 
             <div className="grid grid-cols-2 gap-4">
               <FormField
@@ -140,29 +156,7 @@ export function AddGrzBondModal({
                   <FormItem>
                     <FormLabel>Tenor (Years)</FormLabel>
                     <Select
-                      onValueChange={(val) => {
-                        const years = Number(val);
-                        field.onChange(val);
-                        // Update maturity
-                        try {
-                          const pDate = new Date(
-                            form.getValues("purchaseDate")
-                          );
-                          const mDate = addYears(pDate, years);
-                          form.setValue(
-                            "maturityDate",
-                            mDate.toISOString().split("T")[0]
-                          );
-
-                          // Update coupon rate from recent auctions
-                          if (RECENT_AUCTION_RATES[years]) {
-                            form.setValue(
-                              "couponRate",
-                              RECENT_AUCTION_RATES[years]
-                            );
-                          }
-                        } catch (e) {}
-                      }}
+                      onValueChange={(val) => field.onChange(Number(val))}
                       defaultValue={field.value.toString()}
                     >
                       <FormControl>
@@ -197,14 +191,6 @@ export function AddGrzBondModal({
                         type="number"
                         step="0.01"
                         {...field}
-                        onChange={(e) => {
-                          field.onChange(e);
-                          // Default purchase price to face value (Par issuance post-Jan 2024)
-                          form.setValue(
-                            "purchasePrice",
-                            Number(e.target.value)
-                          );
-                        }}
                       />
                     </FormControl>
                     <FormMessage />
@@ -217,7 +203,7 @@ export function AddGrzBondModal({
                 name="purchasePrice"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Purchase Price</FormLabel>
+                    <FormLabel>Purchase Price (ZMW)</FormLabel>
                     <FormControl>
                       <Input type="number" step="0.01" {...field} />
                     </FormControl>
@@ -238,18 +224,6 @@ export function AddGrzBondModal({
                       <Input
                         type="date"
                         {...field}
-                        onChange={(e) => {
-                          field.onChange(e);
-                          try {
-                            const pDate = new Date(e.target.value);
-                            const tenor = form.getValues("tenorYears");
-                            const mDate = addYears(pDate, Number(tenor));
-                            form.setValue(
-                              "maturityDate",
-                              mDate.toISOString().split("T")[0]
-                            );
-                          } catch (ex) {}
-                        }}
                       />
                     </FormControl>
                     <FormMessage />
@@ -274,6 +248,18 @@ export function AddGrzBondModal({
 
             <FormField
               control={form.control}
+              name="firstCouponDate"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>First coupon date you are entitled to</FormLabel>
+                  <FormControl><Input type="date" {...field} /></FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
               name="couponRate"
               render={({ field }) => (
                 <FormItem>
@@ -284,13 +270,11 @@ export function AddGrzBondModal({
                       step="0.01"
                       placeholder="e.g. 14.5"
                       {...field}
+                      value={field.value ?? ""}
                     />
                   </FormControl>
                   <FormDescription>
-                    Annual coupon interest rate. Suggestion:{" "}
-                    {RECENT_AUCTION_RATES[Number(form.watch("tenorYears"))] ||
-                      "N/A"}
-                    %
+                    Enter the annual coupon printed on the bond or its issue terms.
                   </FormDescription>
                   <FormMessage />
                 </FormItem>

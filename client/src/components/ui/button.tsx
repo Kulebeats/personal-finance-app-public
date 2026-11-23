@@ -21,10 +21,12 @@ const buttonVariants = cva(
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {
-        default: "min-h-9 px-4 py-2",
-        sm: "min-h-8 rounded-md px-3 text-xs",
-        lg: "min-h-10 rounded-md px-8",
-        icon: "h-9 w-9",
+        // Below 768 px every button is at least 44 px tall (icon buttons 44 x 44):
+        // a thumb-sized tap target (UX-02). Desktop keeps the compact sizes.
+        default: "min-h-9 px-4 py-2 max-md:min-h-11",
+        sm: "min-h-8 rounded-md px-3 text-xs max-md:min-h-11",
+        lg: "min-h-10 rounded-md px-8 max-md:min-h-11",
+        icon: "h-9 w-9 max-md:h-11 max-md:w-11",
       },
     },
     defaultVariants: {

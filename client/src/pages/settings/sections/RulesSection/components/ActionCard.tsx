@@ -12,8 +12,9 @@ import {
   SelectValue,
   SelectSeparator,
 } from "@/components/ui/select";
+import { TagsMultiSelect } from "@/components/tags";
 import { RuleAction, SplitConfig } from "../types";
-import { ACTION_TYPES } from "../constants";
+import { ACTION_TYPES, removedActionLabel, toTagIds } from "../constants";
 
 interface ActionCardProps {
   action: RuleAction;
@@ -69,7 +70,7 @@ export function ActionCard({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span>{actionType?.icon}</span>
-          <span className="font-medium text-sm">{actionType?.label}</span>
+          <span className="font-medium text-sm">{actionType?.label ?? removedActionLabel(action.type)}</span>
         </div>
         <div className="flex items-center gap-2">
           <Switch
@@ -218,19 +219,10 @@ export function ActionCard({
               </SelectContent>
             </Select>
           ) : action.type === "add_tags" ? (
-            <Input
-              placeholder="Enter tags (comma separated)..."
-              className="h-8 text-xs"
-              value={
-                Array.isArray(action.value)
-                  ? action.value.join(", ")
-                  : action.value
-              }
-              onChange={(e) =>
-                onUpdate({
-                  value: e.target.value.split(",").map((t) => t.trim()),
-                })
-              }
+            <TagsMultiSelect
+              value={toTagIds(action.value)}
+              onChange={(tagIds) => onUpdate({ value: tagIds })}
+              placeholder="Select tags..."
             />
           ) : null}
         </div>

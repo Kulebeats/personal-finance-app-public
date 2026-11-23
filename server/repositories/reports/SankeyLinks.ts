@@ -5,10 +5,12 @@ import {
   categories,
   categoryGroups,
   accounts,
+  transactionSplits,
 } from "@shared/schema";
 import { Money } from "../../core/money";
 import { moneyFromValue } from "./moneyUtils";
 import { buildFxRateExpr } from "./fxRateExpr";
+import { allocationAmount, allocationCategoryId, splitAllocationJoin } from "./splitAllocation";
 import {
   buildSankeyBaseConditions,
   calculateTotalIncome,
@@ -40,7 +42,7 @@ export async function buildIncomeToExpenseGroups(
   const fxRateExpr = buildFxRateExpr(
     currencyExpr,
     filters.baseCurrency,
-    sql`${transactions.date}`,
+    sql`${transactions.date}`, { householdId: filters.householdId },
   );
   const amountBaseExpr = sql<
     string | number | null
@@ -59,11 +61,12 @@ export async function buildIncomeToExpenseGroups(
       groupId: categoryGroups.id,
       groupName: categoryGroups.name,
       groupColor: sql<string | null>`NULL`,
-      amountBase: amountBaseExpr,
+      amountBase: sql<string | number | null>`${allocationAmount}::numeric * ${fxRateExpr}`,
     })
     .from(transactions)
     .leftJoin(accounts, eq(accounts.id, transactions.accountId))
-    .leftJoin(categories, eq(categories.id, transactions.categoryId))
+    .leftJoin(transactionSplits, splitAllocationJoin) // NEW-14: one row per split
+    .leftJoin(categories, sql`${categories.id} = ${allocationCategoryId}`)
     .leftJoin(categoryGroups, eq(categoryGroups.id, categories.groupId))
     .where(and(...baseConditions, expenseTypeCondition));
 
@@ -211,7 +214,7 @@ export async function buildAccountToExpenseGroups(
   const fxRateExpr = buildFxRateExpr(
     currencyExpr,
     filters.baseCurrency,
-    sql`${transactions.date}`,
+    sql`${transactions.date}`, { householdId: filters.householdId },
   );
   const amountBaseExpr = sql<
     string | number | null
@@ -233,11 +236,12 @@ export async function buildAccountToExpenseGroups(
       groupId: categoryGroups.id,
       groupName: categoryGroups.name,
       groupColor: sql<string | null>`NULL`,
-      amountBase: amountBaseExpr,
+      amountBase: sql<string | number | null>`${allocationAmount}::numeric * ${fxRateExpr}`,
     })
     .from(transactions)
     .leftJoin(accounts, eq(accounts.id, transactions.accountId))
-    .leftJoin(categories, eq(categories.id, transactions.categoryId))
+    .leftJoin(transactionSplits, splitAllocationJoin) // NEW-14: one row per split
+    .leftJoin(categories, sql`${categories.id} = ${allocationCategoryId}`)
     .leftJoin(categoryGroups, eq(categoryGroups.id, categories.groupId))
     .where(and(...baseConditions, expenseTypeCondition));
 
@@ -351,7 +355,7 @@ export async function buildIncomeToCategories(
   const fxRateExpr = buildFxRateExpr(
     currencyExpr,
     filters.baseCurrency,
-    sql`${transactions.date}`,
+    sql`${transactions.date}`, { householdId: filters.householdId },
   );
   const amountBaseExpr = sql<
     string | number | null
@@ -372,11 +376,12 @@ export async function buildIncomeToCategories(
       categoryId: sql<string>`COALESCE(${categories.id}::text, 'uncategorized')`,
       categoryName: sql<string>`COALESCE(${categories.name}, 'Uncategorized')`,
       categoryColor: categories.color,
-      amountBase: amountBaseExpr,
+      amountBase: sql<string | number | null>`${allocationAmount}::numeric * ${fxRateExpr}`,
     })
     .from(transactions)
     .leftJoin(accounts, eq(accounts.id, transactions.accountId))
-    .leftJoin(categories, eq(categories.id, transactions.categoryId))
+    .leftJoin(transactionSplits, splitAllocationJoin) // NEW-14: one row per split
+    .leftJoin(categories, sql`${categories.id} = ${allocationCategoryId}`)
     .leftJoin(categoryGroups, eq(categoryGroups.id, categories.groupId))
     .where(and(...baseConditions, expenseTypeCondition));
 

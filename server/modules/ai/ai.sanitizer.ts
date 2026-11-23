@@ -14,14 +14,15 @@ import { Money } from '../../core/money';
 import type {
   SpendingByCategoryResult,
   GoalStatusResult,
+  GoalAssignmentResult,
   RecentTransactionResult,
   AccountBalanceResult,
   TopMerchantResult,
   UpcomingRecurringResult,
   BudgetStatusResult,
   MonthlyTrendResult,
+  CategoryTrendResult,
   SanitizedSpendingData,
-  SanitizedGoalData,
   SanitizedTransactionData,
   SanitizedRecurringData,
   SanitizedBudgetData,
@@ -29,10 +30,13 @@ import type {
   SanitizedAccountData,
   SanitizedCategoryTrendData,
   SanitizedMonthlySummaryData,
-  SanitizedGoalAssignmentData,
   SanitizedCashFlowData,
   SanitizedToolOutput
 } from './ai.types';
+import { sanitizeGoalAssignmentData, sanitizeGoalData } from './ai.goal-sanitizer';
+import type { CashFlowPoint } from './ai.cashflow-projection';
+
+export { sanitizeGoalAssignmentData, sanitizeGoalData };
 
 // ============================================================================
 // RAW TOOL RESULT SHAPES (for tools whose result types live inline in the
@@ -41,36 +45,11 @@ import type {
 // data reaches the external AI prompt.
 // ============================================================================
 
-interface CategoryTrendResult {
-  categoryId: string;
-  categoryName: string;
-  points: Array<{ month: string; amount: Money }>;
-  trendDirection: 'up' | 'down' | 'flat';
-}
-
-interface GoalAssignmentResult {
-  goalId: string;
-  goalName: string;
-  accountId: string | null;
-  accountName: string | null;
-  target: Money;
-  current: Money;
-}
-
-interface CashFlowResult {
-  month: string;
-  inflow: Money;
-  outflow: Money;
-  net: Money;
-  projectedEndingBalance: Money | null;
-}
-
 // ============================================================================
 // DATA MINIMIZATION CONSTANTS
 // ============================================================================
 
 const MAX_CATEGORIES = 20;
-const MAX_GOALS = 10;
 const MAX_TRANSACTIONS = 20;
 const MAX_MERCHANTS = 10;
 const MAX_ACCOUNTS = 20;
@@ -81,56 +60,35 @@ const MAX_ACCOUNTS = 20;
 
 /**
  * Sanitize spending by category data for AI API.
- * - Limits to top 20 categories
+ * - Limits the category breakdown to 20 rows
  * - Converts Money to string representation
- * - Removes any PII that might be in category names
+ * - Keeps category labels for local display; the provider prompt redacts identifiers
  */
 export function sanitizeSpendingData(
   data: SpendingByCategoryResult[],
   currency: string
 ): SanitizedSpendingData {
-  // Limit to top categories
   const limited = data.slice(0, MAX_CATEGORIES);
 
   const categories = limited.map(item => ({
     name: item.category,
-    amount: item.amount.toString(), // String, not Money object
+    amount: item.amount?.toString() ?? null,
     count: item.transactionCount
   }));
 
-  // Calculate total
-  const total = limited
-    .reduce((sum, item) => sum.add(item.amount), Money.zero(currency))
-    .toString();
+  // Include every category, even beyond the display limit. A missing group
+  // withholds the total rather than silently leaving its contribution out.
+  const total = data.reduce<Money | null>(
+    (sum, item) => sum && item.amount ? sum.add(item.amount) : null,
+    Money.zero(currency),
+  );
 
   return {
     categories,
-    total,
-    period: 'last_period'
+    total: total?.toString() ?? null,
+    period: 'last_period',
+    ...(total === null ? { rankingAvailability: 'unavailable' as const } : {}),
   };
-}
-
-/**
- * Sanitize goal data for AI API.
- * - Limits to 10 goals
- * - Removes goal IDs (internal identifiers)
- * - Converts Money to string
- * - Sanitizes goal names (removes personal details)
- */
-export function sanitizeGoalData(
-  data: GoalStatusResult[]
-): SanitizedGoalData {
-  const limited = data.slice(0, MAX_GOALS);
-
-  const goals = limited.map(goal => ({
-    name: sanitizeGoalName(goal.name),
-    targetAmount: goal.target.toString(),
-    currentAmount: goal.current.toString(),
-    progressPercent: calculateProgress(goal.current, goal.target),
-    status: goal.status
-  }));
-
-  return { goals };
 }
 
 /**
@@ -167,9 +125,9 @@ export function sanitizeMerchantData(data: TopMerchantResult[]) {
 
   return limited.map(merchant => ({
     name: sanitizeMerchantName(merchant.merchantName),
-    totalSpent: merchant.totalSpent.toString(),
+    totalSpent: merchant.totalSpent?.toString() ?? null,
     transactionCount: merchant.transactionCount,
-    avgAmount: merchant.avgTransactionAmount.toString()
+    avgAmount: merchant.avgTransactionAmount?.toString() ?? null
   }));
 }
 
@@ -184,10 +142,24 @@ export function sanitizeAccountData(data: AccountBalanceResult[]) {
 
   return limited.map((account, index) => ({
     type: account.accountType,
-    name: `${account.accountType}_${index + 1}`, // Generic name
+    name: accountLabel(account.accountType, index), // Generic name
     balance: account.balance.toString(),
+    currency: account.currency,
     isActive: account.isActive
   }));
+}
+
+/** The generic label an account is sent out under: its type and position. */
+function accountLabel(accountType: string, index: number): string {
+  return `${accountType}_${index + 1}`;
+}
+
+/**
+ * Each label `sanitizeAccountData` sends out, paired with the account name it
+ * stands for (same limit, same order), so the asker's reply can name it.
+ */
+export function accountLabelPairs(data: AccountBalanceResult[]): Array<readonly [string, string]> {
+  return data.slice(0, MAX_ACCOUNTS).map((account, index) => [accountLabel(account.accountType, index), account.accountName] as const);
 }
 
 /**
@@ -242,7 +214,10 @@ export function sanitizeBudgetData(
 export function sanitizeMerchantSpendingData(
   data: TopMerchantResult[]
 ): SanitizedMerchantData {
-  return { merchants: sanitizeMerchantData(data) };
+  return {
+    merchants: sanitizeMerchantData(data),
+    ...(data.some(row => row.rankingAvailability === 'unavailable') ? { rankingAvailability: 'unavailable' as const } : {}),
+  };
 }
 
 /**
@@ -270,7 +245,7 @@ export function sanitizeCategoryTrendData(
     categoryName: trend.categoryName,
     points: trend.points.map(point => ({
       month: point.month,
-      amount: point.amount.toString()
+      amount: point.amount?.toString() ?? null
     })),
     trendDirection: trend.trendDirection
   }));
@@ -287,34 +262,11 @@ export function sanitizeMonthlySummaryData(
 ): SanitizedMonthlySummaryData {
   return {
     month: data.month,
-    income: data.income.toString(),
-    expenses: data.expenses.toString(),
-    netSavings: data.netSavings.toString(),
+    income: data.income?.toString() ?? null,
+    expenses: data.expenses?.toString() ?? null,
+    netSavings: data.netSavings?.toString() ?? null,
     savingsRate: data.savingsRate
   };
-}
-
-/**
- * Sanitize goal-account assignment data for AI API.
- * - Removes internal goal and account IDs
- * - Sanitizes goal names and generalizes account names
- * - Converts Money to string
- */
-export function sanitizeGoalAssignmentData(
-  data: GoalAssignmentResult[]
-): SanitizedGoalAssignmentData {
-  const limited = data.slice(0, MAX_GOALS);
-
-  const assignments = limited.map((assignment, index) => ({
-    goalName: sanitizeGoalName(assignment.goalName),
-    accountName: assignment.accountName
-      ? `account_${index + 1}` // Generic name, never the raw account name
-      : null,
-    target: assignment.target.toString(),
-    current: assignment.current.toString()
-  }));
-
-  return { assignments };
 }
 
 /**
@@ -322,16 +274,14 @@ export function sanitizeGoalAssignmentData(
  * - Converts Money to string (no internal identifiers in this shape)
  */
 export function sanitizeCashFlowData(
-  data: CashFlowResult[]
+  data: CashFlowPoint[]
 ): SanitizedCashFlowData {
   const projections = data.map(projection => ({
     month: projection.month,
-    inflow: projection.inflow.toString(),
-    outflow: projection.outflow.toString(),
-    net: projection.net.toString(),
-    projectedEndingBalance: projection.projectedEndingBalance
-      ? projection.projectedEndingBalance.toString()
-      : null
+    inflow: projection.inflow?.toString() ?? null,
+    outflow: projection.outflow?.toString() ?? null,
+    net: projection.net?.toString() ?? null,
+    projectedEndingBalance: projection.projectedEndingBalance?.toString() ?? null,
   }));
 
   return { projections };
@@ -364,10 +314,9 @@ export const SANITIZED_TOOL_NAMES: ReadonlySet<string> = new Set([
 /**
  * Central sanitization chokepoint (SCP-313).
  *
- * Routes EVERY AI tool's raw result through its dedicated sanitizer before the
- * data can reach the external Gemini prompt. This is the single place that
- * decides what leaves the system, so no individual tool can bypass PII
- * stripping by being added to the service without a sanitizer.
+ * Routes every AI tool's raw result through its dedicated sanitizer before
+ * local display or provider prompt serialization. The provider prompt also
+ * redacts identifiers in the remaining free-text labels.
  *
  * Returns `sanitized: false` for any tool without a known sanitizer branch so
  * the caller can record an honest `data_sanitized` value in the audit log
@@ -446,7 +395,7 @@ export function sanitizeToolResult(
 
     case 'get_cash_flow':
       return {
-        data: sanitizeCashFlowData(rawData as CashFlowResult[]),
+        data: sanitizeCashFlowData(rawData as CashFlowPoint[]),
         sanitized: true
       };
 
@@ -460,29 +409,6 @@ export function sanitizeToolResult(
 // ============================================================================
 // PII REMOVAL HELPERS
 // ============================================================================
-
-/**
- * Sanitize goal names to remove personal information.
- * Examples:
- * - "John's Emergency Fund" -> "Emergency Fund"
- * - "Save for Sarah's Birthday" -> "Save for Event"
- */
-function sanitizeGoalName(name: string): string {
-  // Remove possessive names
-  let sanitized = name.replace(/\b[A-Z][a-z]+'s\s+/g, '');
-
-  // Replace specific personal events with generic terms
-  sanitized = sanitized.replace(/\bfor [A-Z][a-z]+('s)?\b/gi, 'for Event');
-
-  // Remove any remaining proper names (simple heuristic)
-  sanitized = sanitized.replace(/\b[A-Z][a-z]+\b/g, match => {
-    // Keep common financial terms
-    const financialTerms = ['Emergency', 'Fund', 'Savings', 'Retirement', 'Investment', 'Vacation', 'House', 'Car', 'Education'];
-    return financialTerms.includes(match) ? match : 'Goal';
-  });
-
-  return sanitized.trim();
-}
 
 /**
  * Sanitize merchant names to remove personal information.
@@ -523,15 +449,6 @@ function sanitizeMerchantName(name: string | null): string {
   sanitized = sanitized.replace(/\+?\d{10,}/g, '[phone]');
 
   return sanitized;
-}
-
-/**
- * Calculate progress percentage safely
- */
-function calculateProgress(current: Money, target: Money): number {
-  if (target.toNumber() === 0) return 0;
-  const progress = (current.toNumber() / target.toNumber()) * 100;
-  return Math.min(Math.round(progress), 100);
 }
 
 // ============================================================================

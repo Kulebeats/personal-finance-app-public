@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useAddContribution, type Goal } from "@/hooks/useGoals";
+import { OverfundConfirm, wouldOverfund } from "./OverfundConfirm";
 
 interface GoalContributionModalProps {
   goal: Goal;
@@ -26,6 +27,8 @@ export function GoalContributionModal({
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState("");
   const [notes, setNotes] = useState("");
+  const [confirmOverfund, setConfirmOverfund] = useState(false);
+  const overfunds = wouldOverfund(goal, amount);
 
   const addContribution = useAddContribution();
 
@@ -39,6 +42,7 @@ export function GoalContributionModal({
           amount: { amount, currency: goal.currency || "ZMW" },
           date: date || undefined,
           notes: notes || undefined,
+          confirmOverfund: overfunds && confirmOverfund ? true : undefined,
         },
       },
       {
@@ -46,6 +50,7 @@ export function GoalContributionModal({
           setAmount("");
           setDate("");
           setNotes("");
+          setConfirmOverfund(false);
           onClose();
         },
       }
@@ -87,6 +92,9 @@ export function GoalContributionModal({
               onChange={(e) => setNotes(e.target.value)}
             />
           </div>
+          {overfunds ? (
+            <OverfundConfirm goal={goal} checked={confirmOverfund} onCheckedChange={setConfirmOverfund} />
+          ) : null}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>
@@ -94,7 +102,7 @@ export function GoalContributionModal({
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={!amount || addContribution.isPending}
+            disabled={!amount || (overfunds && !confirmOverfund) || addContribution.isPending}
           >
             {addContribution.isPending ? "Adding..." : "Add Contribution"}
           </Button>

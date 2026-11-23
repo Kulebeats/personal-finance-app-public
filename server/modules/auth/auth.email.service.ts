@@ -7,14 +7,22 @@
  * @module modules/auth/auth.email.service
  */
 
-import { Request } from "express";
-import { userRepository } from "../../repositories/UserRepository";
+import type { Request } from "express";
+import { buildPublicAuthLink } from "../../core/public-auth-link";
 import { sendEmail } from "../../services/emailService";
 import { buildEmailHtml } from "../../services/notification/email";
-import { auditService, AuditEventType } from "../../services/AuditService";
 import { logger } from "../../utils/logger";
-import { ValidationError } from "../../core/errors";
-import { sha256Hex } from "../../core/tokenHash";
+import { consumeEmailVerificationToken, issueInitialEmailVerification } from "../../services/security-email";
+
+/** Verification mail is transactional: a clear button and no notification-preferences footer. */
+function buildVerificationEmailHtml(verificationLink: string): string {
+  return buildEmailHtml(
+    "Verify your email",
+    "Please verify your email address to complete your registration.",
+    verificationLink,
+    { buttonLabel: "Verify my email", showPreferencesFooter: false },
+  );
+}
 
 /**
  * Auth Email Service
@@ -25,86 +33,33 @@ export const authEmailService = {
   /**
    * Verify email address
    */
-  async verifyEmail(token: string): Promise<void> {
-    const user = await userRepository.findByVerificationToken(
-      sha256Hex(token),
-    );
-    if (!user) {
-      throw new ValidationError("Invalid verification token");
-    }
-
-    if (
-      user.emailVerificationExpiry &&
-      new Date() > new Date(user.emailVerificationExpiry)
-    ) {
-      throw new ValidationError("Verification token expired");
-    }
-
-    if (user.emailVerified) {
-      return; // Already verified
-    }
-
-    await userRepository.update(user.id, {
-      emailVerified: true,
-      emailVerificationToken: null,
-      emailVerificationExpiry: null,
-    });
-
-    await auditService.log({
-      eventType: AuditEventType.EMAIL_VERIFIED,
-      userId: user.id,
-      details: { email: user.email },
-    });
+  async verifyEmail(token: string, req?: Request): Promise<void> {
+    await consumeEmailVerificationToken(token, { initialOnly: true, request: req });
   },
 
   /**
    * Resend verification email
    */
   async resendVerification(email: string): Promise<void> {
-    const user = await userRepository.findByEmail(email);
-    if (!user) {
-      // Silent failure for security (don't reveal email existence)
-      return;
-    }
-
-    if (user.emailVerified) {
-      // Already verified
-      return;
-    }
-
-    const crypto = await import("crypto");
-    const verificationToken = crypto.randomBytes(32).toString("hex");
-    const verificationExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
-
-    // Only the hash is persisted; the raw token is emailed below.
-    await userRepository.update(user.id, {
-      emailVerificationToken: sha256Hex(verificationToken),
-      emailVerificationExpiry: verificationExpiry,
-    });
+    const issued = await issueInitialEmailVerification(email);
+    if (!issued) return;
+    const verificationToken = issued.token;
 
     try {
-      const baseUrl = process.env.APP_URL || "http://localhost:5000";
-      const verificationLink = `${baseUrl}/verify-email?token=${verificationToken}`;
+      const verificationLink = buildPublicAuthLink("/verify-email", verificationToken);
 
-      const emailHtml = buildEmailHtml(
-        "Verify your email",
-        "Please verify your email address to complete your registration.",
-        verificationLink,
-      );
+      const emailHtml = buildVerificationEmailHtml(verificationLink);
 
-      await sendEmail({
-        to: email,
+      const accepted = await sendEmail({
+        to: issued.email,
         subject: "Verify your email",
         html: emailHtml,
         text: `Please verify your email: ${verificationLink}`,
       });
-      logger.info(`Verification email resent to ${email}`);
-    } catch (error) {
-      logger.error(
-        `Failed to resend verification email to ${email}`,
-        {},
-        error as Error,
-      );
+      if (accepted) logger.info("Verification email resend accepted", { userId: issued.userId, outcome: "success" });
+      else logger.warn("Verification email resend unavailable", { userId: issued.userId, outcome: "failure" });
+    } catch {
+      logger.error("Verification email resend failed", { userId: issued.userId, outcome: "error" });
     }
   },
 
@@ -114,30 +69,23 @@ export const authEmailService = {
   async sendVerificationEmail(
     email: string,
     verificationToken: string,
+    userId?: string,
   ): Promise<void> {
     try {
-      const baseUrl = process.env.APP_URL || "http://localhost:5000";
-      const verificationLink = `${baseUrl}/verify-email?token=${verificationToken}`;
+      const verificationLink = buildPublicAuthLink("/verify-email", verificationToken);
 
-      const emailHtml = buildEmailHtml(
-        "Verify your email",
-        "Please verify your email address to complete your registration.",
-        verificationLink,
-      );
+      const emailHtml = buildVerificationEmailHtml(verificationLink);
 
-      await sendEmail({
+      const accepted = await sendEmail({
         to: email,
         subject: "Verify your email",
         html: emailHtml,
         text: `Please verify your email: ${verificationLink}`,
       });
-      logger.info(`Verification email sent to ${email}`);
-    } catch (error) {
-      logger.error(
-        `Failed to send verification email to ${email}`,
-        {},
-        error as Error,
-      );
+      if (accepted) logger.info("Verification email send accepted", { userId, outcome: "success" });
+      else logger.warn("Verification email send unavailable", { userId, outcome: "failure" });
+    } catch {
+      logger.error("Verification email send failed", { userId, outcome: "error" });
       // Don't fail registration if email fails
     }
   },

@@ -1,15 +1,13 @@
 import Layout from "@/components/Layout";
+import DashboardGreeting from "@/components/dashboard/DashboardGreeting";
+import { GettingStartedChecklist } from "@/components/dashboard/GettingStartedChecklist";
 import { lazy, Suspense, useState, type ElementType } from "react";
-import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
-import { Home, ArrowRight, SlidersHorizontal } from "lucide-react";
+import { SlidersHorizontal } from "lucide-react";
 import {
   DndContext,
   closestCenter,
@@ -51,26 +49,10 @@ import { cn } from "@/lib/utils";
 import { Plus } from "lucide-react";
 import { AddAccountModal } from "@/features/accounts";
 import { useFormat } from "@/hooks/use-format";
-import { useProfile, useHousehold } from "@/hooks/use-settings";
+import { useProfile } from "@/hooks/use-settings";
 import { useDashboardWidgets } from "@/hooks/useDashboardWidgets";
 import { useRefetchOnFocus } from "@/hooks/useRefetchOnFocus";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { ApiError } from "@/lib/api";
-
-// FIX P7b-3: the "brand-new user, needs onboarding" gate below used to key on
-// a substring match of the server's error message ("No household found"),
-// so any wording change server-side would silently drop new users into a
-// broken dashboard instead of onboarding. This checks the structural signal
-// instead: the distinguishable HOUSEHOLD_NOT_FOUND error code (see
-// server/core/errors/HouseholdNotFoundError.ts), falling back to the raw
-// HTTP 404 status for a server that hasn't deployed that code yet - the
-// /api/household/general endpoint 404s ONLY for the no-household case, so
-// status alone is still a safe structural signal, not prose.
-function isHouseholdNotFoundError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const apiError = error as ApiError;
-  return apiError.code === "HOUSEHOLD_NOT_FOUND" || apiError.status === 404;
-}
 
 const NetWorthWidget = lazy(() => import("@/components/dashboard/NetWorthWidget"));
 const CashFlowWidget = lazy(() => import("@/components/dashboard/CashFlowWidget"));
@@ -156,16 +138,17 @@ function SortableWidget({
 export default function Dashboard() {
   const { data: userProfile } = useProfile();
   const { formatCurrency } = useFormat();
-  const [, setLocation] = useLocation();
-
-  // Check for household setup
-  const { error: householdError, isLoading: householdLoading } = useHousehold();
 
   const {
     widgets,
     toggleWidget,
     reorderWidgets,
     isLoading: widgetsLoading,
+    saveStatus,
+    saveError,
+    retrySave,
+    loadError,
+    retryLoad,
   } = useDashboardWidgets();
 
   // Auto-refresh dashboard data when user returns to tab after 1 minute
@@ -196,42 +179,6 @@ export default function Dashboard() {
     }),
   );
 
-  // If no household, show onboarding state. Keep this below all hooks so the
-  // hook count cannot change when household state transitions.
-  if (
-    !householdLoading &&
-    householdError &&
-    isHouseholdNotFoundError(householdError)
-  ) {
-    return (
-      <Layout>
-        <div className="flex items-center justify-center min-h-[60vh]">
-          <Card className="w-full max-w-lg text-center shadow-lg border-2 border-dashed">
-            <CardHeader>
-              <div className="mx-auto w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mb-4">
-                <Home className="w-8 h-8 text-blue-600" />
-              </div>
-              <CardTitle className="text-2xl">Welcome to Capital!</CardTitle>
-              <CardDescription className="text-lg">
-                Let's get you set up. You need to create a household to start
-                tracking your finances.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button
-                onClick={() => setLocation("/settings/household")}
-                size="lg"
-                className="w-full sm:w-auto gap-2"
-              >
-                Create My Household <ArrowRight className="w-4 h-4" />
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
-      </Layout>
-    );
-  }
-
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
 
@@ -246,17 +193,14 @@ export default function Dashboard() {
 
   return (
     <Layout>
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
         <div>
           <h1 className="text-2xl font-bold text-foreground tracking-tight">
             Dashboard
           </h1>
-          <p className="text-muted-foreground">
-            Good morning,{" "}
-            {userProfile?.firstName || userProfile?.displayName || userProfile?.fullName?.trim().split(/\s+/)[0] || "User"}
-          </p>
+          <DashboardGreeting name={userProfile?.firstName?.trim() || userProfile?.displayName?.trim() || userProfile?.fullName?.trim().split(/\s+/)[0]} />
         </div>
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-3">
           <AddAccountModal>
             <Button type="button">
               <Plus className="w-4 h-4" /> Add Account
@@ -266,12 +210,37 @@ export default function Dashboard() {
             type="button"
             variant="outline"
             onClick={() => setCustomizing(true)}
+            disabled={widgetsLoading || !!loadError}
           >
             <SlidersHorizontal className="w-4 h-4" />
             Customize
           </Button>
         </div>
       </div>
+
+      <GettingStartedChecklist />
+
+      {loadError && (
+        <div className="mb-4 flex items-center gap-3">
+          <p role="alert">Dashboard layout could not be loaded. {loadError}</p>
+          <Button variant="outline" onClick={retryLoad} disabled={widgetsLoading}>Retry Loading Layout</Button>
+        </div>
+      )}
+
+      {!widgetsLoading && saveStatus && saveStatus !== "idle" && (
+        <div className="mb-4 flex items-center gap-3">
+          {saveStatus === "error" ? (
+            <>
+              <p role="alert">Dashboard layout is not saved. {saveError}</p>
+              <Button variant="outline" onClick={retrySave}>Retry Save</Button>
+            </>
+          ) : (
+            <p role="status" aria-live="polite">
+              {saveStatus === "saving" ? "Saving dashboard layout…" : saveStatus === "saved" ? "Dashboard layout saved" : "Dashboard layout has unsaved changes"}
+            </p>
+          )}
+        </div>
+      )}
 
       <DndContext
         sensors={sensors}

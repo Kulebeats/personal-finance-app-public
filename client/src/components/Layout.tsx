@@ -2,7 +2,7 @@ import { useLocation } from "wouter";
 import { cn } from "@/lib/utils";
 import { useEffect, useRef } from "react";
 
-import { useProfile, useHouseholdMembers } from "@/hooks/use-settings";
+import { useProfile } from "@/hooks/use-settings";
 import { useAccounts } from "@/hooks/useAccounts";
 import { useSettings } from "@/contexts/SettingsContext";
 import { useCommandPalette } from "@/contexts/CommandPaletteContext";
@@ -10,6 +10,8 @@ import { GoalMilestoneModal } from "@/features/goals/components/GoalMilestoneMod
 import { BREADCRUMB_MAP } from "@/components/layout/constants";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TopBar } from "@/components/layout/TopBar";
+import { useApplicationNavigation } from "@/components/layout/useApplicationNavigation";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 
 export default function Layout({
   children,
@@ -19,12 +21,12 @@ export default function Layout({
   fullWidth?: boolean;
 }) {
   const [location, setLocation] = useLocation();
+  const navigation = useApplicationNavigation(location);
   const { sidebarCollapsed: collapsed, toggleSidebar } = useSettings();
   const { toggle: toggleCommandPalette } = useCommandPalette();
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const { data: profile, error: profileError } = useProfile();
+  const { data: profile } = useProfile();
   const { data: accounts } = useAccounts();
-  const { data: members = [] } = useHouseholdMembers();
 
   useEffect(() => {
     const handleGlobalShortcuts = (event: KeyboardEvent) => {
@@ -59,13 +61,6 @@ export default function Layout({
       window.removeEventListener("keydown", handleGlobalShortcuts);
     };
   }, [setLocation]);
-
-  useEffect(() => {
-    const status = (profileError as { status?: number } | null)?.status;
-    if (status === 401) {
-      setLocation("/login");
-    }
-  }, [profileError, setLocation]);
 
   const generateBreadcrumbs = () => {
     const parts = location.split("/").filter(Boolean);
@@ -102,10 +97,10 @@ export default function Layout({
   };
 
   const breadcrumbs = generateBreadcrumbs();
-  const hasPartnerView = members.some((member) => member.userId !== profile?.id);
 
   return (
-    <div className="flex h-screen w-full bg-background text-foreground font-sans overflow-hidden">
+    <Sheet open={navigation.mobileOpen} onOpenChange={navigation.onOpenChange}>
+    <div className="flex h-dvh w-full bg-background text-foreground font-sans overflow-hidden">
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:absolute focus:z-[100] focus:top-2 focus:left-2 focus:rounded focus:bg-primary focus:px-3 focus:py-2 focus:text-primary-foreground"
@@ -118,26 +113,47 @@ export default function Layout({
         onToggle={toggleSidebar}
         location={location}
         profileName={profile?.fullName}
+        navigationRef={navigation.desktopRef}
       />
 
+      {!navigation.leaving && <SheetContent
+        ref={navigation.contentRef}
+        side="left"
+        aria-modal="true"
+        className="flex h-dvh max-h-dvh w-[calc(100vw_-_2rem)] max-w-xs flex-col gap-0 overflow-hidden bg-sidebar p-0 text-sidebar-foreground sm:max-w-xs [&>button]:right-2 [&>button]:top-2 [&>button]:flex [&>button]:h-11 [&>button]:w-11 [&>button]:items-center [&>button]:justify-center"
+        onCloseAutoFocus={navigation.onCloseAutoFocus}
+      >
+        <SheetHeader className="shrink-0 p-4 pr-14 text-left">
+          <SheetTitle>Application navigation</SheetTitle>
+          <SheetDescription>Choose a page in Capital.</SheetDescription>
+        </SheetHeader>
+        <Sidebar
+          variant="mobile"
+          collapsed={false}
+          onToggle={toggleSidebar}
+          location={location}
+          profileName={profile?.fullName}
+          onNavigate={navigation.onNavigate}
+        />
+      </SheetContent>}
+
       <main
+        ref={navigation.mainRef}
         id="main-content"
         tabIndex={-1}
         className="flex-1 flex flex-col min-w-0 overflow-hidden bg-background/50"
       >
         <TopBar
-          collapsed={collapsed}
-          onToggleSidebar={toggleSidebar}
+          navigationTriggerRef={navigation.triggerRef}
           breadcrumbs={breadcrumbs}
           onToggleCommandPalette={toggleCommandPalette}
-          hasPartnerView={hasPartnerView}
           profile={profile}
         />
 
-        <div className="flex-1 overflow-y-auto scroll-smooth bg-background/50">
+        <div data-main-scroll className="flex-1 overflow-y-auto scroll-smooth bg-background/50">
           <div
             className={cn(
-              fullWidth ? "w-full min-h-full" : "max-w-7xl mx-auto p-8"
+              fullWidth ? "w-full min-h-full" : "max-w-7xl mx-auto p-4 md:p-8"
             )}
           >
             {children}
@@ -147,5 +163,6 @@ export default function Layout({
 
       <GoalMilestoneModal />
     </div>
+    </Sheet>
   );
 }

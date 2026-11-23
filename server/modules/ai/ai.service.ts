@@ -14,23 +14,30 @@
  * @module ai/ai.service
  */
 
-import { randomUUID } from 'crypto';
 import { db } from '../../db';
 import { households } from '@shared/schema';
 import { eq } from 'drizzle-orm';
 import { businessAuditService } from '../../services/BusinessAuditService';
 import { AIConversationService } from './ai.conversation.service';
-import { InternalError } from '../../core/errors';
+import type { ExchangePersistedHook } from './ai.conversation.repository';
+import { persistAndSettle, queryAuditWriter, writeFailureAudit, type ExchangeSettlementControls, type PersistResult } from './ai.exchange-settlement';
+import { OutboundRefusedError } from './ai.consent-policy';
+import { BLOCKED_PROMPT_REPLY } from './ai.non-answers';
+import { HttpError, InternalError } from '../../core/errors';
 import { logger } from '../../utils/logger';
 import { AIAnalyticsService } from './ai.analytics.service';
-import { geminiClient, type GeminiToolCall } from './ai.gemini';
+import { capGatedAdapters } from './ai.provider-caps';
+import { ProviderOrchestrator, type AttemptClaim, type AttemptTicket, type ChatRunOutcome, type StageAttemptRecord } from './ai.provider-orchestrator';
+import type { ProviderToolCall } from './ai.provider.types';
+import { buildSystemPrompt } from './ai.tool-definitions';
+import { renderLocalSummary } from './ai.local-templates';
+import { redactOutbound, redactionAuditCounts } from './ai.outbound-redaction';
+import { buildProviderAuditDetails } from './ai.provenance';
 import { aiCache } from './ai.cache';
 import { aiTracking } from './ai.tracking';
 import {
-  AI_TOOL_CALL_CAP,
   detectPromptInjection,
   deriveDataWindowFromToolCalls,
-  enforceToolAllowlist,
   estimateTokens,
   getContextMaxMessages,
   getRequestTokenBudget,
@@ -39,7 +46,8 @@ import {
   type HistorySelection
 } from './ai.guardrails';
 import { sanitizeToolResult } from './ai.sanitizer';
-import { isProviderFailure, runKeywordFallback } from './ai.fallback';
+import { DisplayNames, nameAssistantMessages } from './ai.display-reply';
+import { runKeywordFallback } from './ai.fallback';
 import {
   validateToolArgs,
   spendingByCategoryArgsSchema,
@@ -54,29 +62,56 @@ import {
 import {
   AIErrorCode,
   type ChatResponse,
+  type ConversationDetails,
   type QueryContext,
   type ResponseProvenance,
   type ToolResult
 } from './ai.types';
+import type { HouseholdContext } from '../../core/authz/implicit-household-context';
 
-const BLOCKED_PROMPT_REPLY =
-  'I can only help with household finance questions and cannot process instruction-override requests.';
-const TOKEN_BUDGET_REPLY =
-  'I could not complete that request within the token budget. Please shorten the question or narrow the time range.';
+const EMPTY_HISTORY: HistorySelection = { turns: [], historyTokens: 0, dropped: [] };
 
 /**
  * AI Service Class (FIX AI-ARCH-001)
  * Encapsulates all AI logic in a dedicated service layer.
  */
+/**
+ * R17 (17c/17d): per-request admission controls from the durable ledger. The
+ * hooks recheck consent/membership and claim each attempt before dispatch,
+ * then settle it; `externalProvidersAllowed` false keeps the request local.
+ */
+export interface ChatAdmissionControls extends ExchangeSettlementControls {
+  requestId: string;
+  /** Paid calls this logical request already made on earlier attempts (B1). */
+  priorPaidCalls: number;
+  consentVersion: string | null;
+  externalProvidersAllowed: boolean;
+  externalBlockedReason: 'consent_outdated' | null;
+  beforeAttempt: (attempt: AttemptClaim) => Promise<AttemptTicket | void>;
+  afterAttempt: (record: StageAttemptRecord) => Promise<void>;
+  /** Consent read once more after the claim, right before the adapter call (Astra #255 r4). */
+  beforeDispatch: (attempt: AttemptClaim) => Promise<void>;
+}
+
+/** A reply's thread id, left out when there is none (Astra #255 r4). */
+function threadOf(id: string): { conversationId?: string } {
+  return id ? { conversationId: id } : {};
+}
+
 export class AIService {
   private analyticsService: AIAnalyticsService;
   private auditService: typeof businessAuditService;
   private conversationService: AIConversationService;
+  private orchestrator: ProviderOrchestrator;
 
   constructor() {
     this.analyticsService = new AIAnalyticsService();
     this.auditService = businessAuditService;
     this.conversationService = new AIConversationService();
+    this.orchestrator = new ProviderOrchestrator({
+      // Paid providers fail closed without an operator call cap.
+      adapters: capGatedAdapters()
+    });
   }
 
   /**
@@ -85,14 +120,22 @@ export class AIService {
    * FIX AI-AUDIT-001: Logs all queries to audit trail
    * FIX AI-DATA-001: Sanitizes data before sending to external API
    */
-  async processQuery(params: {
-    userId: string;
-    householdId: string;
+  async processQuery(params: Pick<QueryContext, 'userId' | 'householdId' | 'actor' | 'ipAddress'> & {
     message: string;
     conversationId?: string;
-    ipAddress?: string;
+    admission?: ChatAdmissionControls;
+    /** Aborted when the client disconnects (P2-2). */
+    signal?: AbortSignal;
   }): Promise<ChatResponse> {
-    const { userId, householdId, message, ipAddress } = params;
+    const { userId, householdId, message, ipAddress, admission } = params;
+    const externalAllowed = admission?.externalProvidersAllowed ?? true;
+    const ledgerAudit = admission
+      ? {
+          logical_request_id: admission.requestId,
+          consent_version: admission.consentVersion,
+          external_blocked_reason: admission.externalBlockedReason ?? undefined
+        }
+      : {};
     // SCP-338: The conversation id is now a persisted UUID, not an ephemeral
     // per-request string. It is resolved when the exchange is written to the
     // store (existing thread reused, or a new one created), so the client can
@@ -121,43 +164,43 @@ export class AIService {
           messageLength: hardenedMessage.value.length
         });
 
+        const blockedResponse = (id: string): ChatResponse => ({
+          reply: BLOCKED_PROMPT_REPLY,
+          ...threadOf(id),
+          toolsUsed: [],
+          tokenCount: Math.min(requestTokenBudget, estimateTokens(hardenedMessage.value)),
+          remainingQueries: 0,
+          provenance: this.buildProvenance([]),
+          answerMode: 'unavailable',
+          providers: { analysis: null, answer: null }
+        });
         // SCP-338: Persist the blocked exchange too, so the conversation thread
         // is an honest record of what was asked and how the assistant replied.
-        conversationId = await this.persistExchange({
-          householdId,
-          userId,
-          conversationId: params.conversationId,
-          userMessage: hardenedMessage.value,
-          assistantReply: BLOCKED_PROMPT_REPLY,
-          toolsUsed: []
-        });
-
-        await this.auditService.log({
-          householdId,
-          userId,
-          action: 'CREATE',
-          entityType: 'ai_query',
-          entityId: conversationId,
-          details: {
+        conversationId = await persistAndSettle({
+          persist: (onPersisted) => this.persistExchange({
+            householdId,
+            userId,
+            conversationId: params.conversationId,
+            userMessage: hardenedMessage.value,
+            assistantReply: BLOCKED_PROMPT_REPLY,
+            toolsUsed: [],
+            onPersisted
+          }),
+          shouldPersist: true,
+          suppliedConversationId: params.conversationId,
+          admission,
+          cancelled: false,
+          respond: blockedResponse,
+          audit: queryAuditWriter(this.auditService, { householdId, userId, ipAddress }, {
             query: hardenedMessage.value.substring(0, 200),
             blocked: true,
             blocked_reason: injectionAssessment.ruleId,
-            execution_time_ms: Date.now() - startTime
-          },
-          ipAddress
+            execution_time_ms: Date.now() - startTime,
+            ...ledgerAudit
+          })
         });
 
-        return {
-          reply: BLOCKED_PROMPT_REPLY,
-          conversationId,
-          toolsUsed: [],
-          tokenCount: Math.min(
-            requestTokenBudget,
-            estimateTokens(hardenedMessage.value)
-          ),
-          remainingQueries: 0,
-          provenance: this.buildProvenance([])
-        };
+        return blockedResponse(conversationId);
       }
 
       // Get household currency
@@ -167,229 +210,139 @@ export class AIService {
       const context: QueryContext = {
         userId,
         householdId,
+        actor: params.actor,
         currency,
         ipAddress
       };
 
-      let toolsToCall: string[] = [];
-      let executedToolCalls: GeminiToolCall[] = [];
-      let reply: string;
-      // SCP-313: Track the REAL sanitization outcome. True only if every tool
-      // that executed routed its data through the sanitizer. Used for an honest
-      // `data_sanitized` audit value instead of a hardcoded `true`.
-      let dataSanitized = true;
-      // OPEN-3: what prior context (if any) was actually replayed to the
-      // provider. Recorded in the audit row for DPA visibility.
-      let historySelection: HistorySelection = {
-        turns: [],
-        historyTokens: 0,
-        dropped: []
-      };
-      let tokenCount = Math.min(
-        requestTokenBudget,
-        estimateTokens(hardenedMessage.value)
-      );
-      // Provenance of the REPLY: true only when the provider actually produced
-      // it. Previously this was read off `geminiClient.isAvailable()` at audit
-      // time — the CONFIGURATION state — which attested a keyword-generated
-      // reply as provider-generated whenever a key happened to be set.
-      let usedGemini = false;
-      // Separate from the above on purpose: a failed call still TRANSMITTED the
-      // message to the processor, so DPA visibility needs both facts. Flipping
-      // only `used_gemini` would swap one inaccuracy for another.
-      let providerAttempted = false;
-      let providerErrorCode: string | undefined;
-
-      // Use Gemini if available, otherwise fall back to keyword matching
-      if (geminiClient.isAvailable()) {
-        providerAttempted = true;
-        try {
-          // OPEN-3: replay prior turns so follow-ups ("what about last month?")
-          // resolve. Fail-closed: unowned/absent conversation ids yield none.
-          historySelection = await this.loadHistoryForContext({
+      // OPEN-3: replay prior turns only when an external provider may run;
+      // the local mode never sends anything out. Fail-closed on foreign ids.
+      const historySelection: HistorySelection = externalAllowed && this.orchestrator.hasConfiguredProvider()
+        ? await this.loadHistoryForContext({
             householdId,
             userId,
             conversationId: params.conversationId,
             currentMessage: hardenedMessage.value,
             tokenBudget: requestTokenBudget
-          });
+          })
+        : EMPTY_HISTORY;
 
-          const geminiAnalysis = await geminiClient.analyzeQuery(
-            hardenedMessage.value,
-            {
-              tokenBudget: requestTokenBudget,
-              priorTurns: historySelection.turns
-            }
-          );
-          tokenCount = Math.min(requestTokenBudget, geminiAnalysis.tokenCount);
+      // P1-1: identifiers the user typed (now and in replayed turns) become
+      // placeholders before any provider adapter sees them. Stored answers
+      // already hold labels, never account names (#301 review).
+      const outbound = redactOutbound(hardenedMessage.value, historySelection.turns);
+      // The labels this request sends out, to name the accounts in the reply.
+      const displayNames = new DisplayNames();
 
-          const toolSelection = enforceToolAllowlist(
-            geminiAnalysis.toolCalls,
-            AI_TOOL_CALL_CAP
-          );
-          executedToolCalls = toolSelection.allowedCalls;
-          toolsToCall = executedToolCalls.map(tc => tc.name);
-
-          if (toolSelection.blockedCalls.length > 0 || toolSelection.droppedByCap.length > 0) {
-            const ruleId = toolSelection.blockedCalls.length > 0
-              ? 'tool_allowlist_violation'
-              : 'tool_cap_enforced';
-
-            aiTracking.trackPromptInjectionBlocked({
-              householdId,
-              userId,
-              ruleId,
-              messageLength: hardenedMessage.value.length
-            });
-
-            logger.warn('AI tool selection guardrails applied', {
-              householdId,
-              userId,
-              blockedTools: toolSelection.blockedCalls.map(call => call.name),
-              droppedByCap: toolSelection.droppedByCap.map(call => call.name)
-            });
-          }
-
-          // Execute tools with args from Gemini. Only sanitized data is ever
-          // collected into toolResults (which feed the external Gemini prompt).
-          const toolResults: Array<{ name: string; result: unknown }> = [];
-          for (const toolCall of executedToolCalls) {
-            const result = await this.executeToolWithArgs(toolCall.name, toolCall.args, context);
-            // Any executed tool whose data was not sanitized makes the overall
-            // attestation false, even if its data is then withheld.
-            if (result.sanitized === false) {
-              dataSanitized = false;
-            }
-            if (result.success && result.data && result.sanitized) {
-              toolResults.push({ name: toolCall.name, result: result.data });
-            }
-          }
-
-          const remainingBudget = Math.max(0, requestTokenBudget - tokenCount);
-
-          // Generate response from tool results using Gemini
-          if (toolResults.length > 0 && remainingBudget > 0) {
-            const geminiResponse = await geminiClient.generateResponse(
-              hardenedMessage.value,
-              toolResults,
-              currency,
-              {
-                tokenBudget: remainingBudget,
-                maxOutputTokens: remainingBudget
-              }
-            );
-            reply = geminiResponse.response;
-            tokenCount = Math.min(
-              requestTokenBudget,
-              tokenCount + geminiResponse.tokenCount
-            );
-          } else if (toolResults.length > 0 && remainingBudget === 0) {
-            reply = TOKEN_BUDGET_REPLY;
-          } else if (geminiAnalysis.textResponse) {
-            // Use direct text response if no tools were called
-            reply = geminiAnalysis.textResponse;
-          } else {
-            reply = "I couldn't find the data needed to answer your question. Please try rephrasing or ask about spending, budgets, goals, or transactions.";
-          }
-          usedGemini = true;
-        } catch (error) {
-          // Only a PROVIDER failure degrades. Anything else (our own bugs,
-          // validation, DB errors) must still surface — swallowing those would
-          // turn a real defect into a silently worse answer.
-          if (!isProviderFailure(error)) {
-            throw error;
-          }
-
-          providerErrorCode = (error as { code?: string }).code;
-
-          logger.warn('AI provider failed - degrading to keyword fallback', {
-            householdId,
-            userId,
-            providerError: providerErrorCode,
-            message: error instanceof Error ? error.message : 'Unknown error'
-          });
-
-          // Nothing the provider produced is usable now; recompute from
-          // scratch so the audit row describes the reply we actually return.
-          historySelection = { turns: [], historyTokens: 0, dropped: [] };
-          const fallback = await runKeywordFallback(
+      // R17: Claude first, Gemini on an eligible failure, then the labelled
+      // local mode. Application errors propagate out of `run` unchanged.
+      const outcome = await this.orchestrator.run({
+        message: outbound.message,
+        priorTurns: outbound.priorTurns,
+        tokenBudget: requestTokenBudget,
+        currency,
+        signal: params.signal,
+        executeTool: (call) => this.executeToolWithArgs(call.name, call.args, context, displayNames),
+        runLocal: (local) =>
+          runKeywordFallback(
             hardenedMessage.value,
             context,
             requestTokenBudget,
-            (toolName, ctx) => this.executeTool(toolName, ctx)
-          );
-          toolsToCall = fallback.toolsToCall;
-          executedToolCalls = fallback.executedToolCalls;
-          reply = fallback.reply;
-          tokenCount = fallback.tokenCount;
-          dataSanitized = fallback.dataSanitized;
-        }
-      } else {
-        // No provider configured: keyword fallback is the only path.
-        const fallback = await runKeywordFallback(
-          hardenedMessage.value,
-          context,
-          requestTokenBudget,
-          (toolName, ctx) => this.executeTool(toolName, ctx)
-        );
-        toolsToCall = fallback.toolsToCall;
-        executedToolCalls = fallback.executedToolCalls;
-        reply = fallback.reply;
-        tokenCount = fallback.tokenCount;
-        dataSanitized = fallback.dataSanitized;
-      }
+            (toolName, ctx) => this.executeToolWithArgs(toolName, {}, ctx, displayNames),
+            local.providerAttempted
+          ),
+        renderLocal: (data, local) => renderLocalSummary(data, currency, local.providerAttempted),
+        externalProvidersAllowed: externalAllowed,
+        priorPaidCalls: admission?.priorPaidCalls,
+        beforeAttempt: admission?.beforeAttempt,
+        afterAttempt: admission?.afterAttempt,
+        beforeDispatch: admission?.beforeDispatch
+      });
+      // P2-2: a client that went away gets nothing persisted on its behalf.
+      const cancelled = outcome.cancelled || params.signal?.aborted === true;
+      this.trackToolGuardrails(outcome, householdId, userId, hardenedMessage.value.length);
+
+      const executedToolCalls = outcome.executedToolCalls;
+      const toolsToCall = executedToolCalls.map((call) => call.name);
+      // The asker sees their own account names. The stored message and the
+      // audit keep the provider's labelled text, so a replayed turn never
+      // carries a raw name out.
+      const reply = displayNames.restore(outcome.reply);
+      const tokenCount = outcome.tokenCount;
+      const dataSanitized = outcome.dataSanitized;
+      // History counts as transmitted only when a provider call was dispatched.
+      const sentHistory = outcome.transmissionAttempted ? historySelection : EMPTY_HISTORY;
+      // used_gemini stays for historical rows: true only for a Gemini answer.
+      const usedGemini = outcome.mode === 'gemini';
 
       const provenance = this.buildProvenance(executedToolCalls);
-
-      // SCP-338: Persist the user message + assistant reply BEFORE auditing so
-      // the audit row references the real, stable conversation id. This is what
-      // makes history survive across requests: the returned id is reused when
-      // the client sends it back on the next chat call.
-      conversationId = await this.persistExchange({
-        householdId,
-        userId,
-        conversationId: params.conversationId,
-        userMessage: hardenedMessage.value,
-        assistantReply: reply,
-        toolsUsed: toolsToCall
+      const respond = (id: string): ChatResponse => ({
+        reply,
+        ...threadOf(id),
+        toolsUsed: toolsToCall,
+        tokenCount,
+        remainingQueries: 0, // Will be set by controller from rate limit headers
+        provenance,
+        answerMode: outcome.mode,
+        providers: { analysis: outcome.analysisProvider, answer: outcome.answerProvider }
       });
 
-      // FIX AI-AUDIT-001: Log to audit trail
-      await this.auditService.log({
-        householdId,
-        userId,
-        action: 'CREATE',
-        entityType: 'ai_query',
-        entityId: conversationId,
-        details: {
-          query: hardenedMessage.value.substring(0, 200), // Truncate for audit log
-          tools_used: toolsToCall,
-          response_summary: reply.substring(0, 200),
-          token_count: tokenCount,
-          token_budget: requestTokenBudget,
-          prompt_hardened: hardenedMessage.wasModified,
-          // OPEN-3 / Rule 9: exactly how much prior context left the household
-          // boundary on this request, post-trim.
-          context_messages: historySelection.turns.length,
-          context_tokens: historySelection.historyTokens,
-          context_dropped_injection: historySelection.dropped.filter(
-            drop => drop.reason === 'injection'
-          ).length,
-          context_dropped_budget: historySelection.dropped.filter(
-            drop => drop.reason === 'budget'
-          ).length,
-          provenance,
-          execution_time_ms: Date.now() - startTime,
-          data_sanitized: dataSanitized,
-          // Provenance of THIS reply, not whether a key is configured.
-          used_gemini: usedGemini,
-          // A failed attempt still transmitted the message to the processor,
-          // so DPA review can see egress happened even when the answer did not
-          // come from the provider.
-          provider_attempted: providerAttempted,
-          provider_error: providerErrorCode
-        },
-        ipAddress
+      // FIX AI-AUDIT-001: the query's audit row.
+      const audit = queryAuditWriter(this.auditService, { householdId, userId, ipAddress }, {
+        query: hardenedMessage.value.substring(0, 200), // Truncate for audit log
+        tools_used: toolsToCall,
+        response_summary: outcome.reply.substring(0, 200),
+        token_count: tokenCount,
+        token_budget: requestTokenBudget,
+        prompt_hardened: hardenedMessage.wasModified,
+        // OPEN-3 / Rule 9: exactly how much prior context left the household
+        // boundary on this request, post-trim.
+        context_messages: sentHistory.turns.length,
+        context_tokens: sentHistory.historyTokens,
+        context_dropped_injection: sentHistory.dropped.filter(
+          drop => drop.reason === 'injection'
+        ).length,
+        context_dropped_budget: sentHistory.dropped.filter(
+          drop => drop.reason === 'budget'
+        ).length,
+        provenance,
+        execution_time_ms: Date.now() - startTime,
+        data_sanitized: dataSanitized,
+        // Provenance of THIS reply, not whether a key is configured.
+        used_gemini: usedGemini,
+        // A failed attempt still transmitted the message to the processor,
+        // so DPA review can see egress happened even when the answer did not
+        // come from the provider.
+        provider_attempted: outcome.transmissionAttempted,
+        provider_error: outcome.failureCategory ?? undefined,
+        ...buildProviderAuditDetails(outcome),
+        ...ledgerAudit,
+        cancelled,
+        outbound_redacted: outbound.redacted,
+        ...(outbound.redacted ? { outbound_redactions: redactionAuditCounts(outbound.counts) } : {})
+      });
+
+      // SCP-338: the user message + assistant reply are persisted so history
+      // survives across requests (the returned id is reused on the next call).
+      // An "unavailable" outcome is not an answer and is never persisted.
+      // R17 (Astra #255 r3): the exchange, its ledger settlement and the audit
+      // row commit together; an unpersisted outcome settles with its audit.
+      conversationId = await persistAndSettle({
+        persist: (onPersisted) => this.persistExchange({
+          householdId,
+          userId,
+          conversationId: params.conversationId,
+          userMessage: hardenedMessage.value,
+          assistantReply: outcome.reply,
+          toolsUsed: toolsToCall,
+          onPersisted
+        }),
+        shouldPersist: outcome.mode !== 'unavailable' && !cancelled,
+        suppliedConversationId: params.conversationId,
+        admission,
+        cancelled,
+        respond,
+        audit
       });
 
       const latencyMs = Date.now() - startTime;
@@ -401,8 +354,8 @@ export class AIService {
         toolsUsed: toolsToCall,
         tokenCount,
         executionTime: latencyMs,
-        usedGemini,
-        providerError: providerErrorCode
+        answerMode: outcome.mode,
+        providerError: outcome.failureCategory
       });
 
       // Track query success
@@ -416,68 +369,66 @@ export class AIService {
         usedGemini
       });
 
-      return {
-        reply,
-        conversationId,
-        toolsUsed: toolsToCall,
-        tokenCount,
-        remainingQueries: 0, // Will be set by controller from rate limit headers
-        provenance
-      };
+      return respond(conversationId);
     } catch (error) {
       const latencyMs = Date.now() - startTime;
-      const errorCode = (error as { code?: string }).code || 'UNKNOWN_ERROR';
+      const errorCode = error instanceof HttpError ? error.code : 'UNKNOWN_ERROR';
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      // Log error
-      logger.error('AI query failed', {
-        error,
-        householdId,
-        userId,
-        message: hardenedMessage.value.substring(0, 100)
-      });
+      logger.error('AI query failed', { householdId, userId, errorCode });
 
       // Track query failure
       aiTracking.trackQueryFailed({
         householdId,
         userId,
         errorCode,
-        errorMessage,
+        errorMessage: 'AI query failed',
         latencyMs
       });
 
-      // FIX AI-AUDIT-001: Log failure to audit trail. `entityId` is a uuid
-      // column; if the request failed before a conversation was persisted, fall
-      // back to a fresh uuid so the audit row is still written (SCP-338).
-      await this.auditService.log({
-        householdId,
-        userId,
-        action: 'CREATE',
-        entityType: 'ai_query',
-        entityId: conversationId || randomUUID(),
-        details: {
-          query: hardenedMessage.value.substring(0, 200),
-          error: errorMessage,
-          execution_time_ms: latencyMs,
-          success: false
-        },
-        ipAddress
-      });
+      // FIX AI-AUDIT-001: Log failure to audit trail. A request that failed
+      // before a conversation was persisted names no entity (N6: no invented id).
+      const failureDetails = {
+        query: hardenedMessage.value.substring(0, 200),
+        error: errorMessage,
+        execution_time_ms: latencyMs,
+        success: false,
+        ...ledgerAudit
+      };
+      try {
+        await writeFailureAudit(this.auditService, { householdId, userId, ipAddress }, failureDetails, conversationId,
+          error instanceof OutboundRefusedError ? error.auditFlag : undefined);
+      } catch {
+        // Preserve the original caller outcome if the best-effort failure audit cannot commit.
+        logger.error('Failed to write AI failure audit', { householdId, userId });
+      }
 
+      // A deliberate client-facing outcome (e.g. consent changed mid-request,
+      // an attempt already claimed) keeps its status; only faults become 500.
+      if (error instanceof HttpError && error.statusCode < 500) throw error;
       throw new InternalError('Failed to process AI query');
     }
   }
 
-  /**
-   * Execute a specific tool (fallback mode without Gemini args).
-   * FIX AI-DATA-001: Sanitizes data before returning.
-   */
-  private async executeTool(
-    toolName: string,
-    context: QueryContext
-  ): Promise<ToolResult> {
-    // Use default args for fallback mode
-    return this.executeToolWithArgs(toolName, {}, context);
+  private trackToolGuardrails(
+    outcome: ChatRunOutcome,
+    householdId: string,
+    userId: string,
+    messageLength: number
+  ): void {
+    if (outcome.blockedTools.length === 0 && outcome.droppedTools.length === 0) return;
+    aiTracking.trackPromptInjectionBlocked({
+      householdId,
+      userId,
+      ruleId: outcome.blockedTools.length > 0 ? 'tool_allowlist_violation' : 'tool_cap_enforced',
+      messageLength
+    });
+    logger.warn('AI tool selection guardrails applied', {
+      householdId,
+      userId,
+      blockedTools: outcome.blockedTools,
+      droppedByCap: outcome.droppedTools
+    });
   }
 
   /**
@@ -488,7 +439,8 @@ export class AIService {
   private async executeToolWithArgs(
     toolName: string,
     args: Record<string, unknown>,
-    context: QueryContext
+    context: QueryContext,
+    displayNames?: DisplayNames
   ): Promise<ToolResult> {
     try {
       // SCP-314: Gemini is untrusted. Validate its tool args with the tool's
@@ -512,10 +464,10 @@ export class AIService {
       const validatedArgs = validation.args;
 
       // Check cache first for cacheable tools (L1 in-process + L2 Redis).
-      // Cache stores ALREADY-SANITIZED data, so a cache hit is safe to forward.
+      // Cache stores minimized results. The provider prompt also redacts label identifiers.
       // Key off the VALIDATED args so cache identity matches what is queried.
       if (aiCache.isCacheable(toolName)) {
-        const cacheKey = aiCache.generateKey(context.householdId, toolName, validatedArgs);
+        const cacheKey = aiCache.generateKey(context, toolName, validatedArgs);
         const cachedResult = await aiCache.getAsync<unknown>(cacheKey);
 
         if (cachedResult !== null) {
@@ -543,9 +495,8 @@ export class AIService {
         };
       }
 
-      // SCP-313: Route EVERY tool's result through the central sanitizer before
-      // it can reach the external Gemini prompt. Fail closed if no sanitizer
-      // branch exists for the tool.
+      // SCP-313: The central sanitizer minimizes the result for local use and
+      // the provider prompt. Fail closed if the tool has no sanitizer.
       const sanitizedOutput = sanitizeToolResult(toolName, rawData, context.currency);
 
       if (!sanitizedOutput.sanitized) {
@@ -562,10 +513,11 @@ export class AIService {
       }
 
       const data = sanitizedOutput.data;
+      displayNames?.record(toolName, rawData);
 
       // Cache the SANITIZED result for cacheable tools (writes L1 + L2 Redis).
       if (aiCache.isCacheable(toolName)) {
-        const cacheKey = aiCache.generateKey(context.householdId, toolName, validatedArgs);
+        const cacheKey = aiCache.generateKey(context, toolName, validatedArgs);
         await aiCache.setAsync(cacheKey, data);
       }
 
@@ -683,12 +635,32 @@ export class AIService {
     }
   }
 
-  private buildProvenance(toolCalls: GeminiToolCall[]): ResponseProvenance {
+  private buildProvenance(toolCalls: ProviderToolCall[]): ResponseProvenance {
     return {
       dataWindow: deriveDataWindowFromToolCalls(toolCalls),
       freshnessTs: new Date().toISOString(),
       tools: Array.from(new Set(toolCalls.map((toolCall) => toolCall.name)))
     };
+  }
+
+  /**
+   * A stored conversation as the viewer sees it: the labels in Thandi's
+   * replies become the viewer's own visible account names, read now. If they
+   * cannot be read, the labels are shown rather than failing the history.
+   */
+  async nameStoredConversation(actor: HouseholdContext, details: ConversationDetails): Promise<ConversationDetails> {
+    if (!details.messages.some((message) => message.role === 'assistant')) return details;
+    try {
+      const { userId, householdId } = actor;
+      const context: QueryContext = { userId, householdId, actor, currency: await this.getHouseholdCurrency(householdId) };
+      const names = new DisplayNames();
+      names.record('get_account_balances', await this.analyticsService.getAccountBalances(context));
+      names.record('get_goal_assignments', await this.analyticsService.getGoalAssignments(context));
+      return { ...details, messages: nameAssistantMessages(details.messages, names) };
+    } catch (error) {
+      logger.error('AI history: account names could not be read; showing labels', { error, householdId: actor.householdId });
+      return details;
+    }
   }
 
   /**
@@ -718,7 +690,8 @@ export class AIService {
     userMessage: string;
     assistantReply: string;
     toolsUsed: string[];
-  }): Promise<string> {
+    onPersisted?: ExchangePersistedHook;
+  }): Promise<PersistResult> {
     return this.conversationService.recordExchange(params);
   }
 
@@ -790,8 +763,7 @@ export class AIService {
     // The current message + system prompt are reserved FIRST and are never
     // trimmable, which is what guarantees the current message always survives.
     const reservedTokens =
-      estimateTokens(params.currentMessage) +
-      geminiClient.estimateSystemPromptTokens();
+      estimateTokens(params.currentMessage) + estimateTokens(buildSystemPrompt());
 
     const selection = selectHistoryTurns({
       messages,

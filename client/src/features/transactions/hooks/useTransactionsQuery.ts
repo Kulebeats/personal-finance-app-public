@@ -4,6 +4,7 @@
  * React Query hook for fetching transactions with filtering.
  */
 
+import { formatDateParam } from "@/lib/dates";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { transactionsApi, type Transaction } from "@/lib/api";
 import type { TransactionFilters, TransactionWithDetails } from "../types";
@@ -45,9 +46,9 @@ export function useTransactionsQuery({
       if (filters.accountId) params.accountId = filters.accountId;
       if (filters.categoryId) params.categoryId = filters.categoryId;
       if (filters.startDate)
-        params.startDate = filters.startDate.toISOString().split("T")[0];
+        params.startDate = formatDateParam(filters.startDate);
       if (filters.endDate)
-        params.endDate = filters.endDate.toISOString().split("T")[0];
+        params.endDate = formatDateParam(filters.endDate);
       if (filters.type && filters.type !== "all") params.type = filters.type;
       if (filters.search) params.search = filters.search;
       if (filters.amountMin !== null && filters.amountMin !== undefined)

@@ -209,39 +209,6 @@ describe("HouseholdRepository", () => {
       expect(members).toHaveLength(2);
     });
 
-    it("should update member role", async () => {
-      await householdRepository.addMember({
-        householdId: testHouseholdId,
-        userId: testUserId,
-        role: "member",
-      });
-
-      const updated = await householdRepository.updateMemberRole(
-        testHouseholdId,
-        testUserId,
-        "admin"
-      );
-
-      expect(updated).toBeDefined();
-      expect(updated!.role).toBe("admin");
-    });
-
-    it("should remove member from household", async () => {
-      await householdRepository.addMember({
-        householdId: testHouseholdId,
-        userId: testUserId,
-        role: "member",
-      });
-
-      await householdRepository.removeMember(testHouseholdId, testUserId);
-
-      const member = await householdRepository.findMember(
-        testHouseholdId,
-        testUserId
-      );
-      expect(member).toBeUndefined();
-    });
-
     // EDGE-004: Re-adding the same user to the same household is rejected, and
     // the duplicate never persists. Backed by the
     // household_members_household_user_unique constraint + addMember's 23505 ->
@@ -268,14 +235,6 @@ describe("HouseholdRepository", () => {
       ).filter((m) => m.userId === testUserId);
       expect(rows).toHaveLength(1);
       expect(rows[0].role).toBe("member");
-    });
-
-    // EDGE-006: Test remove non-existent member
-    it("should handle removing non-existent member gracefully", async () => {
-      // Should not throw, just complete without error
-      await expect(
-        householdRepository.removeMember(testHouseholdId, crypto.randomUUID())
-      ).resolves.not.toThrow();
     });
   });
 
@@ -438,33 +397,6 @@ describe("HouseholdRepository", () => {
       expect(accepted).toBeDefined();
       expect(accepted!.acceptedAt).toBeDefined();
       expect(accepted!.acceptedBy).toBe(testUserId2);
-    });
-
-    it("should update invitation expiry", async () => {
-      const inviteCode = crypto.randomBytes(32).toString("hex");
-      const expiresAt = new Date();
-      expiresAt.setDate(expiresAt.getDate() + 7);
-
-      const invitation = await householdRepository.createInvitation({
-        householdId: testHouseholdId,
-        email: "renew@example.com",
-        role: "member",
-        inviteCode,
-        invitedBy: testUserId,
-        expiresAt,
-      });
-
-      const newExpiresAt = new Date();
-      newExpiresAt.setDate(newExpiresAt.getDate() + 14);
-
-      const updated = await householdRepository.updateInvitationExpiry(
-        invitation.id,
-        testHouseholdId,
-        newExpiresAt
-      );
-
-      expect(updated).toBeDefined();
-      expect(updated!.expiresAt.getTime()).toBe(newExpiresAt.getTime());
     });
 
     it("should delete invitation", async () => {

@@ -4,8 +4,11 @@
  * Rendered instead of the composer while household AI consent is absent or
  * needs re-consent. POST /api/ai/consent is admin+ only (SEC-RBAC-001), so
  * non-admin members get a non-actionable notice instead of a button that
- * would 403. Disclosure copy comes from
- * docs/ai-integration/specifications/ai-assistant-consent-disclosure-copy.md.
+ * would 403. R17: the disclosure (v2.0) names both external processors —
+ * Anthropic Claude first, Google Gemini as the backup — and no longer promises
+ * that every personal identifier is removed (typed questions can contain
+ * personal information). Draft copy from the completion spec §3, pending
+ * product/privacy review.
  */
 import { Loader2, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -16,6 +19,7 @@ import {
   useUpdateAIConsent,
   type AIConsentStatus,
 } from "@/hooks/use-settings";
+import { AI_DISCLOSURE_VERSION, AIDisclosure } from "./AIDisclosure";
 
 const ADMIN_ROLES = ["admin", "owner"];
 
@@ -49,14 +53,10 @@ export function ConsentGate({ consent }: ConsentGateProps) {
             before continuing.
           </p>
         )}
+        <AIDisclosure />
         <p>
-          Thandi uses AI to summarize your household financial data. Personal
-          identifiers are removed and data is minimized before external
-          processing.
-        </p>
-        <p>
-          By continuing, you grant household-level consent. You can revoke
-          consent any time in Settings.
+          By continuing, you grant household-level consent. A household owner
+          or administrator can revoke consent any time in Settings.
         </p>
         <p className="font-medium text-foreground">
           Not financial advice. For personalized advice, consult a qualified
@@ -65,7 +65,9 @@ export function ConsentGate({ consent }: ConsentGateProps) {
         {canManageConsent ? (
           <div>
             <Button
-              onClick={() => updateConsent.mutate(true)}
+              onClick={() =>
+                updateConsent.mutate({ consentGiven: true, consentVersion: AI_DISCLOSURE_VERSION })
+              }
               disabled={updateConsent.isPending}
             >
               {updateConsent.isPending && (
@@ -76,7 +78,8 @@ export function ConsentGate({ consent }: ConsentGateProps) {
           </div>
         ) : (
           <p role="note">
-            Ask a household admin to enable Thandi in Settings.
+            Ask a household owner or administrator to enable or disable AI
+            processing.
           </p>
         )}
       </CardContent>

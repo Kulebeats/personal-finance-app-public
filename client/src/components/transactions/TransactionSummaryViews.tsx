@@ -1,34 +1,62 @@
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { formatCurrency, formatDate } from "@/lib/format";
+import Decimal from "decimal.js";
+import { getCurrencySymbol, formatDate } from "@/lib/format";
 import { DollarSign } from "lucide-react";
 
+export type SummaryAmount = number | string;
+const SummaryDecimal = Decimal.clone({ precision: 40 });
+
 type StandardViewProps = {
-  income: number;
-  expenses: number;
-  netFlow: number;
+  income: SummaryAmount;
+  expenses: SummaryAmount;
+  netFlow: SummaryAmount;
   transactionCount: number;
   netFlowColor: string;
+  currency?: string;
 };
 
 type DetailViewProps = {
-  income: number;
-  expenses: number;
+  income: SummaryAmount;
+  expenses: SummaryAmount;
   transactionCount: number;
-  largestTransaction: number;
-  largestExpense: number;
-  averageTransaction: number;
+  currency?: string;
+  largestTransaction?: SummaryAmount | null;
+  largestExpense?: SummaryAmount | null;
+  averageTransaction?: SummaryAmount | null;
   firstTransactionDate?: string | null;
   lastTransactionDate?: string | null;
 };
 
 type ChartViewProps = {
-  income: number;
-  expenses: number;
-  netFlow: number;
+  income: SummaryAmount;
+  expenses: SummaryAmount;
+  netFlow: SummaryAmount;
   netFlowColor: string;
+  currency?: string;
 };
 
+function formatSummaryCurrency(value: SummaryAmount, currency: string) {
+  const amount = new SummaryDecimal(value);
+  const [integer, fraction] = amount.abs().toFixed(2).split(".");
+  const grouped = integer.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${amount.isNegative() && !amount.isZero() ? "-" : ""}${getCurrencySymbol(currency)}${grouped}.${fraction}`;
+}
+
+function formatOptionalAmount(value: SummaryAmount | null | undefined, currency: string, signed = false) {
+  if (value === null) return "N/A";
+  if (value === undefined) return "Unavailable";
+  const amount = new SummaryDecimal(value);
+  if (!amount.isFinite()) return "Unavailable";
+  return `${signed && amount.greaterThanOrEqualTo(0) ? "+" : ""}${formatSummaryCurrency(value, currency)}`;
+}
+
+function formatSummaryDate(value: string | null | undefined) {
+  if (value === undefined) return "Unavailable";
+  if (value === null) return "N/A";
+  // API calendar dates must not shift when the browser parses a UTC midnight.
+  return formatDate(/^\d{4}-\d{2}-\d{2}$/.test(value) ? new Date(`${value}T00:00:00`) : value);
+}
 function StatRow({
   label,
   value,
@@ -52,7 +80,12 @@ export function SummaryStandardView({
   netFlow,
   transactionCount,
   netFlowColor,
+  currency = "ZMW",
 }: StandardViewProps) {
+  const incomeAmount = new SummaryDecimal(income), expenseAmount = new SummaryDecimal(expenses);
+  const total = incomeAmount.plus(expenseAmount.abs());
+  const incomePct = total.greaterThan(0) ? incomeAmount.dividedBy(total).times(100).toNumber() : 0;
+  const expensePct = total.greaterThan(0) ? expenseAmount.abs().dividedBy(total).times(100).toNumber() : 0;
   return (
     <>
       <div className="text-xs text-muted-foreground">
@@ -66,7 +99,7 @@ export function SummaryStandardView({
           Income
         </div>
         <div className="text-xl font-bold text-green-600">
-          {formatCurrency(income)}
+          {formatSummaryCurrency(income, currency)}
         </div>
       </div>
 
@@ -76,7 +109,7 @@ export function SummaryStandardView({
           Expenses
         </div>
         <div className="text-xl font-bold text-red-600">
-          {formatCurrency(expenses)}
+          {formatSummaryCurrency(expenses, currency)}
         </div>
       </div>
 
@@ -88,28 +121,28 @@ export function SummaryStandardView({
           Net Flow
         </div>
         <div className={cn("text-2xl font-bold", netFlowColor)}>
-          {netFlow >= 0 ? "+" : ""}
-          {formatCurrency(netFlow)}
+          {new SummaryDecimal(netFlow).greaterThanOrEqualTo(0) ? "+" : ""}
+          {formatSummaryCurrency(netFlow, currency)}
         </div>
       </div>
 
-      {income > 0 || expenses > 0 ? (
+      {incomeAmount.greaterThan(0) || expenseAmount.greaterThan(0) ? (
         <div className="space-y-2 pt-2">
           <div className="h-2 rounded-full overflow-hidden bg-muted flex">
-            {income > 0 && (
+            {incomeAmount.greaterThan(0) && (
               <div
                 className="bg-green-500 h-full transition-all"
                 style={{
-                  width: `${(income / (income + Math.abs(expenses))) * 100}%`,
+                  width: `${incomePct}%`,
                 }}
               />
             )}
-            {expenses > 0 && (
+            {expenseAmount.greaterThan(0) && (
               <div
                 className="bg-red-500 h-full transition-all"
                 style={{
                   width: `${
-                    (Math.abs(expenses) / (income + Math.abs(expenses))) * 100
+                    expensePct
                   }%`,
                 }}
               />
@@ -130,6 +163,7 @@ export function SummaryDetailView({
   averageTransaction,
   firstTransactionDate,
   lastTransactionDate,
+  currency = "ZMW",
 }: DetailViewProps) {
   return (
     <div className="space-y-3">
@@ -138,35 +172,34 @@ export function SummaryDetailView({
         value={transactionCount.toLocaleString()}
       />
       <StatRow
-        label="Largest transaction"
-        value={`+${formatCurrency(largestTransaction)}`}
+        label="Largest income"
+        value={formatOptionalAmount(largestTransaction, currency, true)}
         valueClass="text-green-600"
       />
       <StatRow
         label="Largest expense"
-        value={formatCurrency(largestExpense)}
+        value={formatOptionalAmount(largestExpense, currency)}
       />
       <StatRow
         label="Average transaction"
-        value={`${averageTransaction >= 0 ? "+" : ""}${formatCurrency(
-          averageTransaction
-        )}`}
-        valueClass={averageTransaction >= 0 ? "text-green-600" : "text-red-600"}
+        value={formatOptionalAmount(averageTransaction, currency, true)}
+        valueClass={averageTransaction == null ? "text-muted-foreground"
+          : new SummaryDecimal(averageTransaction).greaterThanOrEqualTo(0) ? "text-green-600" : "text-red-600"}
       />
       <StatRow
         label="Total income"
-        value={`+${formatCurrency(income)}`}
+        value={`+${formatSummaryCurrency(income, currency)}`}
         valueClass="text-green-600"
       />
-      <StatRow label="Total spending" value={formatCurrency(expenses)} />
+      <StatRow label="Total spending" value={formatSummaryCurrency(expenses, currency)} />
       <div className="border-t my-2" />
       <StatRow
         label="First transaction"
-        value={firstTransactionDate ? formatDate(firstTransactionDate) : "N/A"}
+        value={formatSummaryDate(firstTransactionDate)}
       />
       <StatRow
         label="Last transaction"
-        value={lastTransactionDate ? formatDate(lastTransactionDate) : "N/A"}
+        value={formatSummaryDate(lastTransactionDate)}
       />
 
       <Button variant="link" className="text-blue-600 h-auto p-0 mt-2">
@@ -181,23 +214,23 @@ export function SummaryChartView({
   expenses,
   netFlow,
   netFlowColor,
+  currency = "ZMW",
 }: ChartViewProps) {
-  const total = income + expenses;
-  const incomePct = total > 0 ? (income / total) * 100 : 0;
-  const expensePct = total > 0 ? (expenses / total) * 100 : 0;
+  const total = new SummaryDecimal(income).plus(expenses);
+  const incomePct = total.greaterThan(0) ? new SummaryDecimal(income).dividedBy(total).times(100).toNumber() : 0;
 
   return (
     <div className="flex flex-col items-center gap-4 py-2">
       <div
         className="relative w-32 h-32 rounded-full flex items-center justify-center shadow-inner"
         style={{
-          background: `conic-gradient(#22c55e ${incomePct}%, #ef4444 ${incomePct}% 100%)`,
+          background: total.greaterThan(0) ? `conic-gradient(#22c55e ${incomePct}%, #ef4444 ${incomePct}% 100%)` : "hsl(var(--muted))",
         }}
       >
         <div className="absolute w-20 h-20 bg-background rounded-full flex items-center justify-center flex-col">
           <span className="text-[10px] text-muted-foreground">Net</span>
           <span className={cn("text-sm font-bold", netFlowColor)}>
-            {formatCurrency(netFlow)}
+            {formatSummaryCurrency(netFlow, currency)}
           </span>
         </div>
       </div>
@@ -209,7 +242,7 @@ export function SummaryChartView({
             <span>Income</span>
           </div>
           <span className="font-bold text-green-600">
-            {formatCurrency(income)}
+            {formatSummaryCurrency(income, currency)}
           </span>
         </div>
         <div className="flex justify-between items-center text-xs">
@@ -218,7 +251,7 @@ export function SummaryChartView({
             <span>Expenses</span>
           </div>
           <span className="font-bold text-red-600">
-            {formatCurrency(expenses)}
+            {formatSummaryCurrency(expenses, currency)}
           </span>
         </div>
       </div>

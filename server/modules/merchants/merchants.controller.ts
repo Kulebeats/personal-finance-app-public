@@ -13,10 +13,13 @@ import { logger } from "../../utils/logger";
 import { success, created } from "../../core/http";
 import { ValidationError } from "../../core/errors";
 import { businessAuditService } from "../../services/BusinessAuditService";
+import { merchantLifecycleService } from "./merchants.lifecycle.service";
+import { actorOf } from "./merchants.assets.controller";
 
 // Schemas
 import {
   createMerchantSchema,
+  deleteMerchantQuerySchema,
   mergeBySourceSchema,
   undoMergeParamsSchema,
   updateMerchantSchema,
@@ -26,10 +29,9 @@ import {
 export const merchantsController = {
   async list(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
       const { search, includeHidden } = req.query;
 
-      const merchantList = await merchantService.list(householdId, {
+      const merchantList = await merchantService.list(req.householdContext!, {
         search: typeof search === "string" ? search : undefined,
         includeHidden: includeHidden === "true",
       });
@@ -42,10 +44,9 @@ export const merchantsController = {
 
   async getById(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
       const { id } = req.params;
 
-      const details = await merchantService.getDetails(id, householdId);
+      const details = await merchantService.getDetails(id, req.householdContext!);
       return success(res, details);
     } catch (error) {
       next(error);
@@ -54,8 +55,7 @@ export const merchantsController = {
 
   async duplicates(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
-      const groups = await merchantService.findDuplicates(householdId);
+      const groups = await merchantService.findDuplicates(req.householdContext!);
       return success(res, { groups });
     } catch (error) {
       next(error);
@@ -64,7 +64,6 @@ export const merchantsController = {
 
   async autocomplete(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
       const query = typeof req.query.q === "string" ? req.query.q : "";
       const parsedLimit = Number(req.query.limit);
       const limit = Number.isFinite(parsedLimit)
@@ -76,7 +75,7 @@ export const merchantsController = {
       }
 
       const merchantList = await merchantService.autocomplete(
-        householdId,
+        req.householdContext!,
         query,
         limit,
       );
@@ -174,23 +173,18 @@ export const merchantsController = {
     }
   },
 
+  /** Archive (the only delete the server performs; see merchants.lifecycle.service). */
   async delete(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
-      const { id } = req.params;
-
-      const merchant = await merchantService.delete(id, householdId);
-
-      await businessAuditService.logDelete({
-        householdId,
-        userId: req.user!.id,
-        entityType: "merchant",
-        entityId: merchant.id,
-        metadata: { name: merchant.name },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
-
-      return success(res, { merchant });
+      const query = deleteMerchantQuerySchema.safeParse(req.query);
+      if (!query.success) {
+        throw new ValidationError(
+          "Merchants can only be archived here: permanent delete is not available, and merge uses POST /merchants/:id/merge",
+          query.error.errors,
+        );
+      }
+      const result = await merchantLifecycleService.archive(req.params.id, actorOf(req), req.householdContext!);
+      return success(res, result);
     } catch (error) {
       next(error);
     }
@@ -198,7 +192,6 @@ export const merchantsController = {
 
   async merge(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
       const parseResult = mergeSchema.safeParse(req.body);
       if (!parseResult.success) {
         throw new ValidationError(
@@ -208,26 +201,8 @@ export const merchantsController = {
       }
 
       const { sourceId, targetId } = parseResult.data;
-      const result = await merchantService.merge(householdId, sourceId, targetId, {
-        mergedBy: req.user!.id,
-      });
-
-      await businessAuditService.log({
-        householdId,
-        userId: req.user!.id,
-        action: "MERGE",
-        entityType: "merchant",
-        entityId: targetId,
-        details: {
-          sourceId,
-          targetId,
-          mergeHistoryId: result.mergeHistoryId,
-          mergedTransactionCount: result.mergedTransactionCount,
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
-
-      logger.info("Merged merchants", { householdId, sourceId, targetId });
+      const result = await merchantLifecycleService.merge(sourceId, targetId, actorOf(req), req.householdContext!);
+      logger.info("Merged merchants", { householdId: req.householdContext!.householdId, sourceId, targetId });
       return success(res, result);
     } catch (error) {
       next(error);
@@ -236,7 +211,6 @@ export const merchantsController = {
 
   async mergeBySource(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
       const { sourceId } = req.params;
       const parseResult = mergeBySourceSchema.safeParse(req.body);
       if (!parseResult.success) {
@@ -246,30 +220,14 @@ export const merchantsController = {
         );
       }
 
-      const result = await merchantService.merge(
-        householdId,
+      const result = await merchantLifecycleService.merge(
         sourceId,
         parseResult.data.targetMerchantId,
-        { mergedBy: req.user!.id },
+        actorOf(req),
+        req.householdContext!,
       );
-
-      await businessAuditService.log({
-        householdId,
-        userId: req.user!.id,
-        action: "MERGE",
-        entityType: "merchant",
-        entityId: result.targetId,
-        details: {
-          sourceId,
-          targetId: result.targetId,
-          mergeHistoryId: result.mergeHistoryId,
-          mergedTransactionCount: result.mergedTransactionCount,
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
-
       logger.info("Merged merchants", {
-        householdId,
+        householdId: req.householdContext!.householdId,
         sourceId,
         targetId: result.targetId,
       });
@@ -285,7 +243,6 @@ export const merchantsController = {
 
   async undoMerge(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
       const parseResult = undoMergeParamsSchema.safeParse(req.params);
       if (!parseResult.success) {
         throw new ValidationError(
@@ -294,31 +251,19 @@ export const merchantsController = {
         );
       }
 
-      const result = await merchantService.undoMerge(
-        householdId,
+      const result = await merchantLifecycleService.undoMerge(
         parseResult.data.historyId,
+        actorOf(req),
+        req.householdContext!,
       );
-
-      await businessAuditService.log({
-        householdId,
-        userId: req.user!.id,
-        action: "RESTORE",
-        entityType: "merchant",
-        entityId: result.restoredMerchant.id,
-        details: {
-          historyId: parseResult.data.historyId,
-          targetId: result.target.id,
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
-
       logger.info("Undid merchant merge", {
-        householdId,
+        householdId: req.householdContext!.householdId,
         historyId: parseResult.data.historyId,
         restoredMerchantId: result.restoredMerchant.id,
         targetId: result.target.id,
+        restoredTransactionCount: result.restoredTransactionCount,
+        skippedTransactionCount: result.skippedTransactionCount,
       });
-
       return success(res, result);
     } catch (error) {
       next(error);

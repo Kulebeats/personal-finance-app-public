@@ -11,11 +11,13 @@ import { Link } from "wouter";
 import { useFormatters } from "@/contexts/SettingsContext";
 import { useCurrentMonthBudgets } from "@/hooks/useBudgets";
 import { sumMoneyValues } from "@/lib/money";
+import { commonBudgetCurrency } from "@/features/budget/budgetMoneyDisplay";
+import { isUnavailableFlexBudget } from "@/hooks/useUnavailableBudgets";
 import { WidgetErrorState } from "./WidgetErrorState";
 
 export default function BudgetStatusWidget() {
   const { formatCurrency } = useFormatters();
-  const { data: budgets, isLoading, error, refetch } = useCurrentMonthBudgets();
+  const { data: budgets = [], unavailableBudgets = [], budgetSystem, isLoading, error, refetch } = useCurrentMonthBudgets();
 
   if (isLoading) {
     return (
@@ -36,9 +38,29 @@ export default function BudgetStatusWidget() {
     );
   }
 
-  // Aggregate budget data
-  const totalBudgetDecimal = sumMoneyValues(budgets?.map((b) => b.amount) ?? []);
-  const totalSpentDecimal = sumMoneyValues(budgets?.map((b) => b.spent) ?? []);
+  // The flex row already includes every grouped expense. It overlaps the
+  // detailed category and group rows, so only one scope can supply progress.
+  const hasFlexScope = budgets.some(budget => budget.isFlexBucket) || unavailableBudgets.some(isUnavailableFlexBudget);
+  const showFlex = hasFlexScope && budgetSystem === "flex";
+  const scopedBudgets = budgets.filter(budget => Boolean(budget.isFlexBucket) === showFlex);
+  const withheld = unavailableBudgets.some(budget => isUnavailableFlexBudget(budget) === showFlex);
+  const amounts = scopedBudgets.flatMap(({ amount, spent }) => [amount, spent]);
+  const currency = commonBudgetCurrency(amounts);
+  const legacyNumbers = amounts.every(amount => typeof amount === "string" || typeof amount === "number");
+  if ((hasFlexScope && budgetSystem !== "category" && budgetSystem !== "flex") || withheld || (currency === null && !legacyNumbers)) {
+    return (
+      <WidgetErrorState
+        title="Budget status unavailable"
+        message="The selected budget's progress is unavailable."
+        className="col-span-1 md:col-span-2 h-full"
+      />
+    );
+  }
+
+  // Aggregate the confirmed same-unit amounts. The scalar-only legacy payload
+  // keeps the prior display path.
+  const totalBudgetDecimal = sumMoneyValues(scopedBudgets.map(budget => budget.amount));
+  const totalSpentDecimal = sumMoneyValues(scopedBudgets.map(budget => budget.spent));
   const totalBudget = totalBudgetDecimal.toNumber();
   const totalSpent = totalSpentDecimal.toNumber();
 
@@ -95,13 +117,13 @@ export default function BudgetStatusWidget() {
         <p className="text-muted-foreground text-sm max-w-xs mx-auto mt-1">
           You've spent{" "}
           <span className="font-bold text-foreground">
-            {formatCurrency(totalSpent)}
+            {formatCurrency(totalSpent, currency ?? undefined)}
           </span>{" "}
           of your{" "}
           <span className="font-bold text-foreground">
-            {formatCurrency(totalBudget)}
+            {formatCurrency(totalBudget, currency ?? undefined)}
           </span>{" "}
-          monthly budget.
+          {showFlex ? "flex budget." : "monthly budget."}
         </p>
         <p className={cn("text-sm font-medium mt-1", statusTextColor)}>
           {statusMessage}
@@ -122,7 +144,7 @@ export default function BudgetStatusWidget() {
           drill into the underlying budgets - link out to the Budget page. */}
       <Link
         href="/budget"
-        className="group flex items-center gap-1 text-sm font-medium text-primary hover:underline"
+        className="group flex items-center gap-1 text-sm font-medium text-primary hover:underline max-md:min-h-11"
       >
         View budgets
         <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />

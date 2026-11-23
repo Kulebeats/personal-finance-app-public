@@ -4,6 +4,7 @@
  * Mutations for creating, updating, and deleting transactions.
  */
 
+import { userErrorMessage } from "@/lib/errorCopy";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { transactionsApi } from "@/lib/api";
 import { toast } from "sonner";
@@ -45,7 +46,7 @@ export function useTransactionMutations() {
       invalidateTransactions();
     },
     onError: (error: Error) => {
-      toast.error(`Failed to create transaction: ${error.message}`);
+      toast.error(`Failed to create transaction: ${userErrorMessage(error, "Please try again.")}`);
     },
   });
 
@@ -64,7 +65,7 @@ export function useTransactionMutations() {
       invalidateTransactions();
     },
     onError: (error: Error) => {
-      toast.error(`Failed to update transaction: ${error.message}`);
+      toast.error(`Failed to update transaction: ${userErrorMessage(error, "Please try again.")}`);
     },
   });
 
@@ -77,7 +78,7 @@ export function useTransactionMutations() {
       invalidateTransactions();
     },
     onError: (error: Error) => {
-      toast.error(`Failed to delete transaction: ${error.message}`);
+      toast.error(`Failed to delete transaction: ${userErrorMessage(error, "Please try again.")}`);
     },
   });
 

@@ -6,6 +6,9 @@ import { cn } from "@/lib/utils";
 import { differenceInDays } from "date-fns";
 import { RecordInvestmentTransactionModal } from "./RecordInvestmentTransactionModal";
 import type { Holding } from "@/hooks/useInvestments";
+import { parseMoneyString, toMoneyNumber } from "@/lib/money";
+import { isZeroQuantityHolding, useHoldingRemoval } from "./DeleteHoldingDialog";
+import { HouseholdPriceAction } from "./HouseholdSecurityPriceDialog";
 
 interface HoldingsListProps {
   holdings: Holding[];
@@ -23,6 +26,7 @@ export function HoldingsList({
 }: HoldingsListProps) {
   const [sortField, setSortField] = useState<SortField>("value");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const removal = useHoldingRemoval();
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -44,7 +48,7 @@ export function HoldingsList({
           comparison = nameA.localeCompare(nameB);
           break;
         case "value":
-          comparison = (a.currentValue || 0) - (b.currentValue || 0);
+          comparison = parseMoneyString(a.currentValue?.amount).comparedTo(parseMoneyString(b.currentValue?.amount));
           break;
         case "quantity":
           comparison = Number(a.quantity) - Number(b.quantity);
@@ -55,7 +59,9 @@ export function HoldingsList({
             Number(b.security?.currentPrice || "0");
           break;
         case "change":
-          comparison = (a.gainLossPercent || 0) - (b.gainLossPercent || 0);
+          if (a.gainLossPercent == null) return b.gainLossPercent == null ? 0 : 1;
+          if (b.gainLossPercent == null) return -1;
+          comparison = a.gainLossPercent - b.gainLossPercent;
           break;
       }
 
@@ -65,7 +71,7 @@ export function HoldingsList({
 
   return (
     <Card className="lg:col-span-3 shadow-sm border-border overflow-hidden">
-      <table className="w-full text-sm text-left">
+      <table aria-label="Holdings" className="w-full text-sm text-left">
         <thead className="bg-muted/30 text-muted-foreground font-medium border-b border-border">
           <tr>
             <SortableTableHeader
@@ -112,7 +118,7 @@ export function HoldingsList({
               onSort={(key) => handleSort(key as SortField)}
               className="text-right"
             >
-              Today's Change
+              Gain/Loss
             </SortableTableHeader>
             <th className="px-6 py-3"></th>
           </tr>
@@ -136,7 +142,7 @@ export function HoldingsList({
               </td>
               <td className="px-6 py-4 text-right tabular-nums">
                 <div className="flex items-center justify-end gap-2">
-                  {h.security?.lastPriceUpdate &&
+                  {!h.security?.valuationPrice && h.security?.lastPriceUpdate &&
                     differenceInDays(
                       new Date(),
                       new Date(h.security.lastPriceUpdate),
@@ -154,39 +160,43 @@ export function HoldingsList({
                     h.security?.currency ?? displayCurrency,
                   )}
                 </div>
+                {h.security?.valuationPrice && (
+                  <div className="text-xs text-muted-foreground">
+                    Household price, valid through {h.security.valuationPrice.validThrough}
+                  </div>
+                )}
               </td>
               <td className="px-6 py-4 text-right tabular-nums">
                 {Number(h.quantity).toLocaleString()}
               </td>
               <td className="px-6 py-4 text-right font-medium tabular-nums">
-                {formatCurrency(h.currentValue ?? 0, displayCurrency)}
+                {formatCurrency(toMoneyNumber(h.currentValue ?? "0"), h.currentValue?.currency ?? h.baseCurrency ?? displayCurrency)}
               </td>
-              <td
-                className={cn(
-                  "px-6 py-4 text-right font-medium tabular-nums",
-                  (h.gainLossPercent ?? 0) >= 0
-                    ? "text-emerald-600 dark:text-emerald-400"
-                    : "text-rose-600 dark:text-rose-400",
-                )}
-              >
-                <span
+              <td className="px-6 py-4 text-right font-medium tabular-nums">
+                {h.gainLossPercent == null ? <span className="text-muted-foreground text-xs">Unavailable</span> : <span
                   className={cn(
                     "inline-flex px-2 py-0.5 rounded-full text-xs",
-                    (h.gainLossPercent ?? 0) >= 0
+                    h.gainLossPercent >= 0
                       ? "bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300"
                       : "bg-rose-50 dark:bg-rose-900/30 text-rose-700 dark:text-rose-300",
                   )}
                 >
-                  {(h.gainLossPercent ?? 0) > 0 ? "+" : ""}
-                  {(h.gainLossPercent ?? 0).toFixed(1)}%
-                </span>
+                  {h.gainLossPercent > 0 ? "+" : ""}
+                  {h.gainLossPercent.toFixed(1)}%
+                </span>}
               </td>
               <td className="px-6 py-4 text-right">
-                <RecordInvestmentTransactionModal holding={h}>
-                  <button className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-muted rounded transition-opacity text-xs font-medium text-primary hover:text-primary/80">
-                    Record
-                  </button>
-                </RecordInvestmentTransactionModal>
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <HouseholdPriceAction holding={h} />
+                  {removal.canWrite && <RecordInvestmentTransactionModal holding={h}>
+                    <button type="button" className="p-1.5 hover:bg-muted rounded text-xs font-medium text-primary hover:text-primary/80">
+                      Record
+                    </button>
+                  </RecordInvestmentTransactionModal>}
+                  {removal.canWrite && isZeroQuantityHolding(h) && <button type="button" aria-label={`Review removal of ${h.security?.symbol || h.security?.name || "holding"}`} className="p-1.5 hover:bg-muted rounded text-xs font-medium text-destructive" onClick={() => removal.review(h)}>
+                    Review removal
+                  </button>}
+                </div>
               </td>
             </tr>
           ))}

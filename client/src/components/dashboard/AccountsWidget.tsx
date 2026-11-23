@@ -97,7 +97,7 @@ export default function AccountsWidget() {
             </div>
             )}
             <div className="p-3 bg-muted/20 text-center border-t border-border/40">
-                <Link href="/accounts">
+                <Link href="/accounts" className="inline-flex items-center max-md:min-h-11">
                     <span className="text-xs font-medium text-primary hover:underline cursor-pointer">View all accounts</span>
                 </Link>
             </div>

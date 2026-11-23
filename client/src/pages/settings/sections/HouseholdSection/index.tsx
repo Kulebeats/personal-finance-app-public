@@ -6,6 +6,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiCall, type ApiError } from "@/lib/api";
 import { CreateHouseholdForm } from "./components/CreateHouseholdForm";
 import { EditHouseholdForm } from "./components/EditHouseholdForm";
+import { BudgetRolloverSetting } from "./components/BudgetRolloverSetting";
 import { HouseholdData } from "./types";
 
 // V7 response envelope (server/core/http success()).
@@ -107,11 +108,14 @@ export default function HouseholdSection() {
           isLoading={isLoading}
         >
           {data && (
-            <EditHouseholdForm
-              data={data}
-              currencies={currencies}
-              months={months}
-            />
+            <>
+              <EditHouseholdForm
+                data={data}
+                currencies={currencies}
+                months={months}
+              />
+              <BudgetRolloverSetting />
+            </>
           )}
         </SettingsCard>
       </Suspense>

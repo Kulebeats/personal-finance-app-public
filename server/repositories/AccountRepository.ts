@@ -1,11 +1,7 @@
-import { eq, and, or, isNull, sql, desc, gte, lte, asc } from "drizzle-orm";
+import { eq, and, or, isNull, sql } from "drizzle-orm";
 import { db } from "../db";
 import {
   accounts,
-  transactions,
-  categories,
-  tags,
-  transactionTags,
   accountBalanceSnapshots,
   netWorthSnapshots,
   type Account,
@@ -15,6 +11,8 @@ import {
   withTransaction,
   type TransactionType,
 } from "../utils/withTransaction";
+import { includesAccountBasis, prepareAccountBasisUpdate } from "./AccountBasisUpdate";
+import { changesAccountCustody, lockAccountCustody } from "./AccountCustodyGuard";
 import { accountSnapshotRepository } from "./AccountSnapshotRepository";
 
 /**
@@ -151,8 +149,8 @@ export class AccountRepository {
   /**
    * Create a new account
    */
-  async create(data: InsertAccount): Promise<Account> {
-    const result = await db.insert(accounts).values(data).returning();
+  async create(data: InsertAccount, tx?: TransactionType): Promise<Account> {
+    const result = await (tx ?? db).insert(accounts).values(data).returning();
     return result[0];
   }
 
@@ -172,6 +170,11 @@ export class AccountRepository {
     ownershipCheck?: { userId: string },
     tx?: TransactionType,
   ): Promise<{ account?: Account; conflict: boolean; unauthorized?: boolean }> {
+    const checkBasis = includesAccountBasis(data);
+    const checkCustody = changesAccountCustody(data);
+    if ((checkBasis || checkCustody) && !tx) {
+      return withTransaction(lockedTx => this.update(id, householdId, data, expectedUpdatedAt, ownershipCheck, lockedTx));
+    }
     const dbOrTx = tx ?? db;
 
     const conditions = [
@@ -196,11 +199,17 @@ export class AccountRepository {
       );
     }
 
-    const result = await dbOrTx
-      .update(accounts)
-      .set({ ...data, updatedAt: new Date() })
-      .where(and(...conditions))
-      .returning();
+    const scope = and(...conditions)!;
+    let patch: Partial<Account> | undefined = data;
+    if ((checkBasis || checkCustody) && tx) {
+      const locked = checkCustody
+        ? await lockAccountCustody(tx, householdId, scope, data, ownershipCheck?.userId)
+        : (await tx.select().from(accounts).where(scope).for("update"))[0];
+      if (!locked) patch = undefined;
+      else if (checkBasis) patch = await prepareAccountBasisUpdate(tx, locked, data);
+    }
+    const result = patch ? await dbOrTx.update(accounts).set({ ...patch, updatedAt: new Date() })
+      .where(scope).returning() : [];
 
     if (result.length === 0) {
       if (expectedUpdatedAt) {
@@ -224,6 +233,13 @@ export class AccountRepository {
     return { account: result[0], conflict: false };
   }
 
+  /** NEW-32: the account row FOR UPDATE, read as the audit's before-state of a write in tx. */
+  async lockForAudit(tx: TransactionType, id: string, householdId: string): Promise<Account | undefined> {
+    const [row] = await tx.select().from(accounts)
+      .where(and(eq(accounts.id, id), eq(accounts.householdId, householdId))).for("update");
+    return row;
+  }
+
   /**
    * Soft delete an account
    *
@@ -235,6 +251,7 @@ export class AccountRepository {
     id: string,
     householdId: string,
     ownershipCheck?: { userId: string },
+    tx?: TransactionType,
   ): Promise<{ deleted: boolean; unauthorized?: boolean }> {
     const conditions = [
       eq(accounts.id, id),
@@ -253,7 +270,7 @@ export class AccountRepository {
       );
     }
 
-    const result = await db
+    const result = await (tx ?? db)
       .update(accounts)
       .set({ deletedAt: new Date(), updatedAt: new Date() })
       .where(and(...conditions))
@@ -293,6 +310,7 @@ export class AccountRepository {
     id: string,
     householdId: string,
     ownershipCheck?: { userId: string },
+    tx?: TransactionType,
   ): Promise<{ account?: Account; unauthorized?: boolean }> {
     const conditions = [
       eq(accounts.id, id),
@@ -311,7 +329,7 @@ export class AccountRepository {
       );
     }
 
-    const result = await db
+    const result = await (tx ?? db)
       .update(accounts)
       .set({ isArchived: true, updatedAt: new Date() })
       .where(and(...conditions))
@@ -339,6 +357,7 @@ export class AccountRepository {
     id: string,
     householdId: string,
     ownershipCheck?: { userId: string },
+    tx?: TransactionType,
   ): Promise<{ account?: Account; unauthorized?: boolean }> {
     const conditions = [
       eq(accounts.id, id),
@@ -356,7 +375,7 @@ export class AccountRepository {
       );
     }
 
-    const result = await db
+    const result = await (tx ?? db)
       .update(accounts)
       .set({ isArchived: false, updatedAt: new Date() })
       .where(and(...conditions))
@@ -511,66 +530,6 @@ export class AccountRepository {
     data: { date: string; balance: string }[],
   ): Promise<number> {
     return accountSnapshotRepository.importBalanceSnapshots(accountId, data);
-  }
-
-  /**
-   * Get transactions for an account with category names
-   */
-  async getTransactionsForAccount(
-    accountId: string,
-    householdId: string,
-    startDate?: string,
-    endDate?: string,
-  ): Promise<
-    {
-      id: string;
-      date: string;
-      name: string;
-      originalName: string | null;
-      amount: string;
-      type: string;
-      notes: string | null;
-      categoryName: string | null;
-      tags: string[] | null;
-    }[]
-  > {
-    const conditions = [
-      eq(transactions.accountId, accountId),
-      eq(transactions.householdId, householdId),
-      isNull(transactions.deletedAt),
-    ];
-
-    if (startDate) {
-      conditions.push(gte(transactions.date, startDate));
-    }
-    if (endDate) {
-      conditions.push(lte(transactions.date, endDate));
-    }
-
-    const results = await db
-      .select({
-        id: transactions.id,
-        date: transactions.date,
-        name: transactions.name,
-        originalName: transactions.originalName,
-        amount: transactions.amount,
-        type: transactions.type,
-        notes: transactions.notes,
-        categoryName: categories.name,
-        tags: sql<string[]>`COALESCE(array_agg(${tags.name}) FILTER (WHERE ${tags.name} IS NOT NULL), ARRAY[]::text[])`,
-      })
-      .from(transactions)
-      .leftJoin(categories, eq(transactions.categoryId, categories.id))
-      .leftJoin(transactionTags, eq(transactionTags.transactionId, transactions.id))
-      .leftJoin(tags, eq(tags.id, transactionTags.tagId))
-      .where(and(...conditions))
-      .groupBy(transactions.id, categories.name)
-      .orderBy(desc(transactions.date));
-
-    return results.map((r) => ({
-      ...r,
-      tags: r.tags ?? [],
-    }));
   }
 }
 

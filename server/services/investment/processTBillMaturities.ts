@@ -1,175 +1,78 @@
 import { db } from "../../db";
-import { grzTBills, investmentTransactions } from "@shared/schema";
+import { grzTBills } from "@shared/schema";
 import { eq, and, sql } from "drizzle-orm";
-import { Money } from "../../core/money";
 import { logger } from "../../utils/logger";
 import { businessAuditService } from "../BusinessAuditService";
-import { transactionRepository } from "../../repositories/TransactionRepository";
 import { withTransaction } from "../../utils/withTransaction";
-import { isPostgresError } from "../../utils/postgresError";
-import { tbillMaturityIncomeKey } from "./investmentCronKeys";
-
-/** Withholding tax on T-Bill maturity interest (GRZ sovereign debt, 15%). */
-const TBILL_WITHHOLDING_TAX_RATE = "0.15";
+import { calendarClock, householdToday } from "../householdCalendarToday";
+import { HttpError } from "../../core/errors";
+import { tbillMaturityTerms } from "../grz/tbillSettlementTerms";
 
 export interface TBillMaturityResults {
+  /** Bills that fell due this run and now await the member's receipt confirmation (A-36). */
   matured: number;
   skipped: number;
+  /** Not yet due on its household's calendar date (NEW-22); left active. */
+  notDue: number;
   failed: number;
-  errors: string[];
+  errors: TBillMaturityFailure[];
 }
 
-type MaturityOutcome = { status: "matured" } | { status: "skipped" };
+/** A bill the run could not mature, as its cron caller sees it: never the error text (NEW-23). */
+export interface TBillMaturityFailure { billId: string; code: string }
+export const TBILL_MATURITY_FAILED = "TBILL_MATURITY_FAILED";
+
+type MaturityOutcome = { status: "due" } | { status: "skipped" } | { status: "not_due" };
+
+/** The latest calendar date any household can be on now: UTC plus one day
+ * covers every zone (the furthest ahead is UTC+14). Each bill is then held to
+ * its own household's date under the lock. */
+function latestHouseholdDate(now: Date): string {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString().slice(0, 10);
+}
 
 /**
  * Process GRZ T-Bill Maturities (Step 1 of Daily Investment Automation Cycle).
  *
- * R6 fix: the audit found this path had NO row lock and NO conditional
- * status re-check, so overlapping/retried cron runs could each independently
- * read the bill as "active" and mature it, double-paying the maturity
- * interest and double-crediting the account. Every bill is now processed
- * inside a transaction that:
- *   1. locks the bill row FOR UPDATE (Rule 10) so overlapping/retried runs
- *      serialize on it — the initial `maturingBills` scan below is UNLOCKED,
- *   2. re-checks the bill is STILL active/maturing INSIDE the lock (a
- *      concurrent run may have already matured it since that unlocked scan),
- *   3. creates the interest income ledger transaction via
- *      transactionRepository.createWithinTransaction, which locks + credits
- *      the account balance and writes the Rule-9 audit row atomically, using
- *      a deterministic idempotency key as a defense-in-depth backstop against
- *      a UNIQUE(idempotency_key) collision (never a 500, never a
- *      double-payout),
- *   4. marks the bill matured and writes the existing grz_tbill PROCESS audit
- *      row, all in the same transaction.
+ * A-36: on its household's maturity date a bill stops being active and becomes
+ * awaiting_receipt. The run books the withholding once (A-41) and the proceeds
+ * as face less that withholding, and posts NO cash, income or investment row:
+ * the bill stays in net worth at those proceeds until the member confirms the
+ * bank credit (POST /api/grz/tbills/:id/confirm-receipt), which posts the
+ * principal and net interest exactly once.
+ *
+ * R6: each bill is locked FOR UPDATE and re-checked inside the lock, so an
+ * overlapping or retried run skips a bill another run already moved.
  */
 export async function processTBillMaturities(): Promise<TBillMaturityResults> {
-  const today = new Date().toISOString().split("T")[0];
-  const results: TBillMaturityResults = {
-    matured: 0,
-    skipped: 0,
-    failed: 0,
-    errors: [],
-  };
+  // NEW-22: a bill matures on its household's calendar date, not the host's or UTC's.
+  const latest = latestHouseholdDate(calendarClock.now());
+  const results: TBillMaturityResults = { matured: 0, skipped: 0, notDue: 0, failed: 0, errors: [] };
 
   // Unlocked candidate scan. Re-verified under lock per-bill below.
   const maturingBills = await db.query.grzTBills.findMany({
-    where: and(
-      eq(grzTBills.status, "active"),
-      sql`${grzTBills.maturityDate} <= ${today}`,
-    ),
+    where: and(eq(grzTBills.status, "active"), sql`${grzTBills.maturityDate} <= ${latest}`),
   });
 
   for (const bill of maturingBills) {
     try {
       const outcome = await withTransaction<MaturityOutcome>(async (tx) => {
-        // Rule 10: lock the bill row, then re-check it is STILL maturing now
-        // that we hold the lock. A concurrent/retried run may have already
-        // matured this bill since the unlocked scan above.
-        const [locked] = await tx
-          .select()
-          .from(grzTBills)
-          .where(eq(grzTBills.id, bill.id))
-          .for("update")
-          .limit(1);
+        const [locked] = await tx.select().from(grzTBills).where(eq(grzTBills.id, bill.id)).for("update").limit(1);
+        if (!locked || locked.status !== "active") return { status: "skipped" };
+        const today = await householdToday(tx, locked.householdId);
+        // Not yet due on this household's calendar: a later run matures it.
+        if (locked.maturityDate > today) return { status: "not_due" };
 
-        if (!locked || locked.status !== "active" || locked.maturityDate > today) {
-          return { status: "skipped" };
-        }
-
-        if (!locked.accountId) {
-          throw new Error("T-Bill missing accountId");
-        }
-
-        // Use Money class throughout to maintain precision (FIX: DATA-MONEY-CROSS-001)
-        const faceValueMoney = new Money(locked.faceValue);
-        const purchasePriceMoney = new Money(locked.purchasePrice);
-        const interestMoney = faceValueMoney.subtract(purchasePriceMoney);
-        const adjustedInterestMoney = interestMoney.isNegative()
-          ? Money.zero()
-          : interestMoney;
-        const withholdingTaxMoney = adjustedInterestMoney.multiply(
-          TBILL_WITHHOLDING_TAX_RATE,
-        );
-        const netInterestMoney = adjustedInterestMoney.subtract(
-          withholdingTaxMoney,
-        );
-        const netProceedsMoney = faceValueMoney.subtract(withholdingTaxMoney);
-        const adjustedNetProceedsMoney = netProceedsMoney.isNegative()
-          ? Money.zero()
-          : netProceedsMoney;
-        const maturityDate = locked.maturityDate || today;
-
-        const [maturityTx] = await tx
-          .insert(investmentTransactions)
-          .values({
-            householdId: locked.householdId,
-            accountId: locked.accountId,
-            type: "maturity",
-            quantity: "1",
-            price: faceValueMoney.toString(),
-            amount: adjustedNetProceedsMoney.toString(),
-            currency: "ZMW",
-            withholdingTax: withholdingTaxMoney.toString(),
-            transactionDate: maturityDate,
-            notes: `Maturity Payout: ${locked.tbillName} (${
-              locked.isin || "No ISIN"
-            })`,
-          })
-          .returning();
-
-        let incomeTransactionId: string | null = null;
-        if (netInterestMoney.isPositive()) {
-          const idempotencyKey = tbillMaturityIncomeKey(locked.id);
-          const { transaction: incomeTx } =
-            await transactionRepository.createWithinTransaction(
-              tx,
-              {
-                householdId: locked.householdId,
-                accountId: locked.accountId,
-                date: maturityDate,
-                name: `T-Bill Interest: ${locked.tbillName}`,
-                amount: netInterestMoney.toString(),
-                currency: "ZMW",
-                type: "income",
-                notes: `T-Bill maturity interest. Face: ${faceValueMoney.toString()}, Purchase: ${purchasePriceMoney.toString()}, WHT: ${withholdingTaxMoney.toString()}`,
-                source: "recurring",
-                // Deterministic per bill: a UNIQUE(idempotency_key) collision
-                // from a concurrent/retried run is caught below as an
-                // idempotent skip, never a double-payout.
-                idempotencyKey,
-              },
-              {
-                // Rule 9: the maturity interest ledger write MUST be audited,
-                // atomic with the write. userId null = system/cron-initiated.
-                audit: {
-                  userId: null,
-                  householdId: locked.householdId,
-                  metadata: {
-                    reason: "tbill_maturity_interest",
-                    tbillId: locked.id,
-                    idempotencyKey,
-                  },
-                },
-              },
-            );
-
-          incomeTransactionId = incomeTx.id;
-        }
-
-        await tx
-          .update(grzTBills)
-          .set({
-            status: "matured",
-            maturedDate: maturityDate,
-            maturityInvestmentTxId: maturityTx.id,
-            maturityIncomeTxId: incomeTransactionId,
-            updatedAt: new Date(),
-          })
-          .where(eq(grzTBills.id, locked.id));
+        const { withholding, netProceeds } = tbillMaturityTerms(locked);
+        await tx.update(grzTBills).set({
+          status: "awaiting_receipt",
+          maturedDate: locked.maturityDate,
+          maturityWithholdingTax: withholding.toString(),
+          maturityNetProceeds: netProceeds.toString(),
+          updatedAt: new Date(),
+        }).where(eq(grzTBills.id, locked.id));
 
         // DPA audit (SCP-312): system-initiated cron write, no user actor.
-        // Distinct from the "transaction" entity audit above — this documents
-        // the bill's own state transition.
         await businessAuditService.log({
           userId: null,
           householdId: locked.householdId,
@@ -179,42 +82,31 @@ export async function processTBillMaturities(): Promise<TBillMaturityResults> {
           details: {
             actor: "system",
             trigger: "tbill_maturity",
-            tbillName: locked.tbillName,
-            netProceeds: adjustedNetProceedsMoney.toString(),
-            withholdingTax: withholdingTaxMoney.toString(),
-            maturityInvestmentTxId: maturityTx.id,
-            maturityIncomeTxId: incomeTransactionId,
+            status: "awaiting_receipt",
+            netProceeds: netProceeds.toString(),
+            withholdingTax: withholding.toString(),
           },
           tx,
         });
-
-        return { status: "matured" };
-      }).catch((error: unknown) => {
-        // Idempotency backstop: a UNIQUE violation on
-        // transactions.idempotency_key means another run/instance already
-        // created the maturity interest income transaction for this bill.
-        // The transaction rolled back, so treat it as an idempotent skip —
-        // never a 500, never a double-payout.
-        if (isPostgresError(error, "23505")) {
-          return { status: "skipped" as const };
-        }
-        throw error;
+        return { status: "due" };
       });
 
-      if (outcome.status === "matured") {
-        results.matured++;
-      } else {
-        results.skipped++;
-      }
+      if (outcome.status === "due") results.matured++;
+      else if (outcome.status === "skipped") results.skipped++;
+      else results.notDue++;
     } catch (error) {
+      // NEW-23: the caller gets the bill id and a stable code; the detail stays in the server log.
+      const code = error instanceof HttpError ? error.code : TBILL_MATURITY_FAILED;
       logger.error(
         "Failed to mature T-Bill",
-        { billId: bill.id },
+        { billId: bill.id, householdId: bill.householdId, maturityDate: bill.maturityDate, code },
         error as Error,
       );
       results.failed++;
-      results.errors.push(`Bill ${bill.id}: ${String(error)}`);
+      results.errors.push({ billId: bill.id, code });
     }
   }
+  logger.info("T-Bill maturity run", { candidates: maturingBills.length, matured: results.matured,
+    skipped: results.skipped, notDue: results.notDue, failed: results.failed });
   return results;
 }

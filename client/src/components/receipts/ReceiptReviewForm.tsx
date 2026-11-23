@@ -28,6 +28,9 @@ import { cn } from "@/lib/utils";
 import { ocrExtractedDataSchema, OcrExtractedData } from "@shared/schema";
 import { useEffect, useState } from "react";
 import { useMerchants } from "../../hooks/use-settings";
+import { notifyInvalidSubmit } from "@/lib/forms/notifyInvalidSubmit";
+
+const RECEIPT_FIELD_LABELS = { merchantName: "Merchant", amount: "Total Amount", date: "Date", tax: "Tax" };
 
 interface ReceiptReviewFormProps {
   initialData?: OcrExtractedData;
@@ -67,7 +70,7 @@ export function ReceiptReviewForm({
 
   return (
     <Form {...form}>
-      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+      <form onSubmit={form.handleSubmit(onSubmit, notifyInvalidSubmit(RECEIPT_FIELD_LABELS))} className="space-y-4">
         <FormField
           control={form.control}
           name="merchantName"

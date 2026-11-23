@@ -6,7 +6,9 @@ import { SecurityHeader } from "./components/SecurityHeader";
 import { MfaWarningBanner } from "./components/MfaWarningBanner";
 import { EmailPasswordCard } from "./components/EmailPasswordCard";
 import { SessionsCard } from "./components/SessionsCard";
+import { MfaCard } from "./components/mfa/MfaCard";
 import { LoginHistoryCard } from "./components/LoginHistoryCard";
+import { PersonalDataExportCard } from "./components/PersonalDataExportCard";
 
 export default function SecuritySection() {
   const { data: mfaStatus } = useMfaStatus();
@@ -22,8 +24,10 @@ export default function SecuritySection() {
             />
           )}
           <EmailPasswordCard />
+          <MfaCard />
           <SessionsCard />
           <LoginHistoryCard />
+          <PersonalDataExportCard />
         </div>
       </Suspense>
     </ErrorBoundary>

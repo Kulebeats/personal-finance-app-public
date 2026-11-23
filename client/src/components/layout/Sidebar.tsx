@@ -1,4 +1,5 @@
 import { Link } from "wouter";
+import type { MouseEvent, Ref } from "react";
 import { cn } from "@/lib/utils";
 import { ChevronRight, PanelLeftClose } from "lucide-react";
 import logo from "@assets/generated_images/modern_abstract_butterfly_finance_logo.png";
@@ -11,6 +12,9 @@ type SidebarProps = {
   onToggle: () => void;
   location: string;
   profileName?: string | null;
+  variant?: "desktop" | "mobile";
+  navigationRef?: Ref<HTMLElement>;
+  onNavigate?: (event: MouseEvent<HTMLAnchorElement>, href: string) => void;
 };
 
 export function Sidebar({
@@ -18,15 +22,21 @@ export function Sidebar({
   onToggle,
   location,
   profileName,
+  variant = "desktop",
+  navigationRef,
+  onNavigate,
 }: SidebarProps) {
+  const mobile = variant === "mobile";
   return (
     <aside
+      ref={navigationRef}
       className={cn(
-        "flex-shrink-0 bg-sidebar text-sidebar-foreground border-r border-sidebar-border flex flex-col transition-all duration-300 ease-in-out",
-        collapsed ? "w-16" : "w-64"
+        "min-h-0 bg-sidebar text-sidebar-foreground flex-col",
+        mobile ? "flex flex-1 overflow-y-auto" : "hidden shrink-0 border-r border-sidebar-border transition-all duration-300 ease-in-out md:flex",
+        !mobile && (collapsed ? "w-16" : "w-64")
       )}
     >
-      <div
+      {!mobile && <div
         className={cn(
           "p-4 flex items-center",
           collapsed ? "justify-center" : "justify-between"
@@ -68,9 +78,9 @@ export function Sidebar({
             <PanelLeftClose className="w-4 h-4" aria-hidden="true" />
           </button>
         )}
-      </div>
+      </div>}
 
-      <nav className="flex-1 px-3 pb-4 space-y-6 overflow-y-auto scrollbar-thin scrollbar-thumb-sidebar-accent scrollbar-track-transparent">
+      <nav aria-label="Application navigation" className={cn("px-3 pb-4 space-y-6 scrollbar-thin scrollbar-thumb-sidebar-accent scrollbar-track-transparent", mobile ? "shrink-0" : "min-h-0 flex-1 overflow-y-auto")}>
         {NAV_GROUPS.map((group) => (
           <div key={group.title} className="space-y-1">
             {!collapsed && (
@@ -82,12 +92,12 @@ export function Sidebar({
             {group.items.map((item) => {
               const isActive = location === item.href;
               return (
-                <Link key={item.href} href={item.href}>
-                  <div
+                <Link key={item.href} href={item.href}
+                    onClick={event => onNavigate?.(event, item.href)}
                     aria-current={isActive ? "page" : undefined}
                     aria-label={collapsed ? item.label : undefined}
                     className={cn(
-                      "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all cursor-pointer",
+                      "min-h-11 flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                       isActive
                         ? "bg-sidebar-accent text-sidebar-accent-foreground"
                         : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50",
@@ -107,7 +117,6 @@ export function Sidebar({
                         {item.label}
                       </span>
                     )}
-                  </div>
                 </Link>
               );
             })}
@@ -115,14 +124,13 @@ export function Sidebar({
         ))}
       </nav>
 
-      <div className="p-3 border-t border-sidebar-border space-y-1">
-        <Link href="/profile">
-          <div
-            role="button"
-            tabIndex={0}
+      <div className="shrink-0 p-3 border-t border-sidebar-border space-y-1">
+        <Link href="/profile"
+            onClick={event => onNavigate?.(event, "/profile")}
+            aria-current={location === "/profile" ? "page" : undefined}
             aria-label={`Profile: ${profileName || "User"}`}
             className={cn(
-              "w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-all cursor-pointer mt-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              "min-h-11 w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium text-sidebar-foreground hover:bg-sidebar-accent/50 transition-all cursor-pointer mt-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
               collapsed && "justify-center px-2"
             )}
           >
@@ -137,7 +145,6 @@ export function Sidebar({
                 <ChevronRight className="w-3 h-3 opacity-50" aria-hidden="true" />
               </div>
             )}
-          </div>
         </Link>
       </div>
     </aside>

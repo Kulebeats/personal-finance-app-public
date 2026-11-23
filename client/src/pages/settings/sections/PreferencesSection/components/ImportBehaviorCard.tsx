@@ -8,14 +8,11 @@ import {
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
-import { UserPreferences } from "@/hooks/use-settings";
+import type { UserPreferences, UpdatePersonalPreference } from "@/hooks/use-settings";
 
 interface ImportBehaviorCardProps {
-  preferences?: UserPreferences;
-  onUpdate: (
-    key: keyof UserPreferences,
-    value: UserPreferences[keyof UserPreferences]
-  ) => void;
+  preferences: UserPreferences;
+  onUpdate: UpdatePersonalPreference;
 }
 
 export function ImportBehaviorCard({

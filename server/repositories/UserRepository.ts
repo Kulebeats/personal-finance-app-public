@@ -1,5 +1,7 @@
+import { effectiveRecapEmail } from "./UserNotificationPreferences";
 import { and, desc, eq, ne } from "drizzle-orm";
 import { db } from "../db";
+import { ensureDisplaySettings, patchDisplaySettings } from "./UserDisplayPreferences";
 import {
   userAIPreferences,
   userDisplaySettings,
@@ -98,11 +100,7 @@ export class UserRepository {
   async createDisplaySettings(
     settings: InsertDisplaySettings,
   ): Promise<DisplaySettings> {
-    const result = await db
-      .insert(userDisplaySettings)
-      .values(settings)
-      .returning();
-    return result[0];
+    return ensureDisplaySettings(settings);
   }
 
   async getDisplaySettings(
@@ -120,21 +118,18 @@ export class UserRepository {
     userId: string,
     data: Partial<DisplaySettings>,
   ): Promise<DisplaySettings | undefined> {
-    const result = await db
-      .update(userDisplaySettings)
-      .set({ ...data, updatedAt: new Date() })
-      .where(eq(userDisplaySettings.userId, userId))
-      .returning();
-    return result[0];
+    return patchDisplaySettings(userId, data);
   }
 
   async getNotificationPreferences(
     userId: string,
   ): Promise<NotificationPreference[]> {
-    return await db
+    const rows = await db
       .select()
       .from(userNotificationPreferences)
       .where(eq(userNotificationPreferences.userId, userId));
+    const emailEnabled = effectiveRecapEmail(rows.filter(row => row.notificationType === "weekly_recap"));
+    return rows.map(row => row.notificationType === "weekly_recap" ? { ...row, emailEnabled } : row);
   }
 
   async createNotificationPreference(

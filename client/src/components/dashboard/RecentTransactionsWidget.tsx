@@ -131,7 +131,7 @@ export default function RecentTransactionsWidget() {
           <CardTitle className="text-base font-semibold text-foreground">
             Recent Transactions
           </CardTitle>
-          <Link href="/transactions">
+          <Link href="/transactions" className="inline-flex items-center max-md:min-h-11">
             <div className="text-primary text-sm font-medium hover:underline flex items-center gap-1 cursor-pointer">
               View All <ArrowRight className="w-4 h-4" />
             </div>

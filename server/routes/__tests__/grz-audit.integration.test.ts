@@ -151,7 +151,7 @@ describe("GRZ DPA Audit Logging (SCP-312)", () => {
         faceValue: "100000.00",
         purchasePrice: "98000.00",
         purchaseDate: "2026-01-01",
-        couponRate: "11.0000",
+        couponRate: "0.1100",
         maturityDate: "2031-01-01",
         accountId,
       })
@@ -181,6 +181,7 @@ describe("GRZ DPA Audit Logging (SCP-312)", () => {
       .send({
         tbillName: "GRZ 91-Day Test TBill",
         tenorDays: 91,
+        purchaseYield: "0.9999",
         faceValue: "10000.00",
         purchasePrice: "9500.00",
         purchaseDate: "2026-01-01",
@@ -206,6 +207,9 @@ describe("GRZ DPA Audit Logging (SCP-312)", () => {
     expect(row).toBeDefined();
     expect(row.userId).toBe(userId);
     expect(row.householdId).toBe(householdId);
+    const [stored] = await db.select().from(grzTBills).where(eq(grzTBills.id, tbillId));
+    expect(stored.purchaseYield).not.toBe("0.9999");
+    expect(row.details).toMatchObject({ newValue: { purchaseYield: stored.purchaseYield, discountAmount: "500.00" } });
   });
 
   it("writes a grz_bond_payment PROCESS audit row when a coupon is paid", async () => {
@@ -217,7 +221,7 @@ describe("GRZ DPA Audit Logging (SCP-312)", () => {
         faceValue: "50000.00",
         purchasePrice: "49000.00",
         purchaseDate: "2026-01-01",
-        couponRate: "10.0000",
+        couponRate: "0.1000",
         maturityDate: "2028-01-01",
         accountId,
       })

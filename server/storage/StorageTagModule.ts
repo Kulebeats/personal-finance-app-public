@@ -1,6 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../db";
 import { StorageReceiptModule } from "./StorageReceiptModule";
+import { normalizeTagName, rethrowTagNameClash } from "../modules/tags/tags.name-guard";
 
 export class StorageTagModule extends StorageReceiptModule {
   // ============================================================================
@@ -46,7 +47,7 @@ export class StorageTagModule extends StorageReceiptModule {
   }
 
   /**
-   * Create a new tag
+   * Create a new tag. A name the household already has, in any case, is a 409 (NEW-39).
    */
   async createTag(data: {
     householdId: string;
@@ -57,7 +58,7 @@ export class StorageTagModule extends StorageReceiptModule {
     memberId?: string | null;
   }) {
     const { tags } = await import("@shared/schema");
-    const result = await db.insert(tags).values(data).returning();
+    const result = await db.insert(tags).values({ ...data, name: normalizeTagName(data.name) }).returning().catch(rethrowTagNameClash);
     return result[0];
   }
 
@@ -76,9 +77,10 @@ export class StorageTagModule extends StorageReceiptModule {
     const { tags } = await import("@shared/schema");
     const result = await db
       .update(tags)
-      .set({ ...data, updatedAt: new Date() })
+      .set({ ...data, ...(data.name !== undefined && { name: normalizeTagName(data.name) }), updatedAt: new Date() })
       .where(and(eq(tags.id, id), eq(tags.householdId, householdId)))
-      .returning();
+      .returning()
+      .catch(rethrowTagNameClash);
     return result[0];
   }
 

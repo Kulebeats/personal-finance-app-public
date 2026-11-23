@@ -60,69 +60,79 @@ function CircularProgress({
   );
 }
 
+interface ChecklistItem {
+  id: string;
+  label: string;
+  completed: boolean;
+  optional?: boolean;
+}
+
+/** Optional items are listed but never lower the percentage. */
+export function buildProfileChecklist(formData: ProfileFormData) {
+  const items: ChecklistItem[] = [
+    // Core profile
+    { id: "fullName", label: "Full Name", completed: !!formData.fullName },
+    {
+      id: "mobile",
+      label: "Mobile Number",
+      completed: !!formData.phoneNumberMobile,
+    },
+    {
+      id: "occupation",
+      label: "Occupation",
+      completed: !!formData.occupation,
+    },
+    {
+      id: "address",
+      label: "Address",
+      completed: !!formData.address?.addressLine1 && !!formData.address?.city,
+    },
+    {
+      id: "financial",
+      label: "Financial Goal",
+      completed: !!formData.investmentGoal,
+    },
+    {
+      id: "income",
+      label: "Income Details",
+      completed: !!formData.annualIncome,
+    },
+    // Phase 2: Rich profile
+    {
+      id: "profilePicture",
+      label: "Profile Picture",
+      completed: !!formData.profilePicture,
+    },
+    {
+      id: "bio",
+      label: "About Me",
+      completed: !!formData.bio && formData.bio.length > 10,
+    },
+    {
+      id: "socialLinks",
+      label: "Social Links (optional)",
+      optional: true,
+      completed: !!(
+        formData.socialLinks?.linkedin ||
+        formData.socialLinks?.facebook ||
+        formData.socialLinks?.twitter ||
+        formData.socialLinks?.github ||
+        formData.socialLinks?.website
+      ),
+    },
+  ];
+
+  const required = items.filter((i) => !i.optional);
+  const completedCount = required.filter((i) => i.completed).length;
+  const progress = Math.round((completedCount / required.length) * 100);
+
+  return { items, progress, completedCount, total: required.length };
+}
+
 export function ProfileCompletenessWidget() {
   const { watch } = useFormContext<ProfileFormData>();
   const formData = watch();
-
-  // Calculate completeness
-  const checklist = useMemo(() => {
-    const items = [
-      // Core profile
-      { id: "fullName", label: "Full Name", completed: !!formData.fullName },
-      {
-        id: "mobile",
-        label: "Mobile Number",
-        completed: !!formData.phoneNumberMobile,
-      },
-      {
-        id: "occupation",
-        label: "Occupation",
-        completed: !!formData.occupation,
-      },
-      {
-        id: "address",
-        label: "Address",
-        completed: !!formData.address?.addressLine1 && !!formData.address?.city,
-      },
-      {
-        id: "financial",
-        label: "Financial Goal",
-        completed: !!formData.investmentGoal,
-      },
-      {
-        id: "income",
-        label: "Income Details",
-        completed: !!formData.annualIncome,
-      },
-      // Phase 2: Rich profile
-      {
-        id: "profilePicture",
-        label: "Profile Picture",
-        completed: !!formData.profilePicture,
-      },
-      {
-        id: "bio",
-        label: "About Me",
-        completed: !!formData.bio && formData.bio.length > 10,
-      },
-      {
-        id: "socialLinks",
-        label: "Social Links",
-        completed: !!(
-          formData.socialLinks?.linkedin ||
-          formData.socialLinks?.facebook ||
-          formData.socialLinks?.twitter ||
-          formData.socialLinks?.github ||
-          formData.socialLinks?.website
-        ),
-      },
-    ];
-
-    const completedCount = items.filter((i) => i.completed).length;
-    const progress = Math.round((completedCount / items.length) * 100);
-
-    return { items, progress, completedCount, total: items.length };
-  }, [formData]);
+  const checklist = useMemo(() => buildProfileChecklist(formData), [formData]);
 
   if (checklist.progress === 100) {
     return (
@@ -184,7 +194,7 @@ export function ProfileCompletenessWidget() {
                 "flex items-center justify-between p-2 rounded-md text-sm transition-colors",
                 item.completed
                   ? "text-muted-foreground opacity-50"
-                  : "hover:bg-accent cursor-pointer"
+                  : "hover:bg-accent cursor-pointer",
               )}
             >
               <div className="flex items-center gap-3">
@@ -193,7 +203,7 @@ export function ProfileCompletenessWidget() {
                     "h-4 w-4 rounded-full border flex items-center justify-center",
                     item.completed
                       ? "bg-primary border-primary text-primary-foreground"
-                      : "border-muted-foreground/30"
+                      : "border-muted-foreground/30",
                   )}
                 >
                   {item.completed && <Check className="h-2.5 w-2.5" />}

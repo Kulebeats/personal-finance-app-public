@@ -11,22 +11,25 @@
  */
 
 import { db } from "../../db";
-import { and, eq, gte, lte, isNull, or, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { logger } from "../../utils/logger";
-import { accounts, netWorthSnapshots } from "@shared/schema";
+import { CalculationError } from "../../core/calculations/errors";
+import { netWorthSnapshots } from "@shared/schema";
 import { BaseReportRepository } from "./BaseReportRepository";
-import type { ReportsNetWorthResponse } from "@shared/reports";
-import type { MoneyDto } from "@shared/money";
+import type { ReportsNetWorthChangesResponse, ReportsNetWorthResponse } from "@shared/reports";
+import { isCurrencyCode } from "@shared/denomination";
 import { Money, toMoneyDto } from "../../core/money";
 import type { ReportsNetWorthQuery } from "../../modules/reports/reports.validation";
 import type { QueryWithUser } from "./types";
-import { LIABILITY_ACCOUNT_TYPES } from "./constants";
+import { ForbiddenError } from "../../core/errors";
+import { netWorthOf } from "../../core/money/wealth-totals";
+import { readNetWorthTotals } from "../AccountSummaryRead";
+import { readViewerSnapshots } from "./netWorthViewerSnapshots";
+import { householdToday } from "../../services/householdCalendarToday";
+import { missingMonths, monthOf, monthsBetween } from "./netWorthGaps";
 import Decimal from "decimal.js";
 import {
-  moneyFromDto,
-  moneyFromValue,
   percentOf,
-  sumMoney,
   toMoneyDtoSafe,
 } from "./moneyUtils";
 
@@ -54,101 +57,47 @@ export class NetWorthReportRepository extends BaseReportRepository {
     const toMoneyValue = (value: Money | Decimal | number | string) =>
       toMoneyDtoSafe(value, currency);
 
-    // Try to get snapshots first
+    if (!userId) throw new ForbiddenError("Net worth requires a signed-in reader");
+
+    // A-47: stored history as this reader may see it today. Stored totals
+    // only when no account is hidden from the reader; otherwise re-derived
+    // per account (see netWorthViewerSnapshots).
     if (scope !== "mine") {
       const snapshotCurrencyExpr = sql`COALESCE(${netWorthSnapshots.currency}, ${currency}::text)`;
       const fxRateExpr = this.buildFxRateExpr(
         snapshotCurrencyExpr,
         currency,
         sql`${netWorthSnapshots.date}`,
-        { nullOnMissing: true },
+        { householdId, nullOnMissing: true },
       );
-
-      const snapshots = await db
-        .select({
-          date: netWorthSnapshots.date,
-          netWorth: netWorthSnapshots.netWorth,
-          assets: netWorthSnapshots.totalAssets,
-          liabilities: netWorthSnapshots.totalLiabilities,
-          assetsByType: netWorthSnapshots.assetsByType,
-          liabilitiesByType: netWorthSnapshots.liabilitiesByType,
-          currency: netWorthSnapshots.currency,
-          fxRate: sql<string | number | null>`${fxRateExpr}`,
-        })
-        .from(netWorthSnapshots)
-        .where(
-          and(
-            eq(netWorthSnapshots.householdId, householdId),
-            gte(netWorthSnapshots.date, from),
-            lte(netWorthSnapshots.date, to),
-          ),
-        )
-        .orderBy(netWorthSnapshots.date);
+      const snapshots = await readViewerSnapshots(householdId, userId, { from, to }, fxRateExpr);
 
       if (snapshots.length > 0) {
         const normalizedSnapshots = snapshots.map((snapshot) => {
-          const snapshotCurrency = this.getEffectiveCurrency(
-            snapshot.currency,
-            null,
-            currency,
-          );
-          const fxRate = this.resolveSnapshotFxRate(
-            snapshotCurrency,
-            currency,
-            snapshot.fxRate,
-            snapshot.date,
-          );
-          const convertSnapshotMoney = (
-            value: string | number | null | undefined,
-          ) => {
-            const money = moneyFromValue(value, snapshotCurrency);
-            if (snapshotCurrency === currency) {
-              return new Money(money.amount, currency);
-            }
-            return new Money(money.amount.times(fxRate), currency);
-          };
-
-          const netWorth = convertSnapshotMoney(snapshot.netWorth);
-          const assets = convertSnapshotMoney(snapshot.assets);
-          const liabilities = convertSnapshotMoney(snapshot.liabilities);
-
-          const assetsByType = snapshot.assetsByType
-            ? Object.fromEntries(
-                Object.entries(
-                  snapshot.assetsByType as Record<string, number>,
-                ).map(([type, value]) => [
-                  type,
-                  toMoneyValue(
-                    new Money(new Decimal(value).times(fxRate), currency),
-                  ),
-                ]),
-              )
-            : undefined;
-
-          const liabilitiesByType = snapshot.liabilitiesByType
-            ? Object.fromEntries(
-                Object.entries(
-                  snapshot.liabilitiesByType as Record<string, number>,
-                ).map(([type, value]) => [
-                  type,
-                  toMoneyValue(
-                    new Money(new Decimal(value).times(fxRate), currency),
-                  ),
-                ]),
-              )
-            : undefined;
-
+          const snapshotCurrency = this.getEffectiveCurrency(snapshot.currency, null, currency);
+          const fxRate = this.resolveSnapshotFxRate(snapshotCurrency, currency, snapshot.fxRate, snapshot.date);
+          const convert = (money: Money) =>
+            snapshotCurrency === currency
+              ? new Money(money.amount, currency)
+              : new Money(money.amount.times(fxRate), currency);
+          const byType = (totals: Record<string, Money> | null) =>
+            totals && Object.entries(totals).map(([type, value]) => ({ type, value: toMoneyValue(convert(value)) }));
           return {
             date: snapshot.date,
-            netWorth,
-            assets,
-            liabilities,
-            assetsByType,
-            liabilitiesByType,
+            netWorth: convert(snapshot.netWorth),
+            assets: convert(snapshot.assets),
+            liabilities: convert(snapshot.liabilities),
+            assetsByType: byType(snapshot.assetsByType),
+            liabilitiesByType: byType(snapshot.liabilitiesByType),
           };
         });
 
         const latest = normalizedSnapshots[normalizedSnapshots.length - 1];
+        const line = (id: string, color: string, pick: (s: (typeof normalizedSnapshots)[number]) => Money) => ({
+          id,
+          data: normalizedSnapshots.map((s) => ({ x: s.date, y: toMoneyValue(pick(s)) })),
+          color,
+        });
 
         return {
           range: {
@@ -164,108 +113,28 @@ export class NetWorthReportRepository extends BaseReportRepository {
             liabilities: toMoneyValue(latest.liabilities),
           },
           series: [
-            {
-              id: "Net Worth",
-              data: normalizedSnapshots.map((s) => ({
-                x: s.date,
-                y: toMoneyValue(s.netWorth),
-              })),
-              color: "#8b5cf6",
-            },
-            {
-              id: "Assets",
-              data: normalizedSnapshots.map((s) => ({
-                x: s.date,
-                y: toMoneyValue(s.assets),
-              })),
-              color: "#10b981",
-            },
-            {
-              id: "Liabilities",
-              data: normalizedSnapshots.map((s) => ({
-                x: s.date,
-                y: toMoneyValue(s.liabilities),
-              })),
-              color: "#f43f5e",
-            },
+            line("Net Worth", "#8b5cf6", (s) => s.netWorth),
+            line("Assets", "#10b981", (s) => s.assets),
+            line("Liabilities", "#f43f5e", (s) => s.liabilities),
           ],
           breakdown: latest.assetsByType
-            ? {
-                assetsByType: Object.entries(latest.assetsByType).map(
-                  ([type, value]) => ({
-                    type,
-                    value: value as MoneyDto,
-                  }),
-                ),
-                liabilitiesByType: Object.entries(
-                  latest.liabilitiesByType || {},
-                ).map(([type, value]) => ({
-                  type,
-                  value: value as MoneyDto,
-                })),
-              }
+            ? { assetsByType: latest.assetsByType, liabilitiesByType: latest.liabilitiesByType ?? [] }
             : undefined,
+          historyCoverage: "snapshots",
         };
       }
     }
 
-    // Fallback: Calculate from current account balances
-    const visibleAccounts = await db
-      .select({
-        id: accounts.id,
-        balance: accounts.balance,
-        type: accounts.type,
-        currency: accounts.currency,
-      })
-      .from(accounts)
-      .where(
-        and(
-          eq(accounts.householdId, householdId),
-          isNull(accounts.deletedAt),
-          eq(accounts.excludeFromNetWorth, false),
-          or(
-            eq(accounts.isPrivate, false),
-            eq(accounts.ownerUserId, userId || ""),
-          ),
-        ),
-      );
-
-    const accountCurrencies = visibleAccounts.map(
-      (a) => a.currency || currency,
-    );
-    const fxRatesByCurrency = await this.getLatestFxRates(
-      accountCurrencies,
-      currency,
-    );
-
-    let assets = Money.zero(currency);
-    let liabilities = Money.zero(currency);
-
-    for (const acc of visibleAccounts) {
-      const accountCurrency = this.getEffectiveCurrency(
-        acc.currency,
-        null,
-        currency,
-      );
-      const balance = this.convertAmount(
-        acc.balance,
-        accountCurrency,
-        currency,
-        fxRatesByCurrency,
-      );
-      if (
-        LIABILITY_ACCOUNT_TYPES.includes(
-          acc.type as (typeof LIABILITY_ACCOUNT_TYPES)[number],
-        )
-      ) {
-        liabilities = liabilities.add(balance.abs());
-      } else {
-        assets = assets.add(balance);
-      }
-    }
-
-    const netWorth = assets.subtract(liabilities);
-    const today = new Date().toISOString().split("T")[0];
+    // Fallback (FIN-14): today's value from the account summary's valuation
+    // (accounts, holdings, T-bills, pensions, bonds; liabilities as signed
+    // debt). If those classes cannot be valued the account balances come back
+    // flagged incomplete with the omitted classes; a missing FX rate is a 422.
+    // A-47: also used when a reader has a hidden peer account and no stored
+    // capture can be proven per account.
+    const totals = await readNetWorthTotals(householdId, userId);
+    const netWorth = netWorthOf(totals);
+    // NEW-15: the current-only point is dated on the household calendar.
+    const today = await householdToday(db, householdId);
 
     return {
       range: {
@@ -277,8 +146,8 @@ export class NetWorthReportRepository extends BaseReportRepository {
       latest: {
         date: today,
         netWorth: toMoneyValue(netWorth),
-        assets: toMoneyValue(assets),
-        liabilities: toMoneyValue(liabilities),
+        assets: toMoneyValue(totals.assets),
+        liabilities: toMoneyValue(totals.liabilities),
       },
       series: [
         {
@@ -286,6 +155,10 @@ export class NetWorthReportRepository extends BaseReportRepository {
           data: [{ x: today, y: toMoneyValue(netWorth) }],
         },
       ],
+      incomplete: totals.incomplete,
+      omittedValuations: totals.omittedValuations,
+      // NEW-34 (RC-14): one point valued today, not history.
+      historyCoverage: "current_only",
     };
   }
 
@@ -302,7 +175,7 @@ export class NetWorthReportRepository extends BaseReportRepository {
   async getNetWorthChanges(
     householdId: string,
     query: { from: string; to: string; scope?: string; userId?: string },
-  ) {
+  ): Promise<ReportsNetWorthChangesResponse> {
     const { from, to, scope = "household", userId } = query;
 
     const netWorthData = await this.getNetWorth(householdId, {
@@ -314,49 +187,56 @@ export class NetWorthReportRepository extends BaseReportRepository {
     });
 
     const { baseCurrency: currency } = netWorthData.range;
-    const dataPoints = netWorthData.series[0]?.data || [];
+    const today = await householdToday(db, householdId);
+    const through = to < today ? to : today;
+    const historyCoverage = netWorthData.historyCoverage ?? "snapshots";
+    const captures = historyCoverage === "snapshots"
+      ? (netWorthData.series.find(line => line.id === "Net Worth")?.data ?? [])
+        // Snapshots carry UTC capture dates; household today only bounds missing months.
+        .filter(({ x }) => x >= from && x <= to)
+      : [];
 
-    const periods: Array<{
-      period: string;
-      startNetWorth: MoneyDto;
-      endNetWorth: MoneyDto;
-      change: MoneyDto;
-      changePct: number;
-    }> = [];
+    // The reader's latest visible capture in each recorded calendar month.
+    // Keep its actual date, including partial months and gaps.
+    const monthly = new Map<string, (typeof captures)[number]>();
+    for (const point of captures) {
+      const month = monthOf(point.x);
+      const previous = monthly.get(month);
+      if (!previous || point.x > previous.x) monthly.set(month, point);
+    }
+    const endpoints = [...monthly.values()].sort((a, b) => a.x.localeCompare(b.x));
+    const comparable = isCurrencyCode(currency) && endpoints.every(({ y }) => y?.currency === currency);
+    const periods: ReportsNetWorthChangesResponse["periods"] = [];
+    let totalChange = Money.zero(currency);
+    let elapsedMonths = 0;
 
-    for (let i = 1; i < dataPoints.length; i++) {
-      const startMoney = dataPoints[i - 1]?.y
-        ? moneyFromDto(dataPoints[i - 1].y as MoneyDto, currency)
-        : Money.zero(currency);
-      const endMoney = dataPoints[i]?.y
-        ? moneyFromDto(dataPoints[i].y as MoneyDto, currency)
-        : startMoney;
+    for (let i = 1; comparable && i < endpoints.length; i++) {
+      const { x: startPeriod, y: startValue } = endpoints[i - 1];
+      const { x: period, y: endValue } = endpoints[i];
+      const startMoney = new Money(startValue.amount, currency);
+      const endMoney = new Money(endValue.amount, currency);
       const changeMoney = endMoney.subtract(startMoney);
-      const changePct = percentOf(changeMoney, startMoney, 2);
-
+      const months = monthsBetween(startPeriod, period);
+      totalChange = totalChange.add(changeMoney);
+      elapsedMonths += months;
       periods.push({
-        period: dataPoints[i]?.x || "",
+        period,
+        startPeriod,
+        spansGap: months > 1,
         startNetWorth: toMoneyDto(startMoney, currency),
         endNetWorth: toMoneyDto(endMoney, currency),
         change: toMoneyDto(changeMoney, currency),
-        changePct,
+        changePct: percentOf(changeMoney, startMoney, 2),
       });
     }
-
-    const totalChange = sumMoney(
-      periods.map((p) => moneyFromDto(p.change, currency)),
-      currency,
-    );
-    const avgMonthlyChange =
-      periods.length > 0
-        ? totalChange.divide(periods.length)
-        : Money.zero(currency);
 
     return {
       range: { from, to, currency },
       totalChange: toMoneyDto(totalChange, currency),
-      avgMonthlyChange: toMoneyDto(avgMonthlyChange, currency),
-      periods,
+      avgMonthlyChange: elapsedMonths > 0 ? toMoneyDto(totalChange.divide(elapsedMonths), currency) : null,
+      periods, historyCoverage,
+      insufficientHistory: periods.length === 0,
+      missingMonths: missingMonths(from, through, endpoints.map(({ x }) => x)),
     };
   }
 
@@ -381,9 +261,8 @@ export class NetWorthReportRepository extends BaseReportRepository {
         toCurrency,
         date,
       });
-      throw new Error(
-        `Exchange rate unavailable for ${fromCurrency} -> ${toCurrency}`,
-      );
+      throw new CalculationError("MISSING_FX_RATE", { from: fromCurrency, to: toCurrency, date },
+        `Exchange rate unavailable for ${fromCurrency} -> ${toCurrency}`);
     }
     return new Decimal(fxRate);
   }

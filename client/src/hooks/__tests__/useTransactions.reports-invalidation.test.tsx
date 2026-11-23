@@ -1,18 +1,14 @@
-/**
- * Reports cache invalidation on transaction mutations (audit v2 finding B2).
- *
- * client/src/lib/queryClient.ts sets staleTime: Infinity + refetchOnWindowFocus: false
- * globally, so Reports pages and report-driven dashboard widgets depend ENTIRELY on
- * explicit invalidation to ever refresh. `invalidateReportsForChange` /
- * `invalidateAllReports` (client/src/hooks/use-reports.ts) exist for exactly this, but
- * were never called from any transaction mutation - so Reports show permanently stale
- * numbers after create/update/delete/transfer. This test proves every transaction-writing
- * mutation in useTransactions.ts invalidates the reports query-key namespace.
- */
+/** Check transaction writers against the report queries observed by mounted widgets. */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactNode } from "react";
+import { protectedFetch } from "@/lib/protected-fetch";
+import { useReportsNetWorth } from "../use-reports";
+import { useTransactionBulkMutations } from "@/pages/Transactions/useTransactionMutations";
+
+vi.mock("@/lib/protected-fetch", () => ({ protectedFetch: vi.fn() }));
+vi.mock("@/contexts/SettingsContext", () => ({ useSettings: () => ({ timezone: "Africa/Lusaka" }) }));
 
 // Mock toast (matches useTransactions.test.tsx convention)
 vi.mock("@/hooks/use-toast", () => ({
@@ -29,6 +25,7 @@ const { mockTransactionsApi } = vi.hoisted(() => ({
     create: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
+    bulkDelete: vi.fn(),
     getSummary: vi.fn(),
     createTransfer: vi.fn(),
     updateTransfer: vi.fn(),
@@ -102,6 +99,58 @@ function invalidatedKey(invalidateSpy: InvalidateQueriesSpy, key: string): boole
 describe("useTransactions reports cache invalidation (audit v2 B2)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("refetches a fresh mounted net-worth report after each ledger mutation", async () => {
+    const { Wrapper } = createSpiedWrapper();
+    const reportFetch = vi.mocked(protectedFetch);
+    const currency = "ZMW";
+    function nextReport(netWorth: string) {
+      reportFetch.mockResolvedValueOnce(Response.json({
+        success: true, data: { latest: { netWorth: { amount: netWorth, currency } } },
+      }));
+    }
+    const purchase = { accountId: "card", name: "Purchase", type: "expense" as const,
+      date: "2026-01-10", amount: { amount: "45.50", currency } };
+    mockTransactionsApi.create.mockResolvedValue({ transaction: { id: "p1" }, isDuplicate: false });
+    mockTransactionsApi.update.mockResolvedValue({ id: "p1", name: purchase.name });
+    mockTransactionsApi.delete.mockResolvedValue({ success: true });
+    mockTransactionsApi.bulkDelete.mockResolvedValue({ successCount: 1 });
+    mockTransactionsApi.createTransfer.mockResolvedValue({ isDuplicate: false });
+
+    nextReport("4500.00");
+    const { result } = renderHook(() => ({
+      report: useReportsNetWorth({ from: "2026-01-01", to: "2026-01-31" }),
+      create: useCreateTransaction(), update: useUpdateTransaction(), remove: useDeleteTransaction(),
+      transfer: useCreateTransfer(), bulk: useTransactionBulkMutations(() => {}),
+    }), { wrapper: Wrapper });
+    async function expectFresh(amount: string, reads: number) {
+      await waitFor(() => {
+        expect(result.current.report.data?.latest.netWorth.amount).toBe(amount);
+        expect(result.current.report.isStale).toBe(false);
+        expect(reportFetch).toHaveBeenCalledTimes(reads);
+      });
+    }
+    await expectFresh("4500.00", 1);
+    expect(reportFetch.mock.calls[0][0]).toMatch(/^\/api\/reports\/net-worth\?/);
+
+    nextReport("4454.50");
+    await act(async () => { await result.current.create.mutateAsync(purchase); });
+    await expectFresh("4454.50", 2);
+    nextReport("4434.50");
+    await act(async () => { await result.current.update.mutateAsync({ id: "p1", data: { amount: { amount: "65.50", currency } } }); });
+    await expectFresh("4434.50", 3);
+    nextReport("4500.00");
+    await act(async () => { await result.current.remove.mutateAsync("p1"); });
+    await expectFresh("4500.00", 4);
+    nextReport("4510.00");
+    await act(async () => { await result.current.bulk.bulkDeleteMutation.mutateAsync(["other-expense"]); });
+    await expectFresh("4510.00", 5);
+    nextReport("4510.00");
+    await act(async () => {
+      await result.current.transfer.mutateAsync({ fromAccountId: "card", toAccountId: "cash", amount: purchase.amount });
+    });
+    await expectFresh("4510.00", 6);
   });
 
   it("invalidates reports caches when a transaction is created", async () => {

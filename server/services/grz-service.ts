@@ -1,10 +1,5 @@
-import {
-  addMonths,
-  isAfter,
-  isBefore,
-  isEqual,
-  differenceInCalendarDays,
-} from "date-fns";
+import { differenceInCalendarDays } from "date-fns";
+import { ValidationError } from "../core/errors";
 import Decimal from "decimal.js";
 import { Money } from "../core/money";
 
@@ -38,6 +33,16 @@ interface BondScheduleItem {
   withholdingTax: string;
 }
 
+// Shift from the contractual anchor in UTC. Advancing a clamped February date
+// repeatedly would move a later August 31 coupon forward by several days.
+function shiftCouponMonths(anchor: Date, months: number): Date {
+  const target = new Date(anchor);
+  target.setUTCDate(1);
+  target.setUTCMonth(target.getUTCMonth() + months + 1, 0);
+  target.setUTCDate(Math.min(anchor.getUTCDate(), target.getUTCDate()));
+  return target;
+}
+
 export function generateBondSchedule(
   purchaseDate: Date,
   maturityDate: Date,
@@ -48,38 +53,47 @@ export function generateBondSchedule(
   const schedule: BondScheduleItem[] = [];
 
   const couponFrequency = options?.couponFrequency ?? 2;
-  const frequencyMonths =
-    couponFrequency > 0 ? Math.round(12 / couponFrequency) : 6;
-
+  if (!Number.isInteger(couponFrequency) || couponFrequency <= 0 || 12 % couponFrequency !== 0) {
+    throw new ValidationError("Coupon frequency must divide the calendar year into whole months");
+  }
+  const frequencyMonths = 12 / couponFrequency;
+  const first = options?.firstCouponDate;
+  if (![purchaseDate, maturityDate, ...(first ? [first] : [])].every(d => Number.isFinite(d.getTime())) ||
+      maturityDate <= purchaseDate || (first && (first < purchaseDate || first > maturityDate))) {
+    throw new ValidationError("Coupon dates must fall between purchase and maturity");
+  }
+  const rate = new Decimal(couponRate);
+  if (!rate.isFinite() || rate.lt(0) || rate.gt(1)) {
+    throw new ValidationError("Annual coupon must be a decimal fraction between zero and one");
+  }
   // Period coupon = (Face Value applied with the annual coupon ratio) / periods-per-year.
   // All monetary steps go through Money so the persisted coupon and tax are exact.
   const faceMoney = new Money(faceValue);
-  const annualCoupon = faceMoney.multiply(new Decimal(couponRate));
+  const annualCoupon = faceMoney.multiply(rate);
   const periodsPerYear = new Decimal(12).div(frequencyMonths);
   const periodCoupon = annualCoupon.divide(periodsPerYear);
   const couponWht = periodCoupon.multiply(WHT);
 
-  // We assume coupons are paid every X months starting from first coupon date.
-  // If not provided, approximate by using purchase date as anchor.
-  let currentDate =
-    options?.firstCouponDate &&
-    (isAfter(options.firstCouponDate, purchaseDate) ||
-      isEqual(options.firstCouponDate, purchaseDate))
-      ? options.firstCouponDate
-      : addMonths(purchaseDate, frequencyMonths);
-
-  while (
-    isBefore(currentDate, maturityDate) ||
-    isEqual(currentDate, maturityDate)
-  ) {
+  // A February endpoint can clip the original day of month. Prefer the
+  // redemption anchor, then check the first entitlement as the opposite anchor.
+  const boundary = first ?? purchaseDate;
+  const months = (maturityDate.getUTCFullYear() - boundary.getUTCFullYear()) * 12
+    + maturityDate.getUTCMonth() - boundary.getUTCMonth();
+  const periods = months / frequencyMonths;
+  const fromMaturity = shiftCouponMonths(maturityDate, -months).getTime() === boundary.getTime();
+  if (!Number.isInteger(periods) || (!fromMaturity &&
+      shiftCouponMonths(boundary, months).getTime() !== maturityDate.getTime())) {
+    throw new ValidationError("Supply a first coupon on the bond's contractual schedule");
+  }
+  for (let i = first ? 0 : 1; i <= periods; i++) {
+    const currentDate = fromMaturity ? shiftCouponMonths(maturityDate, (i - periods) * frequencyMonths)
+      : shiftCouponMonths(boundary, i * frequencyMonths);
     schedule.push({
       paymentDate: currentDate,
       amount: periodCoupon.toString(),
       paymentType: "coupon",
       withholdingTax: couponWht.toString(),
     });
-
-    currentDate = addMonths(currentDate, frequencyMonths);
   }
 
   // Government bonds pay principal at maturity. WHT is 0 on principal.

@@ -42,7 +42,13 @@ vi.mock("../../repositories/HouseholdRepository", () => ({
   },
 }));
 
+vi.mock("../../services/budget/BudgetSettingsService", async (original) => ({
+  ...await original<typeof import("../../services/budget/BudgetSettingsService")>(),
+  updateBudgetSettings: vi.fn(async () => ({ budgetSystem: "flex", defaultApplyScope: "all_future" })),
+}));
+
 import router from "../../modules/budgets/budgets.routes";
+import { updateBudgetSettings } from "../../services/budget/BudgetSettingsService";
 import { budgetService } from "../../services/BudgetService";
 import { householdRepository } from "../../repositories/HouseholdRepository";
 
@@ -131,15 +137,9 @@ describe("budget settings routes", () => {
     });
   });
 
-  it("updates settings and ensures flex budget when switching to flex", async () => {
-    (householdRepository.findPreferences as any).mockResolvedValueOnce({
-      budgetSystem: "category",
-      defaultBudgetScope: "current_month",
-    });
-    (householdRepository.updatePreferences as any).mockResolvedValueOnce({
-      budgetSystem: "flex",
-      defaultBudgetScope: "all_future",
-    });
+  // The write, the flex budget and their audit rows are proven against real
+  // Postgres in completion-r07.audit-completeness.realdb; this checks the wiring.
+  it("passes the validated settings and the actor to the settings service", async () => {
 
     const res = await runRoute("put", "/settings", {
       householdContext: {
@@ -148,16 +148,13 @@ describe("budget settings routes", () => {
         role: "member",
       },
       body: { budgetSystem: "flex", defaultApplyScope: "all_future" },
+      socket: { remoteAddress: "127.0.0.1" } as Request["socket"],
     });
 
-    expect(householdRepository.updatePreferences).toHaveBeenCalledWith(
-      "house-1",
-      expect.objectContaining({
-        budgetSystem: "flex",
-        defaultBudgetScope: "all_future",
-      })
+    expect(updateBudgetSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ householdId: "house-1", userId: "user-1" }),
+      { budgetSystem: "flex", defaultApplyScope: "all_future" },
     );
-    expect(budgetService.ensureFlexBudget).toHaveBeenCalledWith("house-1");
     expect(res.body.data).toEqual({
       budgetSystem: "flex",
       defaultApplyScope: "all_future",

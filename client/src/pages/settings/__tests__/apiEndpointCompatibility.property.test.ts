@@ -62,7 +62,7 @@ const EXPECTED_ENDPOINTS = {
   RULES_CREATE: '/api/rules',
   RULE_UPDATE: '/api/rules/{id}',
   RULE_DELETE: '/api/rules/{id}',
-  RULE_TEST: '/api/rules/{id}/test',
+  RULE_PREVIEW: '/api/rules/preview',
   RULES_REORDER: '/api/rules/reorder',
 } as const;
 

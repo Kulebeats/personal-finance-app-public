@@ -4,8 +4,7 @@
  * Logic for calculating next occurrence dates based on frequency.
  */
 
-import { formatDate } from "../dates";
-import { Frequency, RecurrenceOptions } from "./types";
+import type { Frequency, RecurrenceOptions } from "./types";
 
 /**
  * Calculates the next occurrence date for a recurring rule.
@@ -20,27 +19,28 @@ export function calculateNextDate(
   frequency: Frequency,
   options?: RecurrenceOptions
 ): string {
+  // A due date names a calendar day. UTC arithmetic keeps the host timezone out of it.
   const date = new Date(currentDate);
   const intervalValue = Math.max(options?.intervalValue ?? 1, 1);
 
   switch (frequency) {
     case "daily":
-      date.setDate(date.getDate() + 1);
+      date.setUTCDate(date.getUTCDate() + 1);
       break;
 
     case "weekly":
-      date.setDate(date.getDate() + 7);
+      date.setUTCDate(date.getUTCDate() + 7);
       if (options?.dayOfWeek !== undefined && options.dayOfWeek !== null) {
-        const delta = (options.dayOfWeek - date.getDay() + 7) % 7;
-        date.setDate(date.getDate() + delta);
+        const delta = (options.dayOfWeek - date.getUTCDay() + 7) % 7;
+        date.setUTCDate(date.getUTCDate() + delta);
       }
       break;
 
     case "biweekly":
-      date.setDate(date.getDate() + 14);
+      date.setUTCDate(date.getUTCDate() + 14);
       if (options?.dayOfWeek !== undefined && options.dayOfWeek !== null) {
-        const delta = (options.dayOfWeek - date.getDay() + 7) % 7;
-        date.setDate(date.getDate() + delta);
+        const delta = (options.dayOfWeek - date.getUTCDay() + 7) % 7;
+        date.setUTCDate(date.getUTCDate() + delta);
       }
       break;
 
@@ -64,13 +64,13 @@ export function calculateNextDate(
     case "custom":
       switch (options?.intervalUnit) {
         case "days":
-          date.setDate(date.getDate() + intervalValue);
+          date.setUTCDate(date.getUTCDate() + intervalValue);
           break;
         case "weeks":
-          date.setDate(date.getDate() + intervalValue * 7);
+          date.setUTCDate(date.getUTCDate() + intervalValue * 7);
           if (options?.dayOfWeek !== undefined && options.dayOfWeek !== null) {
-            const delta = (options.dayOfWeek - date.getDay() + 7) % 7;
-            date.setDate(date.getDate() + delta);
+            const delta = (options.dayOfWeek - date.getUTCDay() + 7) % 7;
+            date.setUTCDate(date.getUTCDate() + delta);
           }
           break;
         case "months":
@@ -89,31 +89,18 @@ export function calculateNextDate(
       applyMonthJump(date, 1, options?.dayOfMonth);
   }
 
-  return formatDate(date);
+  return date.toISOString().split("T")[0];
 }
 
 function applyMonthJump(date: Date, months: number, dayOfMonth?: number) {
-  const targetDay = dayOfMonth ?? date.getDate();
-  const targetMonth = date.getMonth() + months;
-  date.setDate(1);
-  date.setMonth(targetMonth);
-  const daysInMonth = new Date(
-    date.getFullYear(),
-    date.getMonth() + 1,
-    0
-  ).getDate();
-  date.setDate(Math.min(targetDay, daysInMonth));
+  const targetDay = dayOfMonth ?? date.getUTCDate();
+  // Day zero of the following month is the last valid day of the target month.
+  date.setUTCMonth(date.getUTCMonth() + months + 1, 0);
+  date.setUTCDate(Math.min(targetDay, date.getUTCDate()));
 }
 
 function applyYearJump(date: Date, years: number, dayOfMonth?: number) {
-  const targetDay = dayOfMonth ?? date.getDate();
-  const targetMonth = date.getMonth();
-  date.setDate(1);
-  date.setFullYear(date.getFullYear() + years, targetMonth, 1);
-  const daysInMonth = new Date(
-    date.getFullYear(),
-    targetMonth + 1,
-    0
-  ).getDate();
-  date.setDate(Math.min(targetDay, daysInMonth));
+  const targetDay = dayOfMonth ?? date.getUTCDate();
+  date.setUTCFullYear(date.getUTCFullYear() + years, date.getUTCMonth() + 1, 0);
+  date.setUTCDate(Math.min(targetDay, date.getUTCDate()));
 }

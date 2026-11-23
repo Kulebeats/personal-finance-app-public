@@ -23,6 +23,7 @@ import {
   getTestApp,
 } from "../../../__tests__/fixtures";
 import { hashPassword } from "../../../auth";
+import { NOTIFICATION_TYPES } from "@shared/notificationTypes";
 
 describe("Settings Integration Tests", () => {
   let app: Express;
@@ -192,7 +193,7 @@ describe("Settings Integration Tests", () => {
       .send({
         preferences: [
           {
-            notificationType: "budget_alert",
+            notificationType: NOTIFICATION_TYPES.BUDGET_WARNING,
             inAppEnabled: true,
             emailEnabled: true,
             pushEnabled: false,
@@ -210,7 +211,7 @@ describe("Settings Integration Tests", () => {
       .where(
         and(
           eq(userNotificationPreferences.userId, userId),
-          eq(userNotificationPreferences.notificationType, "budget_alert"),
+          eq(userNotificationPreferences.notificationType, NOTIFICATION_TYPES.BUDGET_WARNING),
         ),
       );
 

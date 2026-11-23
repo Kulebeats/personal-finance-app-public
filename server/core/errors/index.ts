@@ -12,11 +12,15 @@ export { NotFoundError } from "./NotFoundError";
 export { HouseholdNotFoundError } from "./HouseholdNotFoundError";
 export { ValidationError, type FieldError } from "./ValidationError";
 export { UnauthorizedError } from "./UnauthorizedError";
+export { InvalidCredentialsError } from "./InvalidCredentialsError";
 export { ForbiddenError } from "./ForbiddenError";
+export { EmailVerificationRequiredError } from "./EmailVerificationRequiredError";
+export { MfaEnrolmentRequiredError, MfaRequiredError } from "./MfaErrors";
 export { ForbiddenError as AuthorizationError } from "./ForbiddenError";
 export { ConflictError } from "./ConflictError";
 export { RateLimitError } from "./RateLimitError";
 export { InternalError } from "./InternalError";
+export { ServiceUnavailableError } from "./ServiceUnavailableError";
 export { errorHandler } from "./errorHandler";
 export { getErrorMessage } from "./getErrorMessage";
 

@@ -12,7 +12,15 @@ export type {
   RuleCondition,
   RuleAction,
   RuleActionResult,
+  RuleActionPlan,
+  PlannedEffect,
+  PlannedSplit,
   MerchantCache,
 } from "./types";
 export { matchesRule, evaluateCondition, resolveMerchant } from "./matching";
-export { evaluateActions, linkGoalsToTransaction } from "./actions";
+export {
+  evaluateActions,
+  planRuleActions,
+  persistRuleEffects,
+  linkGoalsToTransaction,
+} from "./actions";

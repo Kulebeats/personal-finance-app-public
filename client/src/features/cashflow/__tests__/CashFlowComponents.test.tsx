@@ -27,7 +27,7 @@ describe("CashFlowSummary", () => {
     render(
       <CashFlowSummary
         totals={mockTotals}
-        actualPeriods={2}
+        averageSavings={3000}
         periodLabel="Monthly"
         formatCurrency={formatCurrency}
       />

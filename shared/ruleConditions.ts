@@ -62,7 +62,6 @@ export const ACTION_TYPES = [
   "mark_reviewed",
   "link_goal",
   "split_transaction",
-  "assign_member",
   "set_owner",
   "set_merchant",
   "set_category_from_merchant",
@@ -70,3 +69,12 @@ export const ACTION_TYPES = [
 ] as const;
 
 export type ActionType = (typeof ACTION_TYPES)[number];
+
+/**
+ * Action types that were removed and are refused on save (A-44, owner ruling
+ * 21 Nov: "Assign member" never had an executor). A rule stored with one keeps
+ * it, and the executor ignores it.
+ */
+export const REMOVED_ACTION_LABELS: Readonly<Record<string, string>> = {
+  assign_member: "Assign member",
+};

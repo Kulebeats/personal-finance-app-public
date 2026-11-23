@@ -260,6 +260,13 @@ describe("Money Edge Cases - Negative Numbers", () => {
     expect(new Money(1).isNegativeOrZero()).toBe(false);
   });
 
+  it("treats only an amount above zero as positive (NEW-23: zero is not positive)", () => {
+    expect(new Money(0).isPositive()).toBe(false);
+    expect(new Money("-0").isPositive()).toBe(false);
+    expect(new Money("0.01").isPositive()).toBe(true);
+    expect(new Money("-0.01").isPositive()).toBe(false);
+  });
+
   it("should handle isPositiveOrZero", () => {
     expect(new Money(1).isPositiveOrZero()).toBe(true);
     expect(new Money(0).isPositiveOrZero()).toBe(true);

@@ -22,7 +22,7 @@ export function MonthlyProjection({
   const remaining = targetAmount - currentAmount;
 
   const monthlyProjection = projection?.monthlyProjection
-    ? projection.monthlyProjection
+    ? parseMoney(projection.monthlyProjection)
     : goal.monthlyProjection
     ? parseMoney(goal.monthlyProjection)
     : null;

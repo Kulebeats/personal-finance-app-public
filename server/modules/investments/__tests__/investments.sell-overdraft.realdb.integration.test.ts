@@ -42,6 +42,7 @@ import {
   taxLots,
   taxLotDisposals,
   auditLogs,
+  householdFxRateOverrides,
 } from "@shared/schema";
 import {
   getTestApp,
@@ -50,6 +51,7 @@ import {
 } from "../../../__tests__/fixtures";
 import { hashPassword } from "../../../auth";
 import { randomUUID } from "crypto";
+import { seedDatedFxRate } from "../../../testing/fixtures/dated-fx-rate";
 
 interface AuditRow {
   id: string;
@@ -129,6 +131,9 @@ describe("Investments SELL / overdraft REAL-DB (SCP-316)", () => {
       currentPrice: "100.00",
     });
 
+    // NEW-21: foreign trades need a dated rate; this suite claims none, so a synthetic 20.
+    await seedDatedFxRate(householdId, testUser.id, "20");
+
     const loginRes = await request(app)
       .post("/api/auth/login")
       .send({ email: testUser.email, password: "TestPassword123" })
@@ -148,6 +153,7 @@ describe("Investments SELL / overdraft REAL-DB (SCP-316)", () => {
       await db
         .delete(investmentTransactions)
         .where(eq(investmentTransactions.householdId, householdId));
+      await db.delete(householdFxRateOverrides).where(eq(householdFxRateOverrides.householdId, householdId));
       await db.delete(holdings).where(eq(holdings.householdId, householdId));
       await db.delete(accounts).where(eq(accounts.householdId, householdId));
       await db.delete(securities).where(eq(securities.id, securityId));

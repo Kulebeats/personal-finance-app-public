@@ -7,11 +7,13 @@
  */
 
 import request from "supertest";
+import { reviewedRemovalsFrom } from "../../testing/fixtures/import-overwrite-review";
 import { randomUUID } from "crypto";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Express } from "express";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { db } from "../../db";
+import { transactionRepository } from "../../repositories/TransactionRepository";
 import {
   accounts,
   auditLogs,
@@ -28,7 +30,7 @@ import {
 } from "../../__tests__/fixtures";
 import { hashPassword } from "../../auth";
 
-type HouseholdRole = "owner" | "admin" | "member" | "view_only";
+type HouseholdRole = "owner" | "admin" | "member" | "view_only" | "professional";
 
 interface SeededMember {
   householdId: string;
@@ -158,8 +160,8 @@ describe("Import execute REAL-DB integration (W1)", () => {
       mapping: {
         date: "Date",
         amount: "Amount",
+        // No Description column in these rows: a mapped header the file lacks is refused (IMP-01 review r5).
         merchant: "Merchant",
-        description: "Description",
       },
       categoryMapping: {},
       rows:
@@ -168,8 +170,8 @@ describe("Import execute REAL-DB integration (W1)", () => {
     };
   }
 
-  it("rejects view-only members before importing or mutating balances", async () => {
-    const member = await seedMember({ role: "view_only" });
+  it.each(["view_only", "professional"] as const)("rejects %s before importing or mutating balances", async role => {
+    const member = await seedMember({ role });
     const accountId = await seedAccount({ householdId: member.householdId });
 
     const response = await request(app)
@@ -218,8 +220,8 @@ describe("Import execute REAL-DB integration (W1)", () => {
     expect(persisted).toHaveLength(0);
   });
 
-  it("reports malformed money by row while importing valid rows through the balance pipeline", async () => {
-    const importer = await seedMember({ role: "admin" });
+  it.each(["owner", "admin", "member"] as const)("%s reports malformed money by row while importing valid rows through the balance pipeline", async role => {
+    const importer = await seedMember({ role });
     const accountId = await seedAccount({
       householdId: importer.householdId,
       balance: "100.00",
@@ -281,52 +283,33 @@ describe("Import execute REAL-DB integration (W1)", () => {
     });
     const accountId = await seedAccount({
       householdId: importer.householdId,
-      balance: "935.00",
+      balance: "1000.00",
     });
-    const visibleTransactionId = randomUUID();
-    const privateTransactionId = randomUUID();
+    const createExpense = async (ownerUserId: string, name: string, amount: string, isPrivate: boolean) => {
+      const { transaction } = await transactionRepository.create({ householdId: importer.householdId, accountId,
+        ownerUserId, date: "2026-01-10", name, amount, currency: "ZMW", type: "expense", isPrivate, source: "manual" });
+      return transaction.id;
+    };
+    const visibleTransactionId = await createExpense(importer.userId, "Visible Existing", "25.00", false);
+    const privateTransactionId = await createExpense(otherMember.userId, "Private Existing", "40.00", true);
+    const [beforeImport] = await db.select({ balance: accounts.balance }).from(accounts).where(eq(accounts.id, accountId));
+    expect(beforeImport.balance).toBe("935.00");
 
-    await db.insert(transactions).values([
-      {
-        id: visibleTransactionId,
-        householdId: importer.householdId,
-        accountId,
-        ownerUserId: importer.userId,
-        date: "2026-01-10",
-        name: "Visible Existing",
-        amount: "25.00",
-        currency: "ZMW",
-        type: "expense",
-        isPrivate: false,
-        source: "manual",
-      },
-      {
-        id: privateTransactionId,
-        householdId: importer.householdId,
-        accountId,
-        ownerUserId: otherMember.userId,
-        date: "2026-01-10",
-        name: "Private Existing",
-        amount: "40.00",
-        currency: "ZMW",
-        type: "expense",
-        isPrivate: true,
-        source: "manual",
-      },
-    ]);
-
+    const overwriteBody = importBody({
+      targetAccountId: accountId,
+      strategy: "prioritize_csv",
+      rows: [
+        { Date: "2026-01-10", Amount: "-10.00", Merchant: "New Import" },
+      ],
+    });
+    // A-02: the preview lists only the caller-visible row, and execute removes only what was reviewed.
+    const reviewedRemovals = await reviewedRemovalsFrom(request(app).post("/api/import/preview")
+      .set("Cookie", importer.cookie).send(overwriteBody));
+    expect(reviewedRemovals.map(row => row.id)).toEqual([visibleTransactionId]);
     const response = await request(app)
       .post("/api/import/execute")
       .set("Cookie", importer.cookie)
-      .send(
-        importBody({
-          targetAccountId: accountId,
-          strategy: "prioritize_csv",
-          rows: [
-            { Date: "2026-01-10", Amount: "-10.00", Merchant: "New Import" },
-          ],
-        }),
-      );
+      .send({ ...overwriteBody, reviewedRemovals });
 
     expect(response.status).toBe(200);
     expect(response.body).toEqual(

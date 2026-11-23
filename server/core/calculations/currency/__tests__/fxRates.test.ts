@@ -291,7 +291,7 @@ describe("FXRateService", () => {
       ]);
       mockRepo.getLatestRates = vi.fn().mockResolvedValue(mockMap);
 
-      const result = await fxService.getLatestRatesMap(["USD", "EUR"], "ZMW");
+      const result = await fxService.getLatestRatesMap(["USD", "EUR"], "ZMW", "household-1");
       expect(result.get("USD")).toBe(25);
       expect(result.get("EUR")).toBe(27);
     });

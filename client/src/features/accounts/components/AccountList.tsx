@@ -1,30 +1,37 @@
-import { useState } from "react";
 import { Landmark, Plus } from "lucide-react";
 import { Account } from "@/lib/api";
 import { AccountGroup } from "./AccountGroup";
 import { AccountCard } from "./AccountCard";
 import { ASSET_GROUPS, LIABILITY_GROUPS } from "../constants";
-import { AddAccountModal } from "./AddAccountModal";
 import { EmptyState } from "@/components/ui/empty-state";
+import { isCurrencyCode } from "@shared/denomination";
 
 interface AccountListProps {
   groupedAccounts: Record<string, Account[]>;
   accounts?: Account[];
   getGroupTotal: (accounts: Account[]) => number;
+  isFiltered?: boolean;
+  hasAccessibleAccounts?: boolean;
+  onResetFilter?: () => void;
+  onAddAccount: React.MouseEventHandler<HTMLButtonElement>;
 }
 
 export function AccountList({
   groupedAccounts,
   accounts,
   getGroupTotal,
+  isFiltered = false,
+  hasAccessibleAccounts,
+  onResetFilter,
+  onAddAccount,
 }: AccountListProps) {
-  // State for AddAccountModal
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-
   // Check if any accounts exist to handle empty state
   const hasAccounts = accounts && accounts.length > 0;
+  const nativeTotals = (rows: Account[]) => Array.from(new Set(rows.map(row => row.currency).filter(isCurrencyCode)))
+    .map(currency => ({ currency, amount: getGroupTotal(rows.filter(row => row.currency === currency)) }));
 
   if (!hasAccounts) {
+    if (isFiltered && hasAccessibleAccounts !== false) return <EmptyState icon={Landmark} title="No accounts match this filter" description="Choose All accounts to see your accessible accounts." primaryAction={{ label: "Show All Accounts", onClick: () => onResetFilter?.() }} testId="accounts-filtered-empty-state" />;
     return (
       <>
         <EmptyState
@@ -34,13 +41,9 @@ export function AccountList({
           primaryAction={{
             label: "Add Account",
             icon: Plus,
-            onClick: () => setIsAddModalOpen(true),
+            onClick: onAddAccount,
           }}
           testId="accounts-empty-state"
-        />
-        <AddAccountModal
-          open={isAddModalOpen}
-          onOpenChange={setIsAddModalOpen}
         />
       </>
     );
@@ -57,7 +60,8 @@ export function AccountList({
           <div key={groupName}>
             <AccountGroup
               title={groupName}
-              amount={getGroupTotal(groupAccounts)}
+              totals={nativeTotals(groupAccounts)}
+              denominationUnavailable={groupAccounts.some(account => !isCurrencyCode(account.currency))}
             />
             <div className="mt-2">
               {groupAccounts.map((account) => (
@@ -77,7 +81,8 @@ export function AccountList({
           <div key={groupName}>
             <AccountGroup
               title={groupName}
-              amount={getGroupTotal(groupAccounts)}
+              totals={nativeTotals(groupAccounts)}
+              denominationUnavailable={groupAccounts.some(account => !isCurrencyCode(account.currency))}
               isLiability
             />
             <div className="mt-2">

@@ -1,252 +1,145 @@
-import { test, expect } from "@playwright/test";
-import { getTestUser } from "./utils/testUser";
-import { pickVisible } from "./utils/locators";
-
-const loadTestUser = () => getTestUser();
-
 /**
- * Organization Settings E2E Tests
+ * Organization settings E2E: categories, tags, rules (QA-01 rewrite).
  *
- * Critical user flows for categories, tags, and rules management.
+ * The previous version wrapped edit, delete, merge and rule creation in
+ * `if (await x.isVisible())`, so it passed with those controls gone. Each
+ * test now runs on its own synthetic household with two known tags. A missing
+ * control fails the test, and every tag write is submitted and read back in
+ * the UI and in the database.
  */
+import { randomUUID } from "node:crypto";
+import { test, expect, type Page } from "./protected-test";
+import { createCompletionFixture, type CompletionFixture } from "../server/testing/fixtures/completion-fixtures";
+import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
+import { readBack, submitStep, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { escapeRegExp, labelPart, storedValue } from "./utils/observe";
+
+/** The tag rename write; its corrupt mutant saves a different name. */
+const RENAME_TAG: SubmitStep = { name: "tag-edit", method: "PUT", path: /^\/api\/tags\/[0-9a-f-]+$/, corruptField: "name" };
+import { signInAs } from "./utils/fixture-session";
+
+interface Seeded { fixture: CompletionFixture; tagA: string; tagB: string }
+
+async function seededHousehold(): Promise<Seeded> {
+  const fixture = await createCompletionFixture();
+  const suffix = randomUUID().slice(0, 6);
+  const tagA = `Synthetic travel ${suffix}`, tagB = `Synthetic family ${suffix}`;
+  await withFixtureClient((client) => client.query(
+    "INSERT INTO tags (household_id, name, color) VALUES ($1, $2, '#3B82F6'), ($1, $3, '#22C55E')",
+    [fixture.householdId, tagA, tagB]));
+  return { fixture, tagA, tagB };
+}
+
+async function open(page: Page, fixture: CompletionFixture, path: string) {
+  await signInAs(page, fixture);
+  await page.goto(path);
+}
+
+const tagRows = (householdId: string) => withFixtureClient(async (client) =>
+  (await client.query<{ name: string }>("SELECT name FROM tags WHERE household_id=$1 ORDER BY name", [householdId])).rows.map((row) => row.name));
+
 test.describe("Organization Settings", () => {
-  test.beforeEach(async ({ page }) => {
-    // Login before each test
-    const testUser = loadTestUser();
-    await page.goto("/login");
-    await page.getByLabel(/email/i).fill(testUser.email);
-    await page.getByPlaceholder(/enter your password/i).fill(testUser.password);
-    await page.getByRole("button", { name: /sign in/i }).click();
-    await expect(page).toHaveURL("/");
-
-    // Navigate to settings
-    await page.goto("/settings/organization");
-    await expect(page).toHaveURL(/\/settings\/organization/);
+  test("switches between the Categories, Tags and Rules tabs", async ({ page }) => {
+    const { fixture } = await seededHousehold();
+    await open(page, fixture, "/settings/organization");
+    for (const name of ["Tags", "Rules", "Categories"]) {
+      const tab = page.getByRole("tab", { name: new RegExp(`^${name}`) });
+      await tab.click();
+      await expect(tab).toHaveAttribute("aria-selected", "true");
+    }
   });
 
-  test("should display organization tabs", async ({ page }) => {
-    // Should show tabs for Categories, Tags, Rules
-    await expect(page.getByRole("tab", { name: /categories/i })).toBeVisible();
-    await expect(page.getByRole("tab", { name: /tags/i })).toBeVisible();
-    await expect(page.getByRole("tab", { name: /rules/i })).toBeVisible();
-  });
-
-  test("should switch between tabs", async ({ page }) => {
-    // Click Tags tab
-    const tagsTab = page.getByRole("tab", { name: /tags/i });
-    await tagsTab.click();
-    await expect(tagsTab).toHaveAttribute("aria-selected", "true");
-
-    // Click Rules tab
-    const rulesTab = page.getByRole("tab", { name: /rules/i });
-    await rulesTab.click();
-    await expect(rulesTab).toHaveAttribute("aria-selected", "true");
+  test("lists the household's category groups and categories", async ({ page }) => {
+    const { fixture } = await seededHousehold();
+    await open(page, fixture, "/settings/organization/categories");
+    await expect(page.getByText("Golden Expense", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Golden Income", { exact: true }).first()).toBeVisible();
   });
 });
 
 test.describe("Tags Management", () => {
-  test.beforeEach(async ({ page }) => {
-    const testUser = loadTestUser();
-    await page.goto("/login");
-    await page.getByLabel(/email/i).fill(testUser.email);
-    await page.getByPlaceholder(/enter your password/i).fill(testUser.password);
-    await page.getByRole("button", { name: /sign in/i }).click();
-    await expect(page).toHaveURL("/");
-
-    // Navigate to tags tab
-    await page.goto("/settings/organization/tags");
-    await expect(page).toHaveURL(/\/settings\/organization\/tags/);
+  test("lists the household's tags", async ({ page }) => {
+    const { fixture, tagA, tagB } = await seededHousehold();
+    await open(page, fixture, "/settings/organization/tags");
+    const panel = page.getByRole("tabpanel");
+    await expect(panel.getByText(tagA, { exact: true })).toBeVisible();
+    await expect(panel.getByText(tagB, { exact: true })).toBeVisible();
   });
 
-  test("should display tags list", async ({ page }) => {
-    await expect(page.getByRole("tab", { name: /tags/i })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+  test("creates a tag and reads it back", async ({ page }) => {
+    const { fixture, tagA, tagB } = await seededHousehold();
+    await open(page, fixture, "/settings/organization/tags");
+    await page.getByRole("button", { name: /new tag/i }).first().click();
+    const dialog = page.getByRole("dialog", { name: "New tag" });
+    const name = `E2E tag ${randomUUID().slice(0, 6)}`;
+    await dialog.getByLabel("Color & Name").fill(name);
+    const response = await submitStep(page, { name: "tag", method: "POST", path: "/api/tags" },
+      () => dialog.getByRole("button", { name: "Save" }).click());
+    expect(response.status()).toBe(201);
+    await expect(dialog).toBeHidden();
+    await page.reload();
+    await expect(page.getByRole("tabpanel").getByText(name, { exact: true })).toBeVisible();
+    expect(await tagRows(fixture.householdId)).toEqual([name, tagB, tagA].sort());
   });
 
-  test("should have new tag button", async ({ page }) => {
-    const newTagButton = page.getByRole("button", { name: /new tag/i }).first();
-    await expect(newTagButton).toBeVisible();
+  testWithMutants("renames a tag and reads it back", { corrupt: [RENAME_TAG] }, async (page) => {
+    const { fixture, tagA, tagB } = await seededHousehold();
+    await open(page, fixture, "/settings/organization/tags");
+    await page.getByRole("button", { name: `Edit ${tagA} tag` }).click();
+    const dialog = page.getByRole("dialog", { name: "Edit tag" });
+    const renamed = `${tagA} renamed`;
+    await dialog.getByLabel("Color & Name").fill(renamed);
+    const response = await submitStep(page, RENAME_TAG,
+      () => dialog.getByRole("button", { name: "Save" }).click());
+    expect(response.ok()).toBe(true);
+    const tagId = new URL(response.url()).pathname.split("/").pop();
+    await page.reload();
+    // The edited tag's own Edit button: the one that is not tagB's.
+    const editedTag = page.getByRole("button", { name: new RegExp(`^Edit (?!${escapeRegExp(tagB)} tag$).+ tag$`) });
+    await readBack(RENAME_TAG, renamed, {
+      db: () => storedValue("SELECT name AS value FROM tags WHERE id=$1 AND household_id=$2", [tagId, fixture.householdId]),
+      ui: () => labelPart(editedTag, /^Edit (.+) tag$/),
+    });
+    await expect(page.getByRole("tabpanel").getByText(renamed, { exact: true })).toBeVisible();
+    expect(await tagRows(fixture.householdId)).toEqual([renamed, tagB].sort());
   });
 
-  test("should open create tag modal", async ({ page }) => {
-    await page.getByRole("button", { name: /new tag/i }).click();
+  test("deletes a tag only after confirmation", async ({ page }) => {
+    const { fixture, tagA, tagB } = await seededHousehold();
+    await open(page, fixture, "/settings/organization/tags");
+    await page.getByRole("button", { name: `More actions for ${tagA}` }).click();
+    await page.getByRole("menuitem", { name: /delete/i }).click();
+    const confirm = page.getByRole("alertdialog", { name: "Delete tag?" });
+    await expect(confirm).toBeVisible();
+    await confirm.getByRole("button", { name: "Cancel" }).click();
+    expect(await tagRows(fixture.householdId)).toEqual([tagA, tagB].sort());
 
-    // Modal should open
-    await expect(page.getByRole("dialog")).toBeVisible();
-
-    // Should have name field
-    const nameField = await pickVisible(
-      page.getByLabel(/name/i),
-      page.getByPlaceholder(/tag name/i),
-    );
-    expect(nameField).not.toBeNull();
+    await page.getByRole("button", { name: `More actions for ${tagA}` }).click();
+    await page.getByRole("menuitem", { name: /delete/i }).click();
+    const response = await submitStep(page, { name: "tag-delete", method: "DELETE", path: /^\/api\/tags\/[0-9a-f-]+$/ },
+      () => confirm.getByRole("button", { name: "Delete" }).click());
+    expect(response.ok()).toBe(true);
+    await page.reload();
+    await expect(page.getByRole("tabpanel").getByText(tagA, { exact: true })).toHaveCount(0);
+    expect(await tagRows(fixture.householdId)).toEqual([tagB]);
   });
 
-  test("should create a new tag", async ({ page }) => {
-    await page.getByRole("button", { name: /new tag/i }).click();
-    await page.waitForTimeout(300);
-
-    // Fill tag name
-    const nameField = await pickVisible(
-      page.getByLabel(/name/i),
-      page.getByPlaceholder(/tag name/i),
-    );
-    expect(nameField).not.toBeNull();
-    if (!nameField) return;
-
-    const uniqueTagName = `E2E Test Tag ${Date.now()}`;
-    await nameField.fill(uniqueTagName);
-
-    // Submit
-    const createButton = await pickVisible(
-      page.getByRole("button", { name: /create/i }),
-      page.getByRole("button", { name: /save/i }),
-    );
-    expect(createButton).not.toBeNull();
-    if (!createButton) return;
-
-    await createButton.click();
-
-    // Tag should appear in list
-    await page.waitForTimeout(500);
-    await expect(
-      page.getByRole("tabpanel").getByText(uniqueTagName, { exact: true }).first(),
-    ).toBeVisible();
-  });
-
-  test("should edit existing tag", async ({ page }) => {
-    // Find an edit button
-    const editButton = page.getByRole("button", { name: /edit/i }).first();
-
-    if (await editButton.isVisible()) {
-      await editButton.click();
-
-      // Modal should open
-      await expect(page.getByRole("dialog")).toBeVisible();
-    }
-  });
-
-  test("should show delete confirmation", async ({ page }) => {
-    // Find more options menu
-    const moreButton = page
-      .getByRole("button", { name: /more actions/i })
-      .first();
-
-    if (await moreButton.isVisible()) {
-      await moreButton.click();
-
-      // Click delete option
-      const deleteOption = page.getByRole("menuitem", { name: /delete/i });
-      if (await deleteOption.isVisible()) {
-        await deleteOption.click();
-
-        // Confirmation dialog should appear
-        const confirmUI = await pickVisible(
-          page.getByRole("alertdialog"),
-          page.getByText(/are you sure/i),
-        );
-        expect(confirmUI).not.toBeNull();
-      }
-    }
-  });
-
-  test("should have merge tags button when multiple tags exist", async ({
-    page,
-  }) => {
-    // Look for merge button
-    const mergeButton = page.getByRole("button", { name: /merge tags/i });
-
-    // May or may not be visible depending on tag count
-    if (await mergeButton.isVisible()) {
-      await mergeButton.click();
-
-      // Merge dialog should open
-      await expect(page.getByRole("dialog")).toBeVisible();
-      await expect(page.getByText(/select tags to merge/i)).toBeVisible();
-    }
-  });
-});
-
-test.describe("Categories Management", () => {
-  test.beforeEach(async ({ page }) => {
-    const testUser = loadTestUser();
-    await page.goto("/login");
-    await page.getByLabel(/email/i).fill(testUser.email);
-    await page.getByPlaceholder(/enter your password/i).fill(testUser.password);
-    await page.getByRole("button", { name: /sign in/i }).click();
-    await expect(page).toHaveURL("/");
-
-    // Navigate to categories tab
-    await page.goto("/settings/organization/categories");
-    await expect(page).toHaveURL(/\/settings\/organization\/categories/);
-  });
-
-  test("should display categories", async ({ page }) => {
-    await expect(
-      page.getByRole("tab", { name: /categories/i }),
-    ).toHaveAttribute("aria-selected", "true");
-  });
-
-  test("should display category groups", async ({ page }) => {
-    const categorySurface = await pickVisible(
-      page.getByText(/no categories found/i),
-      page.getByRole("button", { name: /seed default categories/i }),
-      page.getByText(/income/i),
-      page.getByText(/expense/i),
-    );
-    expect(categorySurface).not.toBeNull();
-  });
-
-  test("should expand/collapse category groups", async ({ page }) => {
-    // Find an expandable group
-    const expandButton = await pickVisible(
-      page.getByRole("button", { name: /expand/i }),
-      page.locator("[data-state='collapsed']"),
-    );
-
-    if (expandButton) {
-      await expandButton.click();
-      await page.waitForTimeout(300);
-    }
+  test("offers a merge dialog when the household has several tags", async ({ page }) => {
+    const { fixture } = await seededHousehold();
+    await open(page, fixture, "/settings/organization/tags");
+    await page.getByRole("button", { name: /merge tags/i }).click();
+    const dialog = page.getByRole("dialog", { name: "Merge Tags" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("Select tags to merge", { exact: true })).toBeVisible();
   });
 });
 
 test.describe("Rules Management", () => {
-  test.beforeEach(async ({ page }) => {
-    const testUser = loadTestUser();
-    await page.goto("/login");
-    await page.getByLabel(/email/i).fill(testUser.email);
-    await page.getByPlaceholder(/enter your password/i).fill(testUser.password);
-    await page.getByRole("button", { name: /sign in/i }).click();
-    await expect(page).toHaveURL("/");
-
-    // Navigate to rules tab
-    await page.goto("/settings/organization/rules");
-    await expect(page).toHaveURL(/\/settings\/organization\/rules/);
-  });
-
-  test("should display rules section", async ({ page }) => {
-    const rulesContent = await pickVisible(
-      page.getByText(/rules/i),
-      page.getByText(/no rules/i),
-    );
-    expect(rulesContent).not.toBeNull();
-  });
-
-  test("should have create rule button", async ({ page }) => {
-    const createButton = await pickVisible(
-      page.getByRole("button", { name: /new rule/i }),
-      page.getByRole("button", { name: /create rule/i }),
-      page.getByRole("button", { name: /add rule/i }),
-    );
-
-    if (createButton) {
-      await createButton.click();
-
-      // Should open rule creation dialog/form
-      await page.waitForTimeout(300);
-    }
+  test("opens the rule editor from the Rules tab", async ({ page }) => {
+    const { fixture } = await seededHousehold();
+    await open(page, fixture, "/settings/organization/rules");
+    await page.getByRole("button", { name: "New Rule (Editor)", exact: true }).click();
+    await expect(page.getByRole("dialog")).toBeVisible();
   });
 });

@@ -22,7 +22,9 @@ import {
   investmentTransactions,
 } from "@shared/schema";
 import { Money } from "../../core/money";
+import { householdToday } from "../../services/householdCalendarToday";
 import { BaseReportRepository } from "./BaseReportRepository";
+import { bucketKeys, bucketLabel } from "./cashflowBuckets";
 import type {
   ReportsCashflowResponse,
   ReportsIncomeResponse,
@@ -45,6 +47,7 @@ import {
   toForecastSeriesPoint,
   type CategoryAverageInput,
 } from "../../core/calculations/cashflow";
+import { flowDebtRepayment, flowExpense, flowIncome, flowRowFilter } from "./flowClassification";
 
 // Re-export split modules
 export {
@@ -82,14 +85,12 @@ export class CashflowReportRepository extends BaseReportRepository {
       includePending = false,
       includeTransfers = false,
       merchantId,
-      timezone,
       scope = "household",
       userId,
     } = query;
 
     const currency = await this.getHouseholdCurrency(householdId);
     const merchantFilterId = merchantId ?? null;
-    const timeZone = timezone || "UTC";
 
     // SCP-321: fail closed BEFORE aggregating — the SQL rate expression
     // silently converts at 1 when a rate row is missing.
@@ -104,23 +105,22 @@ export class CashflowReportRepository extends BaseReportRepository {
     });
 
     const truncInterval = interval === "week" ? "week" : interval;
-    const periodExpr =
-      timeZone === "UTC"
-        ? sql`date_trunc(${truncInterval}::text, t.date)::date`
-        : sql`date_trunc(${truncInterval}::text, (t.date::timestamp AT TIME ZONE ${timeZone}::text))::date`;
+    // NEW-15: `date` columns are already calendar days. Truncate them as naive
+    // timestamps so the bucket never depends on the session or request zone
+    // (`AT TIME ZONE` made an instant at local midnight, then ::date ran in the
+    // session zone and moved every day east of UTC back by one).
+    const periodExpr = sql`date_trunc(${truncInterval}::text, t.date::timestamp)::date`;
 
     const currencyExpr = sql`COALESCE(t.currency, a.currency, ${currency}::text)`;
-    const fxRateExpr = this.buildFxRateExpr(currencyExpr, currency, sql`t.date`);
+    const flowCols = { type: sql`t.type`, isTransferIn: sql`t.is_transfer_in`, accountId: sql`t.account_id`, transferAccountId: sql`t.transfer_account_id` };
+    const fxRateExpr = this.buildFxRateExpr(currencyExpr, currency, sql`t.date`, { householdId });
 
-    const investmentPeriodExpr =
-      timeZone === "UTC"
-        ? sql`date_trunc(${truncInterval}::text, t.transaction_date)::date`
-        : sql`date_trunc(${truncInterval}::text, (t.transaction_date::timestamp AT TIME ZONE ${timeZone}::text))::date`;
+    const investmentPeriodExpr = sql`date_trunc(${truncInterval}::text, t.transaction_date::timestamp)::date`;
     const investmentCurrencyExpr = sql`COALESCE(t.currency, a.currency, ${currency}::text)`;
     const investmentFxRateExpr = this.buildFxRateExpr(
       investmentCurrencyExpr,
       currency,
-      sql`t.transaction_date`,
+      sql`t.transaction_date`, { householdId },
     );
 
     const result = await db.execute<{
@@ -130,37 +130,11 @@ export class CashflowReportRepository extends BaseReportRepository {
       debt: string;
     }>(sql`
       SELECT
-        ${periodExpr} AS period_start,
-        SUM(CASE
-          WHEN t.type = 'income' THEN t.amount::numeric * ${fxRateExpr}
-          WHEN ${includeTransfers}::boolean = TRUE
-            AND t.type = 'transfer'
-            AND t.is_transfer_in = TRUE
-            AND a.type NOT IN ('credit', 'loan', 'mortgage', 'other_liability')
-            THEN t.amount::numeric * ${fxRateExpr}
-          ELSE 0
-        END) AS income,
-        SUM(CASE
-          WHEN t.type = 'expense'
-            AND a.type NOT IN ('credit', 'loan', 'mortgage', 'other_liability')
-            THEN t.amount::numeric * ${fxRateExpr}
-          WHEN ${includeTransfers}::boolean = TRUE
-            AND t.type = 'transfer'
-            AND t.is_transfer_in = FALSE
-            AND a.type NOT IN ('credit', 'loan', 'mortgage', 'other_liability')
-            THEN t.amount::numeric * ${fxRateExpr}
-          ELSE 0
-        END) AS expenses,
-        SUM(CASE
-          WHEN t.type = 'expense'
-            AND a.type IN ('credit', 'loan', 'mortgage', 'other_liability')
-            THEN t.amount::numeric * ${fxRateExpr}
-          WHEN t.type = 'transfer'
-            AND t.is_transfer_in = TRUE
-            AND a.type IN ('credit', 'loan', 'mortgage', 'other_liability')
-            THEN t.amount::numeric * ${fxRateExpr}
-          ELSE 0
-        END) AS debt
+        to_char(${periodExpr}, 'YYYY-MM-DD') AS period_start,
+        SUM(CASE WHEN ${flowIncome(flowCols, includeTransfers)} THEN t.amount::numeric * ${fxRateExpr} ELSE 0 END) AS income,
+        SUM(CASE WHEN ${flowExpense(flowCols, includeTransfers)} THEN t.amount::numeric * ${fxRateExpr} ELSE 0 END) AS expenses,
+        -- NEW-06: debt = repayments only; card purchases are expenses above.
+        SUM(CASE WHEN ${flowDebtRepayment(flowCols)} THEN t.amount::numeric * ${fxRateExpr} ELSE 0 END) AS debt
       FROM ${transactions} t
       JOIN ${accounts} a ON a.id = t.account_id
       WHERE t.household_id = ${householdId}::uuid
@@ -170,7 +144,7 @@ export class CashflowReportRepository extends BaseReportRepository {
         AND t.date <= ${to}::date
         AND (${merchantFilterId}::uuid IS NULL OR t.merchant_id = ${merchantFilterId}::uuid)
         AND (${includePending}::boolean = TRUE OR t.is_pending = FALSE)
-        AND (${includeTransfers}::boolean = TRUE OR t.type NOT IN ('transfer', 'balance_adjustment'))
+        AND ${flowRowFilter(flowCols, includeTransfers)}
         AND (${scope}::text = 'household' OR t.owner_user_id = ${userId}::uuid)
         AND (t.is_private = FALSE OR t.owner_user_id = ${userId}::uuid)
         AND (a.is_private = FALSE OR a.owner_user_id = ${userId}::uuid)
@@ -191,7 +165,7 @@ export class CashflowReportRepository extends BaseReportRepository {
               income: string;
             }>(sql`
               SELECT
-                ${investmentPeriodExpr} AS period_start,
+                to_char(${investmentPeriodExpr}, 'YYYY-MM-DD') AS period_start,
                 SUM(t.amount::numeric * ${investmentFxRateExpr}) AS income
               FROM ${investmentTransactions} t
               JOIN ${accounts} a ON a.id = t.account_id
@@ -214,8 +188,9 @@ export class CashflowReportRepository extends BaseReportRepository {
 
     const zero = Money.zero(currency);
 
+    // Bucket keys are the SQL's calendar days as text: never parsed into a host-zone Date.
     for (const row of regularRows) {
-      const key = new Date(row.period_start).toISOString().split("T")[0];
+      const key = row.period_start;
       const current = dataByPeriod.get(key) || { income: zero, expenses: zero, debt: zero };
       current.income = current.income.add(moneyFromValue(row.income, currency));
       current.expenses = current.expenses.add(moneyFromValue(row.expenses, currency));
@@ -224,7 +199,7 @@ export class CashflowReportRepository extends BaseReportRepository {
     }
 
     for (const row of orphanRows) {
-      const key = new Date(row.period_start).toISOString().split("T")[0];
+      const key = row.period_start;
       const current = dataByPeriod.get(key) || { income: zero, expenses: zero, debt: zero };
       current.income = current.income.add(moneyFromValue(row.income, currency));
       dataByPeriod.set(key, current);
@@ -232,9 +207,10 @@ export class CashflowReportRepository extends BaseReportRepository {
 
     // Build series with all periods in range
     const series: ReportsCashflowResponse["series"] = [];
-    const curr = new Date(from);
-    const end = new Date(to);
     const toMoneyValue = (value: Money) => toMoneyDtoSafe(value, currency);
+    // NEW-34 footing: each period is rounded to cents once, and totals add the
+    // rounded periods, so rows sum to the total and income - expenses = savings.
+    const toCents = (value: Money) => new Money(value.toString(), currency);
     const totals = {
       income: Money.zero(currency),
       expenses: Money.zero(currency),
@@ -242,21 +218,23 @@ export class CashflowReportRepository extends BaseReportRepository {
       debt: Money.zero(currency),
       savingsRate: 0,
     };
+    // NEW-34: averages divide by the periods that have started on the household
+    // calendar, and add only those periods, never future ones.
+    const today = await householdToday(db, householdId);
+    const elapsed = { periods: 0, income: Money.zero(currency), expenses: Money.zero(currency), savings: Money.zero(currency) };
 
-    while (curr <= end) {
-      const key = curr.toISOString().split("T")[0];
-      const data = dataByPeriod.get(key) || { income: zero, expenses: zero, debt: zero };
+    for (const key of bucketKeys(from, to, interval)) {
+      const raw = dataByPeriod.get(key) || { income: zero, expenses: zero, debt: zero };
+      const data = { income: toCents(raw.income), expenses: toCents(raw.expenses), debt: toCents(raw.debt) };
 
-      const savings = data.income.subtract(data.expenses.add(data.debt));
+      // NEW-06: net flow = income - expenses; a repayment moves money, it is not spent.
+      const savings = data.income.subtract(data.expenses);
       const savingsRateVal = percentOf(savings, data.income, 2);
 
       series.push({
         periodStart: key,
         periodEnd: key,
-        label: curr.toLocaleDateString("en-US", {
-          month: "short",
-          year: interval === "month" ? "numeric" : undefined,
-        }),
+        label: bucketLabel(key, interval),
         income: toMoneyValue(data.income),
         expenses: toMoneyValue(data.expenses),
         savings: toMoneyValue(savings),
@@ -269,13 +247,13 @@ export class CashflowReportRepository extends BaseReportRepository {
       totals.savings = totals.savings.add(savings);
       totals.debt = totals.debt.add(data.debt);
       totals.savingsRate = percentOf(totals.savings, totals.income, 2);
-
-      if (interval === "month") {
-        curr.setMonth(curr.getMonth() + 1);
-      } else if (interval === "week") {
-        curr.setDate(curr.getDate() + 7);
-      } else {
-        curr.setDate(curr.getDate() + 1);
+      // The bucket key may precede `from` (it is the month's start): the period
+      // has started only once its first day inside the range has.
+      if ((key < from ? from : key) <= today) {
+        elapsed.periods += 1;
+        elapsed.income = elapsed.income.add(data.income);
+        elapsed.expenses = elapsed.expenses.add(data.expenses);
+        elapsed.savings = elapsed.savings.add(savings);
       }
     }
 
@@ -292,7 +270,7 @@ export class CashflowReportRepository extends BaseReportRepository {
           AND t.date <= ${to}::date
           AND (${merchantFilterId}::uuid IS NULL OR t.merchant_id = ${merchantFilterId}::uuid)
           AND (${includePending}::boolean = TRUE OR t.is_pending = FALSE)
-          AND (${includeTransfers}::boolean = TRUE OR t.type NOT IN ('transfer', 'balance_adjustment'))
+          AND ${flowRowFilter(flowCols, includeTransfers)}
           AND (${scope}::text = 'household' OR t.owner_user_id = ${userId}::uuid)
           AND (t.is_private = FALSE OR t.owner_user_id = ${userId}::uuid)
           AND (a.is_private = FALSE OR a.owner_user_id = ${userId}::uuid)
@@ -305,7 +283,12 @@ export class CashflowReportRepository extends BaseReportRepository {
     const hasForeignCurrency = currencyCheckResult.rows?.[0]?.has_foreign_currency ?? false;
 
     return {
-      range: { from, to, interval, baseCurrency: currency },
+      range: { from, to, interval, baseCurrency: currency, elapsedPeriods: elapsed.periods },
+      elapsedTotals: {
+        income: toMoneyValue(elapsed.income),
+        expenses: toMoneyValue(elapsed.expenses),
+        savings: toMoneyValue(elapsed.savings),
+      },
       series,
       totals: {
         income: toMoneyValue(totals.income),
@@ -381,22 +364,23 @@ export class CashflowReportRepository extends BaseReportRepository {
    */
   async getExpenseClassification(
     householdId: string,
-    query: { from: string; to: string; scope?: string; userId?: string },
+    query: { from: string; to: string; scope?: string; userId: string },
   ) {
     const { from, to, scope = "household", userId } = query;
     const currency = await this.getHouseholdCurrency(householdId);
     const currencyExpr = this.buildCurrencyExpr(currency);
-    const fxRateExpr = this.buildFxRateExpr(currencyExpr, currency, sql`t.date`);
+    const fxRateExpr = this.buildFxRateExpr(currencyExpr, currency, sql`t.date`, { householdId });
 
-    // SCP-321: fail closed before aggregating. The monthly query below has
-    // no pending or hide_transactions filter, so the guard covers both.
+    // SCP-321: fail closed before aggregating. The guard checks the rows the
+    // monthly query reads (A-24): pending included, hidden accounts and other
+    // types left out, so an excluded row can never 422 the report.
     await this.assertFxRatesAvailable(householdId, currency, {
       from,
       to,
       includePending: true,
-      includeHiddenAccounts: true,
       scope,
       userId,
+      transactionFilter: sql`t.type = 'expense'`,
     });
 
     // Import SpendingReportRepository to get breakdown
@@ -422,14 +406,19 @@ export class CashflowReportRepository extends BaseReportRepository {
       FROM ${transactions} t
       LEFT JOIN ${transactionSplits} ts ON ts.transaction_id = t.id
       LEFT JOIN ${categories} c ON c.id = COALESCE(ts.category_id, t.category_id)
-      LEFT JOIN ${accounts} a ON a.id = t.account_id
+      JOIN ${accounts} a ON a.id = t.account_id
       WHERE t.household_id = ${householdId}::uuid
         AND t.deleted_at IS NULL
         AND t.is_excluded_from_reports = FALSE
         AND t.date >= ${from}::date
         AND t.date <= ${to}::date
         AND t.type = 'expense'
-        ${scope === "mine" && userId ? sql`AND t.owner_user_id = ${userId}::uuid` : sql``}
+        AND (${scope}::text = 'household' OR t.owner_user_id = ${userId}::uuid)
+        -- Same visibility as the breakdown and getCashflow: another member's
+        -- private rows must not move this user's labels.
+        AND (t.is_private = FALSE OR t.owner_user_id = ${userId}::uuid)
+        AND (a.is_private = FALSE OR a.owner_user_id = ${userId}::uuid)
+        AND (a.hide_transactions = FALSE OR a.hide_transactions IS NULL)
       GROUP BY c.id, c.name, DATE_TRUNC('month', t.date)
       ORDER BY c.id, month
     `);
@@ -551,8 +540,8 @@ export class CashflowReportRepository extends BaseReportRepository {
 
     const toDate = new Date(query.to + "T00:00:00Z");
     const forecastStart = new Date(toDate);
-    forecastStart.setUTCMonth(forecastStart.getUTCMonth() + 1);
     forecastStart.setUTCDate(1);
+    forecastStart.setUTCMonth(forecastStart.getUTCMonth() + 1);
     const forecastStartStr = forecastStart.toISOString().split("T")[0];
 
     const { getActiveRecurringRules, getBudgetsForHousehold } = await import(
@@ -560,9 +549,9 @@ export class CashflowReportRepository extends BaseReportRepository {
     );
 
     const [recurringRules, budgetData, categoryAverages] = await Promise.all([
-      getActiveRecurringRules(householdId, currency),
+      getActiveRecurringRules(householdId, query.userId, currency),
       getBudgetsForHousehold(householdId),
-      this.getCategoryAverages(householdId, query.from, query.to, query.userId),
+      query.userId ? this.getCategoryAverages(householdId, query.from, query.to, query.userId) : [],
     ]);
 
     const forecast = generateForecast(
@@ -597,20 +586,19 @@ export class CashflowReportRepository extends BaseReportRepository {
   }
 
   /**
-   * Get category averages for fallback forecast
+   * Category averages for the fallback forecast, over rows the reader may see (FIN-01 / OPS-005).
    */
   private async getCategoryAverages(
     householdId: string,
     from: string,
     to: string,
-    userId?: string,
+    userId: string,
   ): Promise<CategoryAverageInput[]> {
     const currency = await this.getHouseholdCurrency(householdId);
     const currencyExpr = this.buildCurrencyExpr(currency);
-    const fxRateExpr = this.buildFxRateExpr(currencyExpr, currency, sql`t.date`);
+    const fxRateExpr = this.buildFxRateExpr(currencyExpr, currency, sql`t.date`, { householdId });
 
-    // SCP-321: fail closed before aggregating (query includes pending rows
-    // and hidden accounts).
+    // SCP-321: fail closed before aggregating (query includes pending rows and hidden accounts).
     await this.assertFxRatesAvailable(householdId, currency, {
       from,
       to,
@@ -647,7 +635,8 @@ export class CashflowReportRepository extends BaseReportRepository {
         AND t.date >= ${from}::date
         AND t.date <= ${to}::date
         AND t.type IN ('income', 'expense')
-        ${userId ? sql`AND (t.is_private = FALSE OR t.owner_user_id = ${userId}::uuid)` : sql``}
+        AND (t.is_private = FALSE OR t.owner_user_id = ${userId}::uuid)
+        AND (a.is_private = FALSE OR a.owner_user_id = ${userId}::uuid)
       GROUP BY c.id, c.name, t.type
     `);
 

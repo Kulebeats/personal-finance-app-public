@@ -20,8 +20,8 @@ This document summarizes the verification and updates made to review files acros
 ## Investments Module
 
 ### Review Files
-- `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/investments/investments-qa-review.md`
-- `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/investments/investments-senior-dev-review.md`
+- `/mnt/c/Users/USER/personal-finance-app/docs/reviews/investments/investments-qa-review.md`
+- `/mnt/c/Users/USER/personal-finance-app/docs/reviews/investments/investments-senior-dev-review.md`
 
 ### Status Updates
 
@@ -67,12 +67,12 @@ All gaps remain **OPEN**:
 ## Recurring Module
 
 ### Review Files
-- `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/recurring/recurring-senior-dev-review.md`
-- `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/recurring/recurring-qa-review.md`
-- `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/recurring/recurring-ux-review.md`
-- `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/recurring/recurring-fintech-review.md`
-- `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/recurring/recurring-functionality-review.md`
-- `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/recurring/recurring-module-assessment.md`
+- `/mnt/c/Users/USER/personal-finance-app/docs/reviews/recurring/recurring-senior-dev-review.md`
+- `/mnt/c/Users/USER/personal-finance-app/docs/reviews/recurring/recurring-qa-review.md`
+- `/mnt/c/Users/USER/personal-finance-app/docs/reviews/recurring/recurring-ux-review.md`
+- `/mnt/c/Users/USER/personal-finance-app/docs/reviews/recurring/recurring-fintech-review.md`
+- `/mnt/c/Users/USER/personal-finance-app/docs/reviews/recurring/recurring-functionality-review.md`
+- `/mnt/c/Users/USER/personal-finance-app/docs/reviews/recurring/recurring-module-assessment.md`
 
 ### Status Updates
 
@@ -133,11 +133,11 @@ All gaps remain **OPEN**:
 ## Reports Module
 
 ### Review Files
-- `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/reports/reports-senior-dev-review.md`
-- `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/reports/reports-qa-review.md`
-- `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/reports/reports-ux-review.md`
-- `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/reports/reports-fintech-review.md`
-- `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/reports/reports-functionality-review.md`
+- `/mnt/c/Users/USER/personal-finance-app/docs/reviews/reports/reports-senior-dev-review.md`
+- `/mnt/c/Users/USER/personal-finance-app/docs/reviews/reports/reports-qa-review.md`
+- `/mnt/c/Users/USER/personal-finance-app/docs/reviews/reports/reports-ux-review.md`
+- `/mnt/c/Users/USER/personal-finance-app/docs/reviews/reports/reports-fintech-review.md`
+- `/mnt/c/Users/USER/personal-finance-app/docs/reviews/reports/reports-functionality-review.md`
 
 ### Status Updates
 
@@ -268,14 +268,14 @@ All gaps remain **OPEN**:
 
 ## Files Modified in This Update
 
-1. `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/investments/investments-senior-dev-review.md` - Added status update to Critical Issues section
-2. `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/investments/investments-qa-review.md` - Added Update section with current test status
-3. `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/recurring/recurring-senior-dev-review.md` - Updated LOC Limits table with current status
-4. `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/recurring/recurring-qa-review.md` - Added Update section with new test files
-5. `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/recurring/recurring-ux-review.md` - Updated A11Y violations with current status
-6. `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/reports/reports-senior-dev-review.md` - Updated violations table with LOC fix
-7. `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/reports/reports-qa-review.md` - Added Update section with test gaps
-8. `/mnt/c/Users/kuwan/personal-finance-app/docs/reviews/reports/reports-ux-review.md` - Updated A11Y violations with aria-label count
+1. `/mnt/c/Users/USER/personal-finance-app/docs/reviews/investments/investments-senior-dev-review.md` - Added status update to Critical Issues section
+2. `/mnt/c/Users/USER/personal-finance-app/docs/reviews/investments/investments-qa-review.md` - Added Update section with current test status
+3. `/mnt/c/Users/USER/personal-finance-app/docs/reviews/recurring/recurring-senior-dev-review.md` - Updated LOC Limits table with current status
+4. `/mnt/c/Users/USER/personal-finance-app/docs/reviews/recurring/recurring-qa-review.md` - Added Update section with new test files
+5. `/mnt/c/Users/USER/personal-finance-app/docs/reviews/recurring/recurring-ux-review.md` - Updated A11Y violations with current status
+6. `/mnt/c/Users/USER/personal-finance-app/docs/reviews/reports/reports-senior-dev-review.md` - Updated violations table with LOC fix
+7. `/mnt/c/Users/USER/personal-finance-app/docs/reviews/reports/reports-qa-review.md` - Added Update section with test gaps
+8. `/mnt/c/Users/USER/personal-finance-app/docs/reviews/reports/reports-ux-review.md` - Updated A11Y violations with aria-label count
 
 ---
 

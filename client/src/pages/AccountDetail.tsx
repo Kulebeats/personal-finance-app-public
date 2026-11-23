@@ -16,7 +16,14 @@ import { AccountTransactions } from "@/features/accounts/components/detail/Accou
 import { AccountSidebar } from "@/features/accounts/components/detail/AccountSidebar";
 import { buildTransactionsUrl } from "@/features/transactions/transactionFilterParams";
 
+import { useQueryClient } from "@tanstack/react-query";
+import { useSession } from "@/contexts/SessionContext";
+import { ReconcileBalanceDialog, hasPendingReconciliation } from "@/features/accounts/components/detail/ReconcileBalanceDialog";
+
 export default function AccountDetail() {
+  const { status } = useSession();
+  const client = useQueryClient();
+  const [reconcileFor, setReconcileFor] = useState<string | null>(null);
   const params = useParams<{ id: string }>();
   const [, navigate] = useLocation();
   const accountId = params.id || "";
@@ -84,6 +91,9 @@ export default function AccountDetail() {
     );
   }
 
+  const mayWrite = status?.state === "ready" && status.household.id === account.householdId
+    && ["owner", "admin", "member"].includes(status.household.role);
+  const canReconcile = mayWrite && (!account.isArchived || hasPendingReconciliation(client, account.id));
   return (
     <Layout>
       <div className="space-y-6 max-w-7xl mx-auto">
@@ -101,6 +111,7 @@ export default function AccountDetail() {
           dateRange={dateRange}
           setDateRange={setDateRange}
           onEdit={() => setEditModalOpen(true)}
+          onReconcile={canReconcile ? () => setReconcileFor(account.id) : undefined}
           onImportTransactions={() => setImportTransactionsOpen(true)}
           onImportBalanceHistory={() => setImportBalanceHistoryOpen(true)}
           hasHistory={!!balanceHistory && balanceHistory.length > 0}
@@ -138,6 +149,10 @@ export default function AccountDetail() {
           />
         </div>
       </div>
+
+      {mayWrite && reconcileFor === account.id && <ReconcileBalanceDialog
+        key={account.id} account={account} close={() => setReconcileFor(null)} refresh={refetchAccount}
+      />}
 
       {/* Modals */}
       <EditAccountModal

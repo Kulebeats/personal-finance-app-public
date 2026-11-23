@@ -26,6 +26,7 @@ export const NOTIFICATION_TYPES = {
   // Security
   NEW_LOGIN: "new_login",
   PASSWORD_CHANGED: "password_changed",
+  EMAIL_CHANGED: "email_changed",
 
   // Reports
   WEEKLY_RECAP: "weekly_recap",
@@ -39,6 +40,12 @@ export const NOTIFICATION_TYPES = {
 
 export type NotificationType =
   (typeof NOTIFICATION_TYPES)[keyof typeof NOTIFICATION_TYPES];
+
+// Investment preference rows share storage and the general settings read/save
+// path. Keep the accepted preference types aligned with the investment route.
+export const INVESTMENT_NOTIFICATION_PREFERENCE_TYPES = [
+  "maturity_reminder", "coupon_payment", "price_alert", "stale_price", "auction_results",
+] as const;
 
 /**
  * Notification categories for settings UI organization
@@ -74,6 +81,7 @@ export const NOTIFICATION_TYPE_CATEGORY: Record<
   [NOTIFICATION_TYPES.STALE_PRICE]: NOTIFICATION_CATEGORIES.INVESTMENTS,
   [NOTIFICATION_TYPES.NEW_LOGIN]: NOTIFICATION_CATEGORIES.SECURITY,
   [NOTIFICATION_TYPES.PASSWORD_CHANGED]: NOTIFICATION_CATEGORIES.SECURITY,
+  [NOTIFICATION_TYPES.EMAIL_CHANGED]: NOTIFICATION_CATEGORIES.SECURITY,
   [NOTIFICATION_TYPES.WEEKLY_RECAP]: NOTIFICATION_CATEGORIES.REPORTS,
   [NOTIFICATION_TYPES.MONTHLY_REPORT]: NOTIFICATION_CATEGORIES.REPORTS,
   [NOTIFICATION_TYPES.SMART_INSIGHT]: NOTIFICATION_CATEGORIES.REPORTS,
@@ -165,6 +173,12 @@ export const NOTIFICATION_TYPE_METADATA: NotificationTypeMetadata[] = [
     type: NOTIFICATION_TYPES.PASSWORD_CHANGED,
     label: "Password Changed",
     description: "Confirmation when password is updated",
+    category: NOTIFICATION_CATEGORIES.SECURITY,
+  },
+  {
+    type: NOTIFICATION_TYPES.EMAIL_CHANGED,
+    label: "Email Changed",
+    description: "Confirmation when a verified email address is changed",
     category: NOTIFICATION_CATEGORIES.SECURITY,
   },
   // Reports
