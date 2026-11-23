@@ -18,6 +18,7 @@ vi.mock("../core/scheduling/jobRunners", () => Object.fromEntries([
   "runFxRefresh", "runRecurringMaterialization", "runTBillMaturities", "runSipCatchUp", "runBudgetRollover",
   "runNotificationCleanup", "runMerchantLogoCleanup", "runPersonalExportCleanup", "runSnapshots", "runDailySecurityReport", "runWeeklyRecap",
   "runSecurityPriceRefresh", "runPriceAlerts", "runStalePriceAlerts", "runRecurringReminders", "runGoalDeadlines", "runBudgetAlerts", "runGoalWeeklyReport",
+  "runMfaGraceReminders",
 ].map((name) => [name, vi.fn(async () => ({}))])));
 vi.mock("../db", () => ({ db: {}, pool: {} }));
 vi.mock("../utils/logger", () => ({ logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
@@ -39,6 +40,8 @@ const REQUIRED_NOTICE_JOBS = [
   "goals.deadlines",
   "goals.weekly-report",
   "market.stale-price-alerts",
+  // AH-11: MFA grace reminders are sent by the scheduler, with no cron door.
+  "security.mfa-reminders",
 ];
 // Jobs held outside the automatic schedule (see jobCatalog.ts).
 const HELD_BACK_JOBS = ["goals.status", "market.price-refresh", "market.price-alerts"];
