@@ -25,6 +25,7 @@ const SMTP_ENV_KEYS = [
   "SMTP_USER",
   "SMTP_PASS",
   "SMTP_FROM",
+  "SMTP_FROM_NAME",
   "SMTP_PORT",
   "SMTP_SECURE",
 ] as const;
@@ -142,5 +143,35 @@ describe("emailService SMTP configuration guard", () => {
         disableUrlAccess: true,
       }),
     );
+  });
+
+  const configuredSmtp = {
+    SMTP_HOST: "smtp.example.com",
+    SMTP_USER: "smtp-user",
+    SMTP_PASS: "smtp-pass",
+    SMTP_FROM: "no-reply@example.com",
+  };
+  async function sentFrom(fromName?: string): Promise<unknown> {
+    const { sendEmail } = await loadEmailService("production",
+      fromName === undefined ? configuredSmtp : { ...configuredSmtp, SMTP_FROM_NAME: fromName });
+    createTransportMock.mockReturnValue({ sendMail: sendMailMock });
+    sendMailMock.mockResolvedValue({ messageId: "message-1" });
+    await expect(sendEmail({ to: "person@example.com", subject: "From name", html: "<p>Body</p>" })).resolves.toBe(true);
+    return sendMailMock.mock.calls[0][0].from;
+  }
+
+  it("uses SMTP_FROM_NAME as the From display name", async () => {
+    expect(await sentFrom("Kwacha Ledger")).toEqual({ name: "Kwacha Ledger", address: "no-reply@example.com" });
+  });
+
+  it("keeps the current display name when SMTP_FROM_NAME is unset or blank", async () => {
+    expect(await sentFrom()).toEqual({ name: "Personal Finance App", address: "no-reply@example.com" });
+    expect(await sentFrom("   ")).toEqual({ name: "Personal Finance App", address: "no-reply@example.com" });
+  });
+
+  it("never lets SMTP_FROM_NAME add a header line", async () => {
+    const from = await sentFrom("Ledger\r\nBcc: someone@example.invalid");
+
+    expect(from).toEqual({ name: "Ledger Bcc: someone@example.invalid", address: "no-reply@example.com" });
   });
 });
