@@ -13,6 +13,10 @@
  * An invitation A accepted is about A whenever it was written: the owner's
  * create and resend rows from before A registered lose A's address, while B's
  * later invitation to the same address is byte-identical.
+ * The invitation row A accepted takes A's tombstone; invitations A sent and
+ * other people's stay. A's own invitation to B at an address A left for B keeps
+ * B's address. A who goes X -> Y -> X gets the tombstone in rows from both X
+ * periods and the Y period, not in a row from the gap when nobody held X.
  * Real HTTP registration, e-mail change and erasure against real Postgres;
  * only mail transport is stubbed.
  */
@@ -128,22 +132,36 @@ const invitationRows = async (invitationId: string) => (await db.select({ id: au
 const storedInvitationId = async (email: string) => (await db.select({ id: householdInvitations.id })
   .from(householdInvitations).where(eq(householdInvitations.email, email))).map(row => row.id);
 
+const invitationBytes = async (ids: readonly string[]) => (await pool.query<{ bytes: string }>(
+  "SELECT row_to_json(i)::text AS bytes FROM household_invitations i WHERE id = ANY($1::uuid[]) ORDER BY id", [ids])).rows;
+const ownerEmail = `a49-owner-${run}@example.invalid`;
+let ownerCreated = false;
+
 /** The household owner, signed in, who invites through the real endpoints. */
 async function householdOwner(): Promise<string> {
-  const id = randomUUID();
-  const email = `a49-owner-${run}@example.invalid`;
-  await db.insert(users).values({ id, email, username: `a49-owner-${run}`, passwordHash: await hashPassword(password), emailVerified: true });
-  userIds.push(id);
-  await db.insert(householdMembers).values({ householdId, userId: id, role: "owner" });
-  return login(email);
+  if (!ownerCreated) {
+    const id = randomUUID();
+    await db.insert(users).values({ id, email: ownerEmail, username: `a49-owner-${run}`,
+      passwordHash: await hashPassword(password), emailVerified: true });
+    userIds.push(id);
+    await db.insert(householdMembers).values({ householdId, userId: id, role: "owner" });
+    ownerCreated = true;
+  }
+  return login(ownerEmail);
 }
 
-async function invite(ownerCookie: string, email: string): Promise<string> {
+async function invite(inviterCookie: string, email: string, role: "member" | "admin" = "member"): Promise<string> {
   const before = new Set(await storedInvitationId(email));
-  await request(app).post("/api/household/invite").set("Cookie", ownerCookie).send({ email, role: "member" }).expect(201);
+  await request(app).post("/api/household/invite").set("Cookie", inviterCookie).send({ email, role }).expect(201);
   const created = (await storedInvitationId(email)).filter(id => !before.has(id));
   expect(created).toHaveLength(1);
   return created[0];
+}
+
+async function acceptInvitation(email: string, invitationId: string): Promise<void> {
+  const [{ code }] = await db.select({ code: householdInvitations.inviteCode }).from(householdInvitations)
+    .where(eq(householdInvitations.id, invitationId));
+  await request(app).post("/api/household/invite/accept").set("Cookie", await login(email)).send({ inviteCode: code }).expect(200);
 }
 
 it("erasing A leaves B's rows on the reused address byte-identical, and B's erasure leaves A's", async () => {
@@ -193,11 +211,9 @@ it("erasing A removes A's address from an invitation sent and resent before A re
   // The owner invites the address while no account holds it, and resends.
   const firstInvitation = await invite(owner, invited);
   await request(app).post(`/api/household/invitations/${firstInvitation}/resend`).set("Cookie", owner).expect(200);
-  const [{ code }] = await db.select({ code: householdInvitations.inviteCode }).from(householdInvitations)
-    .where(eq(householdInvitations.id, firstInvitation));
 
   const member = await registerVerified(invited, "invited");
-  await request(app).post("/api/household/invite/accept").set("Cookie", await login(invited)).send({ inviteCode: code }).expect(200);
+  await acceptInvitation(invited, firstInvitation);
   const firstRows = await invitationRows(firstInvitation);
   expect(firstRows.length).toBeGreaterThan(1);
   expect(JSON.stringify(await auditBytes(firstRows))).toContain(invited);
@@ -217,4 +233,63 @@ it("erasing A removes A's address from an invitation sent and resent before A re
   expect(firstAfter).not.toContain(invited);
   expect(firstAfter).toContain(tombstone);
   expect(await auditBytes(secondRows)).toEqual(secondBefore);
+}, 120_000);
+
+it("erasing A tombstones the invitation A accepted, and leaves invitations A sent and other people's", async () => {
+  const accepted = `a49-accepted-${run}@example.invalid`;
+  const owner = await householdOwner();
+  const acceptedInvitation = await invite(owner, accepted, "admin");
+  const member = await registerVerified(accepted, "accepted");
+  await acceptInvitation(accepted, acceptedInvitation);
+  const sentByMember = await invite(await login(accepted), `a49-sent-by-member-${run}@example.invalid`);
+  const sentByOwner = await invite(owner, `a49-sent-by-owner-${run}@example.invalid`);
+  const before = await invitationBytes([sentByMember, sentByOwner]);
+
+  await erase(accepted);
+
+  const tombstone = await emailOf(member);
+  const [row] = await db.select({ email: householdInvitations.email, acceptedBy: householdInvitations.acceptedBy })
+    .from(householdInvitations).where(eq(householdInvitations.id, acceptedInvitation));
+  expect(row).toEqual({ email: tombstone, acceptedBy: member });
+  expect(await invitationBytes([sentByMember, sentByOwner])).toEqual(before);
+}, 120_000);
+
+it("erasing A leaves B's address in A's own invitation to B, sent after A left that address for B", async () => {
+  const left = `a49-left-${run}@example.invalid`;
+  const leftMoved = `a49-left-moved-${run}@example.invalid`;
+  const owner = await householdOwner();
+  await registerVerified(left, "left");
+  await acceptInvitation(left, await invite(owner, left, "admin"));
+  await changeEmail(left, leftMoved);
+  await registerVerified(left, "left-next");
+  // A, now on the new address, invites B at the address B holds.
+  const toNext = await invite(await login(leftMoved), left);
+  const rows = await invitationRows(toNext);
+  expect(JSON.stringify(await auditBytes(rows))).toContain(left);
+  const before = { audit: await auditBytes(rows), invitation: await invitationBytes([toNext]) };
+
+  await erase(leftMoved);
+
+  expect({ audit: await auditBytes(rows), invitation: await invitationBytes([toNext]) }).toEqual(before);
+}, 120_000);
+
+it("A who changes X to Y and back to X: rows written while A held each address take A's tombstone", async () => {
+  const home = `a49-home-${run}@example.invalid`;
+  const away = `a49-away-${run}@example.invalid`;
+  const member = await registerVerified(home, "home");
+  const firstHome = await failedLogin(home);
+  await changeEmail(home, away);
+  const whileAway = await failedLogin(away);
+  // Nobody holds X here: a row naming it is not about A and was not written while A held it.
+  const gap = await failedLogin(home);
+  await changeEmail(away, home);
+  const backHome = await failedLogin(home);
+
+  await erase(home);
+
+  const tombstone = await emailOf(member);
+  for (const id of [firstHome, whileAway, backHome]) {
+    expect(await securityDetails(id)).toEqual({ email: tombstone, reason: "bad_password" });
+  }
+  expect(await securityDetails(gap)).toEqual({ email: home, reason: "bad_password" });
 }, 120_000);
