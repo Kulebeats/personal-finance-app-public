@@ -11,6 +11,23 @@ export type { JobSummary } from "./jobJournal";
 export const PARTIAL_FAILURE = "PARTIAL_FAILURE";
 /** The run's lock was lost while it worked; exclusivity was not guaranteed. */
 export const LOCK_LOST = "LOCK_LOST";
+/** The work ran, but the journal row could not be closed: its outcome is not recorded. */
+export const JOB_OUTCOME_UNKNOWN = "JOB_OUTCOME_UNKNOWN";
+
+/** Thrown when the work ran but closing its journal row failed; never retry it as "not started". */
+export class JobOutcomeUnknownError extends Error {
+  readonly code = JOB_OUTCOME_UNKNOWN;
+
+  constructor(readonly jobName: string) {
+    super(`Scheduled job ${jobName} ran, but its outcome could not be recorded`);
+    this.name = "JobOutcomeUnknownError";
+  }
+}
+
+export interface ScheduledRunOptions {
+  /** Bounds the wait for the job lock (see JobLockRequest.maxWaitMs). */
+  readonly jobLockWaitMs?: number;
+}
 const GENERIC_FAILURE = "JOB_FAILED";
 const APP_ERROR_CODE = /^[A-Z][A-Z0-9_]{1,63}$/;
 const POSTGRES_ERROR_CODE = /^[0-9A-Z]{5}$/;
@@ -84,11 +101,18 @@ async function runJournaled(
   const runId = await deps.startRun(job.name, period);
   lease.onRenewed(() => deps.renewRun(runId));
   const { outcome, error } = closeLost(await attempt(job, period), lease);
-  await deps.finishRun(runId, {
-    isOk: outcome.status === "completed",
-    errorCode: outcome.status === "failed" ? outcome.errorCode : null,
-    summary: outcome.summary,
-  });
+  try {
+    await deps.finishRun(runId, {
+      isOk: outcome.status === "completed",
+      errorCode: outcome.status === "failed" ? outcome.errorCode : null,
+      summary: outcome.summary,
+    });
+  } catch (journalError) {
+    logger.error("Scheduled job ran, but its journal row could not be closed", {
+      jobName: job.name, runId, runStatus: outcome.status, error: journalError,
+    });
+    throw new JobOutcomeUnknownError(job.name);
+  }
   const context = { jobName: job.name, runId, scheduledFor: period.scheduledFor.toISOString(), outcome: outcome.status === "completed" ? "success" as const : "failure" as const, durationMs: Date.now() - startedAt };
   // The journal keeps only the bounded code; the log also carries the error,
   // whose message survives redaction scrubbed (OPS-014).
@@ -108,13 +132,14 @@ export async function runScheduledJob(
   job: ScheduledJobDefinition,
   deps: JobRunDependencies = defaultJobRunDependencies,
   now: Date = new Date(),
+  options: ScheduledRunOptions = {},
 ): Promise<JobRunOutcome> {
   const scheduledFor = scheduledSlotAtOrBefore(job.cron, now);
   const period: ScheduledPeriod = { identity: periodIdentity(job.name, scheduledFor), scheduledFor };
-  const locked = await deps.withLock(
-    { lockKey: job.lockKey, periodIdentity: period.identity },
-    (lease) => runJournaled(job, period, lease, deps),
-  );
+  const request: JobLockRequest = options.jobLockWaitMs === undefined
+    ? { lockKey: job.lockKey, periodIdentity: period.identity }
+    : { lockKey: job.lockKey, periodIdentity: period.identity, maxWaitMs: options.jobLockWaitMs };
+  const locked = await deps.withLock(request, (lease) => runJournaled(job, period, lease, deps));
   const outcome: JobRunOutcome = locked.acquired ? locked.result : { status: "skipped", reason: locked.reason };
   if (outcome.status === "skipped") {
     logger.info("Scheduled job skipped", { jobName: job.name, scheduledFor: period.scheduledFor.toISOString(), reason: outcome.reason });

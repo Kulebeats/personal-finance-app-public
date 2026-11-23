@@ -4,7 +4,9 @@ import type { PoolClient } from "pg";
 vi.mock("../../../db", () => ({ db: {}, pool: {} }));
 vi.mock("../../../utils/logger", () => ({ logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 
-import { LOCK_LOST, PARTIAL_FAILURE, runScheduledJob, type JobRunDependencies, type ScheduledJobDefinition } from "../scheduledJob";
+import {
+  JOB_OUTCOME_UNKNOWN, LOCK_LOST, PARTIAL_FAILURE, runScheduledJob, type JobRunDependencies, type ScheduledJobDefinition,
+} from "../scheduledJob";
 import { withJobAdvisoryLock, type JobLease, type JobLockTiming } from "../advisoryLock";
 import type { JobRunFinish } from "../jobJournal";
 import { logger } from "../../../utils/logger";
@@ -158,6 +160,24 @@ describe("runScheduledJob", () => {
     expect(finished[0].finish).toEqual({ isOk: false, errorCode: code, summary: null });
     expect(JSON.stringify(finished)).not.toContain("PRIVATE_SENTINEL");
   });
+
+  it("reports an unknown outcome when the journal cannot close a run whose work already ran", async () => {
+    const { deps } = fakeLockDependencies();
+    const run = vi.fn(async () => ({ processed: 2 }));
+    const finishRun = vi.fn(async () => { throw Object.assign(new Error("synthetic journal outage"), { code: "57P01" }); });
+
+    await expect(runScheduledJob(job(run), { ...deps, finishRun }, NOW)).rejects.toMatchObject({ code: JOB_OUTCOME_UNKNOWN });
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("passes a caller's bound on the job-lock wait to the lock request", async () => {
+    const { deps } = fakeLockDependencies();
+    const withLock = vi.spyOn(deps, "withLock");
+
+    await runScheduledJob(job(async () => ({ processed: 1 })), deps, NOW, { jobLockWaitMs: 0 });
+
+    expect(withLock).toHaveBeenCalledWith({ lockKey: 999, periodIdentity: `synthetic.job@${SLOT}`, maxWaitMs: 0 }, expect.any(Function));
+  });
 });
 
 describe("withJobAdvisoryLock", () => {
@@ -224,6 +244,17 @@ describe("withJobAdvisoryLock", () => {
     expect(lockPool.calls.periodUnlock).toBe(1);
     expect(lockPool.calls.jobUnlock).toBe(0);
     expect(lockPool.release).toHaveBeenCalledWith(false);
+  });
+
+  it("does not wait for the job lock when the request bounds the wait at zero", async () => {
+    const lockPool = fakePool({ job: { acquired: false } });
+    const sleep = vi.fn(fast.sleep);
+
+    expect(await withJobAdvisoryLock({ ...request, maxWaitMs: 0 }, async () => "ran", lockPool.pool, { ...fast, sleep }))
+      .toEqual({ acquired: false, reason: "JOB_BUSY" });
+    expect(lockPool.calls.job).toBe(1);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(lockPool.calls.periodUnlock).toBe(1);
   });
 
   it("renews while the work runs: each heartbeat confirms both locks on the holding connection", async () => {
