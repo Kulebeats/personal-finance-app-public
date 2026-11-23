@@ -1542,42 +1542,138 @@ paths:
           $ref: "#/components/responses/Success"
         default:
           $ref: "#/components/responses/Error"
+  # Cron door (server/routes/cron.ts). Each route runs its catalogued jobs
+  # through the scheduler's runner, under the same locks and journal, and
+  # answers with one result per job: 200 when every job completed or its
+  # period was already done; 409 when a job is skipped otherwise (period or
+  # job lock held elsewhere, recovery window closed), retry later; 500 when a
+  # job failed, its runner was unavailable, or its outcome is unknown.
   /api/cron/snapshots:
     post:
       tags: [Cron]
-      summary: Run daily snapshots
+      summary: Run daily snapshots (snapshots.daily)
       operationId: runSnapshots
       security:
         - cronSecret: []
       responses:
-        "200":
-          $ref: "#/components/responses/Success"
-        default:
-          $ref: "#/components/responses/Error"
+        "200": { $ref: "#/components/responses/CronDoor" }
+        "409": { $ref: "#/components/responses/CronDoor" }
+        "500": { $ref: "#/components/responses/CronDoor" }
+        default: { $ref: "#/components/responses/Error" }
   /api/cron/recurring:
     post:
       tags: [Cron]
-      summary: Process recurring transactions
+      summary: Post due recurring transactions (recurring.materialize)
       operationId: runRecurringCron
       security:
         - cronSecret: []
       responses:
-        "200":
-          $ref: "#/components/responses/Success"
-        default:
-          $ref: "#/components/responses/Error"
+        "200": { $ref: "#/components/responses/CronDoor" }
+        "409": { $ref: "#/components/responses/CronDoor" }
+        "500": { $ref: "#/components/responses/CronDoor" }
+        default: { $ref: "#/components/responses/Error" }
+  /api/cron/recurring-reminders:
+    post:
+      tags: [Cron]
+      summary: Send recurring bill reminders (recurring.remind)
+      operationId: runRecurringRemindersCron
+      security:
+        - cronSecret: []
+      responses:
+        "200": { $ref: "#/components/responses/CronDoor" }
+        "409": { $ref: "#/components/responses/CronDoor" }
+        "500": { $ref: "#/components/responses/CronDoor" }
+        default: { $ref: "#/components/responses/Error" }
   /api/cron/budget-rollover:
     post:
       tags: [Cron]
-      summary: Run budget rollover
+      summary: Run budget rollover (budget.rollover)
       operationId: runBudgetRollover
       security:
         - cronSecret: []
       responses:
-        "200":
-          $ref: "#/components/responses/Success"
-        default:
-          $ref: "#/components/responses/Error"
+        "200": { $ref: "#/components/responses/CronDoor" }
+        "409": { $ref: "#/components/responses/CronDoor" }
+        "500": { $ref: "#/components/responses/CronDoor" }
+        default: { $ref: "#/components/responses/Error" }
+  /api/cron/budget-alerts:
+    post:
+      tags: [Cron]
+      summary: Send budget alerts (budget.alerts)
+      operationId: runBudgetAlertsCron
+      security:
+        - cronSecret: []
+      responses:
+        "200": { $ref: "#/components/responses/CronDoor" }
+        "409": { $ref: "#/components/responses/CronDoor" }
+        "500": { $ref: "#/components/responses/CronDoor" }
+        default: { $ref: "#/components/responses/Error" }
+  /api/cron/goals-weekly:
+    post:
+      tags: [Cron]
+      summary: Send the weekly goal report (goals.weekly-report)
+      operationId: runGoalsWeeklyCron
+      security:
+        - cronSecret: []
+      responses:
+        "200": { $ref: "#/components/responses/CronDoor" }
+        "409": { $ref: "#/components/responses/CronDoor" }
+        "500": { $ref: "#/components/responses/CronDoor" }
+        default: { $ref: "#/components/responses/Error" }
+  /api/cron/goals-deadlines:
+    post:
+      tags: [Cron]
+      summary: Send goal deadline reminders (goals.deadlines)
+      operationId: runGoalsDeadlinesCron
+      security:
+        - cronSecret: []
+      responses:
+        "200": { $ref: "#/components/responses/CronDoor" }
+        "409": { $ref: "#/components/responses/CronDoor" }
+        "500": { $ref: "#/components/responses/CronDoor" }
+        default: { $ref: "#/components/responses/Error" }
+  /api/cron/investment-automation:
+    post:
+      tags: [Cron]
+      summary: Process T-bill maturities, then recurring purchases (investments.tbill-maturity, investments.recurring-purchase)
+      operationId: runInvestmentAutomationCron
+      security:
+        - cronSecret: []
+      responses:
+        "200": { $ref: "#/components/responses/CronDoor" }
+        "409": { $ref: "#/components/responses/CronDoor" }
+        "500": { $ref: "#/components/responses/CronDoor" }
+        default: { $ref: "#/components/responses/Error" }
+  /api/cron/goals-status:
+    post:
+      tags: [Cron]
+      summary: Refused - goals.status is held back from the scheduler
+      operationId: runGoalsStatusCron
+      security:
+        - cronSecret: []
+      responses:
+        "409":
+          description: JOB_HELD - the job is held back from the scheduler and never runs through the door
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default: { $ref: "#/components/responses/Error" }
+  /api/cron/market-data:
+    post:
+      tags: [Cron]
+      summary: Refused - market.price-refresh and market.price-alerts are held back from the scheduler
+      operationId: runMarketDataCron
+      security:
+        - cronSecret: []
+      responses:
+        "409":
+          description: JOB_HELD - the jobs are held back from the scheduler and never run through the door
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default: { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     cookieAuth:
@@ -3736,6 +3832,49 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    CronDoor:
+      description: One result per catalogued job of the route, in run order
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [success, jobs, timestamp]
+            properties:
+              success:
+                type: boolean
+                description: True only with status 200
+              timestamp:
+                type: string
+                format: date-time
+              jobs:
+                type: array
+                items:
+                  type: object
+                  required: [name, status]
+                  properties:
+                    name:
+                      type: string
+                      example: recurring.materialize
+                    status:
+                      type: string
+                      enum: [completed, skipped, failed]
+                    reason:
+                      type: string
+                      description: Set when skipped
+                      enum: [PERIOD_DONE, PERIOD_HELD, JOB_BUSY, WINDOW_CLOSED]
+                    errorCode:
+                      type: string
+                      description: >-
+                        Set when failed. A bounded code, never a message: PARTIAL_FAILURE,
+                        LOCK_LOST, JOB_RUNNER_UNAVAILABLE (lock or journal unavailable; the work
+                        did not run), JOB_OUTCOME_UNKNOWN (the work ran but its journal row could
+                        not be closed), JOB_FAILED, an application code, or PG_<sqlstate>.
+                    summary:
+                      type: object
+                      nullable: true
+                      additionalProperties:
+                        type: number
+                      description: The job's journal summary (counts only); null when the runner threw
 
     ProfileResponse:
       description: Profile response

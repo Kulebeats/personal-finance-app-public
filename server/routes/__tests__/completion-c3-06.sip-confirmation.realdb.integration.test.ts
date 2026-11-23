@@ -14,7 +14,7 @@ import {
   cleanConfirmationFixture, configureConfirmationCalendar, confirmationInput, confirmationPath, confirmationSnapshot,
   createConfirmationFixture, createPendingOccurrence, makePrivate, occurrencesPath,
   plannedSnapshot, plansPath, previousDate, purchaseRows, seedConfirmationFixture,
-  purchaseSummary, setPeerRole, signedConfirmation, transferOwnershipToPeer, tick, waitForConfirmationDatabaseBlock,
+  purchaseJob, purchaseSummary, setPeerRole, signedConfirmation, transferOwnershipToPeer, tick, waitForConfirmationDatabaseBlock,
   type ConfirmationActor, type ConfirmationFixture, type ConfirmationInput, type CreatedPlan,
 } from "./completion-c3-06.sip-confirmation.fixture";
 
@@ -183,11 +183,14 @@ describe("C3-06 signed final-statement occurrence confirmation", () => {
     expect(state.lots).toEqual([]);
     expect(state.proofs).toEqual([]);
     expect(state.successLogs).toEqual([]);
-    // The door reports the purchase job's journal summary, which has no purchase success.
+    // The door reports the purchase job's journal summary: held, skipped and
+    // failed counts only, never a purchase success count. Other suites' plans
+    // share the run, so the counts are bounds, not exact values.
     for (const response of [first, second]) {
-      expect(purchaseSummary(response)).toBeDefined();
-      expect(purchaseSummary(response)).not.toHaveProperty("success");
+      expect(purchaseJob(response)).toMatchObject({ status: "completed", summary: { failed: 0 } });
+      expect(Object.keys(purchaseSummary(response) ?? {}).sort()).toEqual(["failed", "held", "skipped"]);
     }
+    expect(purchaseSummary(first)?.held).toBeGreaterThanOrEqual(1);
     expect(state.plans[0].nextExecutionDate).not.toBe(fixture.today);
   });
 
