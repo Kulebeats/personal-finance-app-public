@@ -170,6 +170,16 @@ describe("runScheduledJob", () => {
     expect(run).toHaveBeenCalledOnce();
   });
 
+  it("answers RUN_SUPERSEDED, not an unknown outcome, when the journal rejects a stale run's close (OPS-013)", async () => {
+    const { deps } = fakeLockDependencies();
+    const run = vi.fn(async () => ({ processed: 2 }));
+    const finishRun = vi.fn(async () => { throw Object.assign(new Error("synthetic stale close"), { code: "RUN_SUPERSEDED" }); });
+
+    await expect(runScheduledJob(job(run), { ...deps, finishRun }, NOW))
+      .resolves.toEqual({ status: "failed", errorCode: "RUN_SUPERSEDED", summary: { processed: 2 } });
+    expect(run).toHaveBeenCalledOnce();
+  });
+
   it("passes a caller's bound on the job-lock wait to the lock request", async () => {
     const { deps } = fakeLockDependencies();
     const withLock = vi.spyOn(deps, "withLock");
