@@ -11,8 +11,8 @@ hypothesis until it is proven against code and a green CI run (Verification Rule
 
 ## Current state (2026-11-23)
 
-- **Not production-ready.** Open work is tracked in the requirements register (below), not
-  in this file.
+- **Not production-ready.** Requirements live in the register; per-row status is in the
+  dated re-check reports and on the board (see "Where status lives"), not in this file.
 - **Where work happens.** The public repository `Kulebeats/personal-finance-app-public`. The
   earlier private repository is frozen since the 23 Nov 2026 cutover: open nothing against
   it. In the owner's checkout the public repository is the git remote `public` and `origin`
@@ -28,14 +28,15 @@ hypothesis until it is proven against code and a green CI run (Verification Rule
   must pass, the rule binds admins, and force-push and deletion are blocked. A coordinator
   session reviews each PR once and merges it on green. Builder ("lane") sessions never merge
   and never push to `main`.
-- **Where status lives.** Process and day-to-day status: the coordinator's board, a local
-  untracked file at `$(git rev-parse --git-common-dir)/coordinator/goal-safe-to-trust.md`.
-  Codex is reached through the board. Requirements:
-  `docs/reviews/2026-10-15-unified-completion-spec/` (`FINAL_COMPLETION_SPEC.md`,
-  `REGISTER.csv`, `REVIEW_PROTOCOL.md`). The register's status column is not maintained; the
-  scored re-checks and morning reports (`REGISTER-RECHECK-<date>.md`, `MORNING-<date>.md`) sit
-  untracked in the owner's main checkout under that folder's `reviews/` and are not in this
-  repository.
+- **Where status lives.** Process and day-to-day status: the coordinator's board. It is local
+  to the owner's checkout and untracked, at
+  `$(git rev-parse --git-common-dir)/coordinator/goal-safe-to-trust.md`. Codex is reached
+  through the board. Requirements: `docs/reviews/2026-10-15-unified-completion-spec/`
+  (`FINAL_COMPLETION_SPEC.md`, `REGISTER.csv`, `REVIEW_PROTOCOL.md`). The register lists the
+  requirements; its status column is not maintained. Per-row status is in the dated
+  re-check and morning reports (`REGISTER-RECHECK-<date>.md`, `MORNING-<date>.md`), which
+  also sit untracked in the owner's main checkout, under that folder's `reviews/`, and are
+  not in this repository.
 - **Linear.** This file has said since June 2026 that live remediation status is in Linear.
   Whether Linear is still in use is an open question with the owner; until it is answered,
   the Linear lines further down stand as written.
@@ -62,26 +63,32 @@ rules are enforced. Each guard has a narrower reach than its rule; the rule bind
 
 - **`.claude/hooks/block-money-floats.mjs`** (PreToolUse on Write/Edit). Blocks `parseFloat(`,
   `.toFixed(`, `Number(` around an amount, and amount-times-rate arithmetic on code lines, in
-  files whose path contains `server/services`, `server/routes/grz`, `core/calculations`,
-  `currency`, `budget` or `Money`. It does not match `Math.round(` and does not cover most of
-  `server/modules/`.
+  files whose path contains, in any letter case, `server/services`, `server/routes/grz`,
+  `core/calculations`, `currency`, `budget` or `money`. It does not match `Math.round(` and
+  does not cover most of `server/modules/`.
 - **`.claude/hooks/block-any-casts.mjs`** (PreToolUse on Write/Edit). Blocks `as any`, `: any`
   and `@ts-ignore` in every `.ts`/`.tsx` write, test files included.
 - **`.claude/hooks/scan-secrets.mjs`** (PreToolUse on Bash). On `git commit`, blocks staged
-  content that looks like an API key or a private key.
+  content that contains a Google API key (`AIza…`), a PEM private-key header, a
+  `GEMINI_API_KEY=` assignment, or `sk-` followed by 20 or more letters and digits. It does
+  not match an Anthropic key (`sk-ant-…`) or other secret formats, so read the staged diff
+  yourself.
 - **`.claude/hooks/stop-gate.mjs`** (Stop). Blocks ending a turn while `npm run check` or the
   `server/core/calculations` tests are red.
 - **CI, `.github/workflows/ci.yml`.** On every PR into `main` and every push to `main`: job
-  `verify` (dependency audit, runtime, test-target and limiter guards, `npm run check`, server
-  and client suites with coverage floors against a disposable Postgres 18, build, bundle
-  budget), then job `e2e` (Playwright smoke, submit-and-read-back, mutation check). Both are
-  required to merge. `.github/workflows/ai-eval-gate.yml` runs the AI eval pack when
-  `server/modules/ai/**` changes.
+  `verify` (dependency audit, runtime, test-target and limiter guards, the static
+  deploy-readiness check, `npm run check`, server and client suites with coverage floors
+  against a disposable Postgres 18, build, bundle budget), then job `e2e` (Playwright smoke,
+  submit-and-read-back, mutation check). Both are required to merge.
+  `.github/workflows/ai-eval-gate.yml` runs the AI eval pack when `server/modules/ai/**`
+  changes.
 - **Adversarial verifier**, `.claude/agents/verifier.md`: run it after any "fixed" claim
   (Verification Rule 5).
 
-A hook or guard refusal is a deliberate blocker. Change the code until it passes; do not
-bypass it and do not commit with `--no-verify`.
+A hook or guard refusal is a deliberate blocker. Change the code until it passes. The stop
+gate may be switched off only in the way `.claude/settings.json` and `stop-gate.mjs` describe
+(`REMEDIATION_GATE=off`, for a deliberate exploratory session). No other hook is ever
+bypassed.
 
 ---
 
@@ -101,8 +108,10 @@ npm run db:push            # drizzle-kit push: IMPERATIVE diff of shared/schema.
 
 > **Tests cannot touch a real database (enforced).** The real-DB suites DELETE users and
 > households in cleanup; pointed at the dev database through `.env`, they once destroyed live
-> dev data. Every test script now runs through `scripts/run-protected-tests.mjs`, which never
-> loads `.env` and blanks outbound credentials. A database run refuses to start
+> dev data. The database-backed test scripts (`test:server`, `test:server:run`,
+> `test:coverage:server`, `test:e2e*`) now run through `scripts/run-protected-tests.mjs`, which never loads `.env`
+> and blanks outbound credentials; the client scripts use the same wrapper with the database
+> disabled. A database run refuses to start
 > (`REFUSING TEST TARGET`) unless `TEST_DATABASE_URL`, `TEST_RUN_ID` and a
 > `TEST_TARGET_MANIFEST` name the same loopback database, called `pfa_ci_…_<runId>_test` or
 > `pfa_completion_…_<runId>_test`. `DATABASE_URL` is never a fallback. The working recipe is
@@ -110,16 +119,17 @@ npm run db:push            # drizzle-kit push: IMPERATIVE diff of shared/schema.
 > `.github/workflows/ci.yml` (`scripts/create-test-target.mjs`, then `npm run db:test:setup`);
 > the guard is `server/testing/test-target.mjs`. NEVER aim a test at `finance_app`, staging
 > or any shared database. One file:
-> `node scripts/run-protected-tests.mjs database vitest --server run <path under server/>`.
+> `node scripts/run-protected-tests.mjs database vitest --server run <path relative to server/>`.
 
 > **Schema changes ship as versioned migrations.** `./migrations` holds the history
 > (`meta/_journal.json`). A deploy applies it with `npm run db:migrate` (`render.yaml`
 > `preDeployCommand`), and so does `db:test:setup`. `npm run db:push` does NOT run migrations:
 > it diffs `shared/schema.ts` against a database and applies the difference directly, so it
-> is for local dev only and never for a deployed database (`docs/runbooks/deploy.md`). The
-> coordinator assigns migration numbers: ask before you generate one, and check that the new
-> journal entry's `when` is higher than every earlier entry, because a migrated database
-> silently skips an entry with a lower one. Give long foreign keys explicit names under 63
+> is for local dev only and never for a deployed database (`docs/runbooks/deploy.md`). By
+> lane process (owner-approved working practice, not enforced in code), the coordinator
+> assigns migration numbers: ask before you generate one. Check that the new journal entry's
+> `when` is higher than every earlier entry, because a migrated database silently skips an
+> entry with a lower one. Give long foreign keys explicit names under 63
 > characters in `schema.ts` (Postgres truncates identifiers at 63 bytes), or generated
 > migrations will churn on every run.
 
@@ -408,9 +418,10 @@ await businessAuditService.logCreate({
 > transaction as the write (every `businessAuditService` method takes an optional `tx`), so
 > callers that bypass a controller are still logged. The June audit found three paths with no
 > audit row: **GRZ bond/T-bill/coupon writes**, **reports CSV export** of financial+PII data,
-> and the **weekly-recap email**. All three now write one, and the recap is withheld without
-> consent (`weekly-recap.email.service.ts`). A new write path or a new egress of financial
-> data needs the same.
+> and the **weekly-recap email**. All three now write one. The weekly recap also needs a
+> per-user consent gate before egress; today it is withheld without the household's consent
+> or when the user's e-mail preference is off (`weekly-recap.email.service.ts`). A new write
+> path or a new egress of financial data needs the same.
 
 ### 10. Database Transaction Rules
 
@@ -529,10 +540,11 @@ server/modules/{domain}/
 
 ### 16. Type Safety Rules (ZERO `as any` in Production Code)
 
-**NEVER use `as any` in production code.** *(Enforced: a PreToolUse hook blocks new `as any`,
-`: any`, and `@ts-ignore` in `.ts`/`.tsx`.)* Use Zod-inferred types, import proper library and
-domain types. Acceptable only in test files and documented third-party workarounds; NEVER for
-financial data or API request/response types. The hook does not exempt test files.
+**NEVER use `as any` in production code.** *(Enforced: a PreToolUse hook blocks `as any`,
+`: any`, and `@ts-ignore` in every `.ts`/`.tsx` write, with no exemption for test files or
+workarounds.)* Use Zod-inferred types, import proper library and domain types. Acceptable
+only in test files and documented third-party workarounds; NEVER for financial data or API
+request/response types.
 
 ### 17. Test Coverage Requirements
 
@@ -616,9 +628,7 @@ no direct DB access in controllers; all financial writes call `BusinessAuditServ
 Conventional commits with co-author, under the commit identity and PR flow in Current state.
 PRs include: summary and rationale, screenshots for UI, test coverage notes, breaking changes
 highlighted. Before committing: `npm run check`, `npm run test:run`, `npm run test:server:run`
-must pass. The server suite needs a declared test target (Critical Commands); where the
-coordinator's board limits heavy local runs on the owner's machine, the same suites must be
-green in CI on the PR instead.
+must pass. The server suite needs a declared test target (Critical Commands).
 
 ---
 
