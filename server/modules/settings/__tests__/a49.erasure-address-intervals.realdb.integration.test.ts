@@ -17,6 +17,8 @@
  * other people's stay. A's own invitation to B at an address A left for B keeps
  * B's address. A who goes X -> Y -> X gets the tombstone in rows from both X
  * periods and the Y period, not in a row from the gap when nobody held X.
+ * Another account registering A's address in another case while A holds it does
+ * not make rows about A keep A's address.
  * Real HTTP registration, e-mail change and erasure against real Postgres;
  * only mail transport is stubbed.
  */
@@ -292,4 +294,28 @@ it("A who changes X to Y and back to X: rows written while A held each address t
     expect(await securityDetails(id)).toEqual({ email: tombstone, reason: "bad_password" });
   }
   expect(await securityDetails(gap)).toEqual({ email: home, reason: "bad_password" });
+}, 120_000);
+
+it("a case-variant sign-up while A holds the address does not keep A's address in rows about A", async () => {
+  const held = `a49-case-${run}@example.invalid`;
+  const member = await registerVerified(held, "case");
+  // Another account registers the same address in another case while A still holds it.
+  await registerVerified(held.toUpperCase(), "case-variant");
+  const [audit] = await db.insert(auditLogs).values({ householdId, userId: member, action: "UPDATE",
+    entityType: "user", entityId: member, details: { email: held } }).returning();
+  auditIds.push(audit.id);
+  const [security] = await db.insert(securityAuditLogs).values({ eventType: "ACCOUNT_LOCKED", userId: null,
+    targetUserId: member, details: { email: held } }).returning();
+  securityIds.push(security.id);
+  const [outbox] = await db.insert(outboxEvents).values({ eventType: "a49.case-variant", aggregateType: "user",
+    aggregateId: member, payload: { userId: member, email: held }, status: "completed" }).returning();
+
+  await erase(held);
+
+  const tombstone = await emailOf(member);
+  expect(tombstone).toMatch(/^deleted_.+@deleted\.invalid$/);
+  expect(await auditDetails(audit.id)).toEqual({ email: tombstone });
+  expect(await securityDetails(security.id)).toEqual({ email: tombstone });
+  const [{ payload }] = await db.select({ payload: outboxEvents.payload }).from(outboxEvents).where(eq(outboxEvents.id, outbox.id));
+  expect(payload).toEqual({ userId: member, email: tombstone });
 }, 120_000);
