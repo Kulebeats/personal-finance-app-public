@@ -17,7 +17,7 @@
  * other rows take the database's now(): a row written within that clock skew
  * of a change can fall on either side of it.
  */
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
 import { outboxEvents, securityAuditLogs, users } from "@shared/schema";
 import { EventTypes } from "../../core/events/eventTypes";
 import type { TransactionType } from "../../utils/withTransaction";
@@ -97,4 +97,42 @@ export async function addressPeriodsOf(
   return held.flatMap((email, index): AddressPeriod[] => email && isAddress(email)
     ? [{ email, from: bounds[index], to: index < changes.length ? changes[index].at : null }]
     : []);
+}
+
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Other accounts that hold, registered with, or were notified at one of the addresses. */
+async function otherHoldersOf(tx: TransactionType, userId: string, lowered: readonly string[]) {
+  const current = await tx.select({ id: users.id }).from(users)
+    .where(and(ne(users.id, userId), inArray(sql<string>`lower(${users.email})`, [...lowered])));
+  const registered = await tx.select({ id: securityAuditLogs.userId }).from(securityAuditLogs)
+    .where(and(eq(securityAuditLogs.eventType, "REGISTER"), ne(securityAuditLogs.userId, userId),
+      inArray(sql<string>`lower(${securityAuditLogs.details}->>'email')`, [...lowered])));
+  const notified = await tx.selectDistinct({ id: sql<string | null>`${outboxEvents.payload}->>'userId'` }).from(outboxEvents)
+    .where(and(eq(outboxEvents.eventType, EventTypes.SECURITY_NOTICE_REQUESTED),
+      sql`${outboxEvents.payload}->>'userId' is distinct from ${userId}`,
+      inArray(sql<string>`lower(${outboxEvents.payload}->>'recipient')`, [...lowered])));
+  const ids = new Set([...current, ...registered, ...notified].map(row => row.id)
+    .filter((id): id is string => typeof id === "string" && UUID_SHAPE.test(id)));
+  if (ids.size === 0) return [];
+  return tx.select({ id: users.id, email: users.email }).from(users).where(inArray(users.id, [...ids]));
+}
+
+/**
+ * The provable periods in which OTHER accounts held any of these addresses
+ * (A-49 P2-3). An address in a row about the erased user is theirs unless, when
+ * the row was written, another account held it. An erased account's traces
+ * already name its tombstone, so it holds nothing here.
+ */
+export async function foreignPeriodsOf(
+  tx: TransactionType, userId: string, addresses: readonly string[], isAddress: (email: string) => boolean,
+): Promise<AddressPeriod[]> {
+  const lowered = [...new Set(addresses.map(lower))];
+  if (lowered.length === 0) return [];
+  const periods: AddressPeriod[] = [];
+  for (const holder of await otherHoldersOf(tx, userId, lowered)) {
+    const held = await addressPeriodsOf(tx, holder.id, holder.email, isAddress);
+    periods.push(...held.filter(period => lowered.includes(lower(period.email))));
+  }
+  return periods;
 }
