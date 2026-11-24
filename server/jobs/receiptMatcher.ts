@@ -1,67 +1,16 @@
 /**
- * Receipt Matching Background Job
- * Runs periodically to match pending receipts to newly posted transactions
+ * Receipt matching (OPS-003): matches pending receipts to transactions posted
+ * since their last attempt, with the retry backoff in receipt/matching.ts.
+ *
+ * It runs as the scheduled job receipts.match (core/scheduling/jobCatalog.ts),
+ * under its own advisory lock and the job journal like every other scheduled
+ * job, so two instances never match the same queue at once and readiness sees
+ * when it last succeeded. A receipt whose attempt throws counts as failed, and
+ * the run is journaled as a partial failure.
  */
-
 import { receiptService } from "../services/ReceiptService";
-import { logger } from "../utils/logger";
+import type { JobSummary } from "../core/scheduling/jobJournal";
 
-const INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-
-let isRunning = false;
-let intervalId: NodeJS.Timeout | null = null;
-
-/**
- * Start the receipt matching background job
- */
-export function startReceiptMatchingJob(): void {
-  logger.info("Starting receipt matching background job");
-
-  // Run immediately on startup
-  runMatchingCycle();
-
-  // Schedule periodic runs
-  intervalId = setInterval(runMatchingCycle, INTERVAL_MS);
-}
-
-/**
- * Stop the receipt matching background job
- */
-export function stopReceiptMatchingJob(): void {
-  if (intervalId) {
-    clearInterval(intervalId);
-    intervalId = null;
-    logger.info("Receipt matching background job stopped");
-  }
-}
-
-/**
- * Run a single matching cycle
- */
-async function runMatchingCycle(): Promise<void> {
-  if (isRunning) {
-    logger.debug("Receipt matching: Previous cycle still running, skipping");
-    return;
-  }
-
-  isRunning = true;
-  const startTime = Date.now();
-
-  try {
-    const result = await receiptService.processMatchingQueue();
-    const duration = Date.now() - startTime;
-
-    if (result.processed > 0) {
-      logger.info("Receipt matching cycle completed", {
-        job: "receipt-matcher",
-        processed: result.processed,
-        matched: result.matched,
-        duration,
-      });
-    }
-  } catch (err) {
-    logger.error("Receipt matching cycle error", {}, err as Error);
-  } finally {
-    isRunning = false;
-  }
+export async function runReceiptMatching(): Promise<JobSummary> {
+  return receiptService.processMatchingQueue();
 }

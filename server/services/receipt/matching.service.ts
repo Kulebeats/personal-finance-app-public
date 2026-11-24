@@ -19,6 +19,16 @@ import {
 
 type MatchCandidate = Transaction;
 
+/**
+ * Who asked for the match: a member's request, the automatic match after an
+ * OCR write commits, or the scheduled queue (receipts.match).
+ */
+export type MatchOrigin = "request" | "after-ocr" | "queue";
+
+/** A link refused for this receipt (access lost, transaction changed), not a fault. */
+const isRefusedLink = (error: unknown): boolean => error instanceof ForbiddenError ||
+  error instanceof NotFoundError || error instanceof ConflictError || error instanceof ValidationError;
+
 type ScoredCandidate = {
   transaction: MatchCandidate;
   score: number;
@@ -33,13 +43,13 @@ export class ReceiptMatchingService {
     householdId: string,
     linkCallback?: (receiptId: string, transactionId: string, householdId: string, userId: string) => Promise<boolean>,
     actorUserId?: string,
-    afterOcrCommit = false,
+    origin: MatchOrigin = "request",
   ): Promise<{ matched: boolean; transactionId?: string }> {
     const receipt = actorUserId
       ? await receiptRepository.findForSignedMatch(receiptId, householdId, actorUserId)
       : await receiptRepository.findById(receiptId);
     if (!receipt || receipt.householdId !== householdId) {
-      if (afterOcrCommit) return { matched: false };
+      if (origin === "after-ocr") return { matched: false };
       throw new NotFoundError("Receipt not found");
     }
 
@@ -85,11 +95,13 @@ export class ReceiptMatchingService {
         const linked = await linkCallback(receiptId, bestMatch.transaction.id, householdId, matchingUserId);
         return linked ? { matched: true, transactionId: bestMatch.transaction.id } : { matched: false };
       } catch (error: unknown) {
+        if (origin === "request" || !isRefusedLink(error)) throw error;
         // Automatic matching follows a committed OCR write. A denied or
         // outdated match leaves the result unmatched without exposing details.
-        if (afterOcrCommit && (error instanceof ForbiddenError || error instanceof NotFoundError ||
-          error instanceof ConflictError || error instanceof ValidationError)) return { matched: false };
-        throw error;
+        if (origin === "after-ocr") return { matched: false };
+        // The queue counts a refused link as an unmatched attempt below, so the
+        // receipt reaches no_match instead of failing every daily run.
+        logger.warn("Receipt match: link refused, retry scheduled", { receiptId });
       }
     }
 
@@ -116,18 +128,18 @@ export class ReceiptMatchingService {
   }
 
   /**
-   * Process background matching jobs (called by cron)
+   * Process the background matching queue (the scheduled job receipts.match).
+   * A receipt whose match attempt throws is counted in `failed`, so the run
+   * reports a partial failure instead of a success.
    */
   async processMatchingQueue(
     attemptMatchCallback: (receiptId: string, householdId: string) => Promise<{ matched: boolean; transactionId?: string }>
-  ): Promise<{
-    processed: number;
-    matched: number;
-  }> {
+  ): Promise<MatchingQueueTotals> {
     const pendingReceipts = await receiptRepository.findForMatching(50);
 
     let processed = 0;
     let matched = 0;
+    let failed = 0;
 
     for (const receipt of pendingReceipts) {
       try {
@@ -135,16 +147,20 @@ export class ReceiptMatchingService {
         processed++;
         if (result.matched) matched++;
       } catch (err) {
+        failed++;
         logger.error(
           "Failed to process receipt",
           { receiptId: receipt.id },
-          err as Error
+          err instanceof Error ? err : new Error(String(err))
         );
       }
     }
 
-    return { processed, matched };
+    return { processed, matched, failed };
   }
 }
+
+// A type alias (not an interface) so the totals stay assignable to JobSummary's index signature.
+export type MatchingQueueTotals = { readonly processed: number; readonly matched: number; readonly failed: number };
 
 export const receiptMatchingService = new ReceiptMatchingService();

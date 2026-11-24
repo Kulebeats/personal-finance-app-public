@@ -3,7 +3,7 @@ import express, { type Request, type Response, type NextFunction } from "express
 import request from "supertest";
 import type { JobRunDependencies } from "../../core/scheduling/scheduledJob";
 
-const state = vi.hoisted(() => ({ allFail: false, result: null as null | { processed: number; matched: number } }));
+const state = vi.hoisted(() => ({ allFail: false, result: null as null | { processed: number; matched: number; failed: number } }));
 vi.mock("../../repositories/ReceiptRepository", () => ({ receiptRepository: { findForMatching: async () => [
   { id: "bad", householdId: "synthetic-household" }, { id: "good", householdId: "synthetic-household" },
 ] } }));
@@ -50,10 +50,11 @@ vi.mock("../../core/scheduling/scheduledJob", async (importOriginal) => {
   };
 });
 import cronRoutes from "../../routes/cron";
-import { startReceiptMatchingJob, stopReceiptMatchingJob } from "../../jobs/receiptMatcher";
+import { SCHEDULED_JOBS } from "../../core/scheduling/jobRegistry";
+import { runScheduledJob } from "../../core/scheduling/scheduledJob";
 
 const app = express(); app.use("/api/cron", cronRoutes);
-afterEach(() => { stopReceiptMatchingJob(); vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.useRealTimers(); state.result = null; });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); state.result = null; });
 
 it.each([false, true])("actual budget-alert router does not label caught item failures as success (allFail=%s)", async (allFail) => {
   state.allFail = allFail;
@@ -70,16 +71,17 @@ it.each([false, true])("actual budget-alert router does not label caught item fa
   expect(JSON.stringify(entry)).not.toContain("PRIVATE_");
 });
 
-it.each([false, true])("actual receipt batch and worker do not label caught failures as success (allFail=%s)", async (allFail) => {
-  vi.useFakeTimers();
+it.each([false, true])("actual receipt batch and scheduled job do not label caught failures as success (allFail=%s)", async (allFail) => {
   state.allFail = allFail;
   const output = vi.spyOn(console, "log").mockImplementation(() => {});
-  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-  startReceiptMatchingJob();
-  await vi.waitFor(() => expect(state.result).toEqual({ processed: allFail ? 0 : 1, matched: allFail ? 0 : 1 }));
-  expect(errors).toHaveBeenCalledTimes(allFail ? 2 : 1);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  // OPS-003: the matcher runs as the scheduled job receipts.match, through the scheduler's runner.
+  const job = SCHEDULED_JOBS.find((candidate) => candidate.name === "receipts.match");
+  const outcome = await runScheduledJob(job!);
+  const totals = { processed: allFail ? 0 : 1, matched: allFail ? 0 : 1, failed: allFail ? 2 : 1 };
+  expect(state.result).toEqual(totals);
+  expect(outcome).toEqual({ status: "failed", errorCode: "PARTIAL_FAILURE", summary: totals });
   const entries = output.mock.calls.map(([value]) => JSON.parse(value as string));
-  expect(entries.some((entry) => entry.job === "receipt-matcher" && entry.outcome === "success")).toBe(false);
-  if (!allFail) expect(entries).toContainEqual(expect.objectContaining({ job: "receipt-matcher", processed: 1, matched: 1 }));
+  expect(entries.some((entry) => entry.jobName === "receipts.match" && entry.outcome === "success")).toBe(false);
   expect(JSON.stringify(entries)).not.toContain("PRIVATE_");
 });
