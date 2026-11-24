@@ -137,6 +137,19 @@ describe("NEW-02 ratios and debt analysis convert visible balances only", () => 
     }
   });
 
+  it("returns the recoverable calendar error on both ratios and debt", async () => {
+    await db.update(households).set({ timeZone: "Invalid/Stored_Policy" }).where(eq(households.id, householdId));
+    try {
+      for (const path of ["/api/reports/ratios", "/api/reports/debt"]) {
+        const result = await as("owner", path);
+        expect.soft(result.status).toBe(422);
+        expect.soft(result.body.error?.code).toBe("HOUSEHOLD_CALENDAR_UNAVAILABLE");
+      }
+    } finally {
+      await db.update(households).set({ timeZone: null }).where(eq(households.id, householdId));
+    }
+  });
+
   it("converts debt analysis and orders the largest converted debt first", async () => {
     const debt = (await as("owner", "/api/reports/debt").expect(200)).body.data;
     expect(debt.totalDebt).toEqual(zmw("765.00"));

@@ -11,6 +11,8 @@ import { Request, Response, NextFunction } from "express";
 import { isIP } from "node:net";
 import { z } from "zod";
 import { recurringService } from "../../services/RecurringService";
+import { db } from "../../db";
+import { householdToday } from "../../services/householdCalendarToday";
 import { listRecurringCalendar } from "../../services/recurring/RecurringCalendarQuery";
 import { logger } from "../../utils/logger";
 import { success } from "../../core/http";
@@ -278,7 +280,7 @@ export const recurringController = {
       }
 
       const { dryRun, asOfDate } = parseResult.data;
-      const today = new Date().toISOString().slice(0, 10);
+      const today = await householdToday(db, householdId);
       if (asOfDate !== undefined && asOfDate > today) {
         throw new ValidationError("Processing date cannot be in the future", [
           { field: "asOfDate", message: "Choose today or an earlier date." },

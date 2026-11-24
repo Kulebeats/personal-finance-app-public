@@ -13,6 +13,7 @@ import {
 import type { HouseholdContext } from "../../middleware/householdGuard";
 import { NotFoundError } from "../../utils/errorHandler";
 import { ruleNotEndedPredicate, upcomingDatePredicate } from "../../repositories/RecurringRepository";
+import { householdToday } from "../householdCalendarToday";
 import { recurringQueryRepository } from "../../repositories/RecurringQueryRepository";
 import { PATTERN_ORIGIN_ACTION, visiblePatternOriginPredicate } from "./RecurringPatternProvenance";
 import { DENOMINATION_ACTION, DENOMINATION_INVALIDATED_ACTION, verifiedRecurringCurrencySql, withRecurringDefinitionMetadata, type RecurringLinkUnits, type VisibleRecurringRule } from "./RecurringDenomination";
@@ -103,22 +104,27 @@ export async function listVisibleRecurringRules(
   options?: { includeInactive?: boolean; includePaused?: boolean; withinDays?: number; from?: string; to?: string },
   tx?: TransactionType,
 ): Promise<VisibleRecurringRule[]> {
-  const rows = await (tx ?? db).select({ rule: recurringTransactions, currency: verifiedRecurringCurrencySql() }).from(recurringTransactions).where(and(
+  const reader = tx ?? db;
+  const includeInactive = options?.includeInactive;
+  const withinDays = options?.withinDays;
+  const today = !includeInactive || withinDays !== undefined ? await householdToday(reader, actor.householdId) : undefined;
+  const rows = await reader.select({ rule: recurringTransactions, currency: verifiedRecurringCurrencySql() }).from(recurringTransactions).where(and(
     visibleRulePredicate(actor),
     // R14: a rule past its inclusive end date is ended, not active, even before processing marks it.
-    options?.includeInactive ? undefined : and(eq(recurringTransactions.isActive, true), ruleNotEndedPredicate()),
+    !includeInactive && today ? and(eq(recurringTransactions.isActive, true), ruleNotEndedPredicate(today)) : undefined,
     options?.includePaused ? undefined : eq(recurringTransactions.isPaused, false),
     options?.from ? gte(recurringTransactions.nextDueDate, options.from) : undefined,
     options?.to ? lte(recurringTransactions.nextDueDate, options.to) : undefined,
-    options?.withinDays === undefined ? undefined : upcomingDatePredicate(options.withinDays),
+    withinDays !== undefined && today ? upcomingDatePredicate(today, withinDays) : undefined,
   )).orderBy(recurringTransactions.nextDueDate);
   return rows.map(({ rule, currency }) => withRecurringDefinitionMetadata(rule, currency));
 }
 
 export async function getVisibleRecurringSummary(actor: HouseholdContext) {
+  const today = await householdToday(db, actor.householdId);
   const rows = await db.select({
     rule: recurringTransactions,
-    upcoming: sql<boolean>`${upcomingDatePredicate(7)}`,
+    upcoming: sql<boolean>`${upcomingDatePredicate(today, 7)}`,
     currency: verifiedRecurringCurrencySql(),
   }).from(recurringTransactions).where(and(
     visibleRulePredicate(actor),

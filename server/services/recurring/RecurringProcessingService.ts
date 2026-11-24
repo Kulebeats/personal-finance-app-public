@@ -21,6 +21,7 @@ import { householdMembers, recurringTransactions, type RecurringTransaction } fr
 import { verifiedRecurringCurrencySql } from "./RecurringDenomination";
 import type { HouseholdContext } from "../../middleware/householdGuard";
 import { db } from "../../db";
+import { householdToday } from "../householdCalendarToday";
 import { can } from "../../core/authz/capabilities";
 import { listVisibleRecurringRules } from "./RecurringAudienceQuery";
 import { withWritableRecurringRule } from "./withWritableRecurringRule";
@@ -102,8 +103,8 @@ export class RecurringProcessingService extends RecurringCreationService {
       frequency: string;
     }>;
   }> {
-    const today = asOfDate || new Date().toISOString().split("T")[0];
     if (actor && actor.householdId !== householdId) throw new NotFoundError("Recurring rule");
+    const today = asOfDate ?? await householdToday(db, householdId);
     // Read the grant after a lock wait, then hold it for one audience statement.
     // Financial postings independently revalidate inside serializable transactions.
     const dueRules = actor ? await db.transaction(async tx => {

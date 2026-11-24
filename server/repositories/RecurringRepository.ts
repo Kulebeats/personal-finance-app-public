@@ -9,6 +9,7 @@ import {
   type InsertRecurringTransactionLink,
 } from "@shared/schema";
 import { eq, and, gte, isNull, lte, or } from "drizzle-orm";
+import { shiftCalendarDate } from "@shared/household-calendar";
 import { calculateNextDate } from "../core/calculations";
 import type {
   Frequency,
@@ -17,6 +18,7 @@ import type {
 } from "../core/calculations/recurring/types";
 import type { TransactionType } from "../utils/withTransaction";
 import { recurringQueryRepository } from "./RecurringQueryRepository";
+import { householdToday } from "../services/householdCalendarToday";
 
 /**
  * R14: the rule has not reached its inclusive end date. Its end date is still
@@ -24,7 +26,7 @@ import { recurringQueryRepository } from "./RecurringQueryRepository";
  * by upcoming, the list and the forecast so none of them shows an occurrence
  * past the end (services/recurring/RecurringLifecycleRules.ts).
  */
-export function ruleNotEndedPredicate(today = new Date().toISOString().slice(0, 10)) {
+export function ruleNotEndedPredicate(today: string) {
   return or(
     isNull(recurringTransactions.endDate),
     and(gte(recurringTransactions.endDate, today), lte(recurringTransactions.nextDueDate, recurringTransactions.endDate)),
@@ -32,13 +34,11 @@ export function ruleNotEndedPredicate(today = new Date().toISOString().slice(0, 
 }
 
 /** Date window shared by the bill list and its summary count, including overdue bills. */
-export function upcomingDatePredicate(withinDays: number) {
-  const today = new Date();
-  const through = new Date(today);
-  through.setDate(today.getDate() + withinDays);
+export function upcomingDatePredicate(today: string, withinDays: number) {
+  const through = shiftCalendarDate(today, withinDays);
   return and(
-    lte(recurringTransactions.nextDueDate, through.toISOString().slice(0, 10)),
-    ruleNotEndedPredicate(),
+    lte(recurringTransactions.nextDueDate, through),
+    ruleNotEndedPredicate(today),
   )!;
 }
 
@@ -156,6 +156,7 @@ export class RecurringRepository {
     householdId: string,
     withinDays: number = 14,
   ): Promise<RecurringTransaction[]> {
+    const today = await householdToday(db, householdId);
     return db
       .select()
       .from(recurringTransactions)
@@ -164,7 +165,7 @@ export class RecurringRepository {
           eq(recurringTransactions.householdId, householdId),
           eq(recurringTransactions.isActive, true),
           eq(recurringTransactions.isPaused, false),
-          upcomingDatePredicate(withinDays),
+          upcomingDatePredicate(today, withinDays),
         ),
       )
       .orderBy(recurringTransactions.nextDueDate);

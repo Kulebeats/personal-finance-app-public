@@ -83,8 +83,9 @@ export class AnalyticsCache {
     const backend = this.backend;
     backend?.assertCurrent();
     // A calculation started before a ledger or visibility change can finish after cache invalidation.
-    // Read balance-sensitive reports, including derived net-worth changes, directly from their source.
-    const liveRead = endpoint === "netWorth" || endpoint === "netWorthChanges" || endpoint === "debtAnalysis" || endpoint === "budgetComparison"
+    // Read balance-sensitive reports live, including ratios whose FX rates change at household midnight.
+    const liveRead = endpoint === "netWorth" || endpoint === "netWorthChanges" || endpoint === "financialRatios"
+      || endpoint === "debtAnalysis" || endpoint === "budgetComparison"
       || (endpoint === "cashflow" && params.includeForecast === true);
     if (!backend || liveRead) {
       const result = await compute();

@@ -17,6 +17,7 @@ import { visibleGoalProgressSources } from "../../core/authz/goal-progress-visib
 import { isHouseholdRole } from "../../core/authz/capabilities";
 import { householdRepository } from "../HouseholdRepository";
 import type { CashflowReportRepository } from "./CashflowReportRepository";
+import { householdToday } from "../../services/householdCalendarToday";
 
 export type AnalyticsRatiosContext = {
   getHouseholdCurrency: (householdId: string) => Promise<string>;
@@ -45,18 +46,17 @@ async function readBaseBalances(
   householdId: string,
   baseCurrency: string,
   types: AccountType[],
+  asOf: string,
   { scope = "household", userId }: BalanceQuery,
 ): Promise<BaseBalance[]> {
-  const asOf = sql`(transaction_timestamp() AT TIME ZONE 'UTC')::date`;
   const currency = sql<string>`COALESCE(${accounts.currency}, ${baseCurrency}::text)`;
-  const rate = buildFxRateExpr(currency, baseCurrency, asOf, { householdId, nullOnMissing: true });
+  const rate = buildFxRateExpr(currency, baseCurrency, sql`${asOf}::date`, { householdId, nullOnMissing: true });
   const rows = await db
     .select({
       id: accounts.id,
       name: accounts.name,
       type: accounts.type,
       currency,
-      asOf: sql<string>`${asOf}::text`,
       baseBalance: sql<string | null>`(${accounts.balance}::numeric * ${rate})::text`,
     })
     .from(accounts)
@@ -76,8 +76,8 @@ async function readBaseBalances(
     if (row.baseBalance === null) {
       throw new CalculationError(
         "MISSING_FX_RATE",
-        { from: row.currency, to: baseCurrency, date: row.asOf },
-        `Exchange rate unavailable for ${row.currency} -> ${baseCurrency} on ${row.asOf}`,
+        { from: row.currency, to: baseCurrency, date: asOf },
+        `Exchange rate unavailable for ${row.currency} -> ${baseCurrency} on ${asOf}`,
       );
     }
     return {
@@ -99,6 +99,7 @@ export async function getFinancialRatios(
   query: { from: string; to: string; scope?: string; userId?: string }
 ) {
   const { from, to, scope = "household", userId } = query;
+  const asOf = await householdToday(db, householdId);
   const currency = await ctx.getHouseholdCurrency(householdId);
   const toMoneyValue = (value: Money) => toMoneyDtoSafe(value, currency);
 
@@ -119,13 +120,13 @@ export async function getFinancialRatios(
   const monthlyIncome = moneyFromDto(started.income, currency).divide(monthCount);
   const monthlyExpenses = moneyFromDto(started.expenses, currency).divide(monthCount);
 
-  const liquidAccounts = await readBaseBalances(householdId, currency, LIQUID_ACCOUNT_TYPES, query);
+  const liquidAccounts = await readBaseBalances(householdId, currency, LIQUID_ACCOUNT_TYPES, asOf, query);
   const liquidAssets = liquidAccounts.reduce(
     (sum, a) => sum.add(a.balance),
     Money.zero(currency)
   );
 
-  const liabilityAccounts = await readBaseBalances(householdId, currency, LIABILITY_ACCOUNT_TYPES, query);
+  const liabilityAccounts = await readBaseBalances(householdId, currency, LIABILITY_ACCOUNT_TYPES, asOf, query);
   const currentLiabilities = sumOwedDebt(liabilityAccounts, currency);
 
   const monthlyDebt = currentLiabilities.divide(12);
@@ -230,7 +231,8 @@ export async function getDebtAnalysis(
 
   // Largest converted debt first; native balances in different currencies don't order.
   // Only accounts that owe money are debt accounts (NEW-05).
-  const debtAccounts = (await readBaseBalances(householdId, currency, LIABILITY_ACCOUNT_TYPES, query))
+  const asOf = await householdToday(db, householdId);
+  const debtAccounts = (await readBaseBalances(householdId, currency, LIABILITY_ACCOUNT_TYPES, asOf, query))
     .filter((account) => account.balance.isPositive())
     .sort((a, b) => b.balance.amount.comparedTo(a.balance.amount));
 
