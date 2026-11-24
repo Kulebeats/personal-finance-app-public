@@ -7,10 +7,12 @@
  * keyed by stage and deadline, so a re-run, a recovery tick or a second
  * instance sends it once. Only a definite transport rejection is retried; a
  * lost acknowledgement is never resent. A member who missed the 7-day reminder
- * gets only the 1-day one. Every send that may have been delivered writes a
- * security audit row. The e-mail carries no financial data.
+ * gets only the 1-day one. Each member is re-read just before sending, so one
+ * who enrolled or was erased mid-run is not e-mailed and a changed address is
+ * used. Every send that may have been delivered writes a security audit row.
+ * The e-mail carries no financial data.
  */
-import { and, eq, gt, isNull, lte, notLike } from "drizzle-orm";
+import { and, eq, gt, isNull, lte, notLike, sql, type SQL } from "drizzle-orm";
 import { users } from "@shared/schema";
 import { db } from "../../db";
 import type { JobSummary } from "../../core/scheduling/jobJournal";
@@ -46,17 +48,45 @@ export function mfaReminderEventKey(stage: MfaReminderStage, graceEndsAt: Date):
   return `mfa_grace_reminder:${stage}d:${graceEndsAt.toISOString()}`;
 }
 
-async function findDueMembers(now: Date): Promise<DueMember[]> {
-  const rows = await db.select({
-    id: users.id, email: users.email, fullName: users.fullName, username: users.username, graceEndsAt: users.mfaGraceEndsAt,
-  }).from(users).where(and(
-    eq(users.mfaEnabled, false), eq(users.emailVerified, true), isNull(users.erasedAt), notLike(users.passwordHash, "!erased!%"),
-    gt(users.mfaGraceEndsAt, now), lte(users.mfaGraceEndsAt, new Date(now.getTime() + FIRST_REMINDER_DAYS * DAY_MS)),
-  ));
-  return rows.map((row) => ({ id: row.id, email: row.email, name: row.fullName || row.username, graceEndsAt: row.graceEndsAt }));
+const DUE_COLUMNS = {
+  id: users.id, email: users.email, fullName: users.fullName, username: users.username, graceEndsAt: users.mfaGraceEndsAt,
+};
+
+/** Still owes MFA and can be e-mailed. NULL mfa_enabled counts as off, as the grace gate treats it. */
+function owesMfa(now: Date): SQL | undefined {
+  return and(
+    sql`${users.mfaEnabled} is not true`, eq(users.emailVerified, true), isNull(users.erasedAt),
+    notLike(users.passwordHash, "!erased!%"), gt(users.mfaGraceEndsAt, now),
+  );
 }
 
-async function sendReminder(member: DueMember, now: Date): Promise<ChannelResult> {
+type DueRow = { id: string; email: string; fullName: string | null; username: string; graceEndsAt: Date };
+const toMember = (row: DueRow): DueMember =>
+  ({ id: row.id, email: row.email, name: row.fullName || row.username, graceEndsAt: row.graceEndsAt });
+
+async function findDueMembers(now: Date): Promise<DueMember[]> {
+  const lastDeadline = new Date(now.getTime() + FIRST_REMINDER_DAYS * DAY_MS);
+  const rows = await db.select(DUE_COLUMNS).from(users)
+    .where(and(owesMfa(now), lte(users.mfaGraceEndsAt, lastDeadline))).orderBy(users.mfaGraceEndsAt);
+  return rows.map(toMember);
+}
+
+/**
+ * The member as they are now, or null when they no longer owe MFA or the deadline moved.
+ * The deadline is compared after both reads pass through the driver: Postgres keeps
+ * microseconds and a JS Date only milliseconds, so an SQL equality with the earlier
+ * read would never match a deadline written as `now() + interval`.
+ */
+async function rereadMember(member: DueMember, now: Date): Promise<DueMember | null> {
+  const [row] = await db.select(DUE_COLUMNS).from(users)
+    .where(and(eq(users.id, member.id), owesMfa(now))).limit(1);
+  if (!row || row.graceEndsAt.getTime() !== member.graceEndsAt.getTime()) return null;
+  return toMember(row);
+}
+
+async function sendReminder(due: DueMember, now: Date): Promise<ChannelResult> {
+  const member = await rereadMember(due, now);
+  if (!member) return { status: "suppressed", reason: "no_longer_due" };
   const daysLeft = Math.ceil((member.graceEndsAt.getTime() - now.getTime()) / DAY_MS);
   const title = `Turn on two-step verification: ${daysLeft === 1 ? "1 day" : `${daysLeft} days`} left`;
   const deadline = `${DEADLINE_FORMAT.format(member.graceEndsAt)} UTC`;

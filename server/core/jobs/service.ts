@@ -8,9 +8,9 @@
 
 import { db } from "../../db";
 import { jobs, type Job, type InsertJob } from "../../../shared/schema";
-import { eq, and, lte, or, sql, ne, isNull } from "drizzle-orm";
+import { eq, and, lte, or, sql, ne, isNull, notLike } from "drizzle-orm";
 import { logger } from "../../utils/logger";
-import { SCHEDULER_START_MARKER } from "../scheduling/jobJournal";
+import { SCHEDULER_CATALOGUED_PREFIX, SCHEDULER_START_MARKER } from "../scheduling/jobJournal";
 
 /**
  * Known job types
@@ -315,9 +315,9 @@ class JobService {
   }
 
   /**
-   * Cleanup old completed/failed jobs. The scheduler's start marker is kept:
-   * readiness measures never-run jobs from it, so deleting it would renew
-   * their grace (OPS-002).
+   * Cleanup old completed/failed jobs. The scheduler's start marker and its
+   * per-job catalogue records are kept: readiness measures never-run jobs from
+   * them, so deleting them would renew their grace (OPS-002).
    */
   async cleanup(olderThanDays = 7): Promise<number> {
     const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000);
@@ -326,6 +326,7 @@ class JobService {
       .where(
         and(
           ne(jobs.name, SCHEDULER_START_MARKER),
+          notLike(jobs.name, `${SCHEDULER_CATALOGUED_PREFIX}%`),
           or(
             eq(jobs.status, "completed"),
             eq(jobs.status, "failed"),

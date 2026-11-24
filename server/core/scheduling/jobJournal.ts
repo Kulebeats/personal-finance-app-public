@@ -1,6 +1,7 @@
 import { and, desc, eq, inArray, min } from "drizzle-orm";
 import { jobs } from "@shared/schema";
 import { db } from "../../db";
+import { SCHEDULED_JOB_SPECS } from "./jobCatalog";
 import { withTransaction } from "../../utils/withTransaction";
 
 /**
@@ -133,15 +134,47 @@ export function didSchedulerStartRecordFail(): boolean {
   return hasStartRecordFailed;
 }
 
+/**
+ * One row per job, `scheduler:catalogued:<job>`, written the first time a
+ * running scheduler has the job in its catalog. A job added after the
+ * scheduler's first start is measured from here, not from that start, so a
+ * deploy that adds a daily job does not read stale until its first slot.
+ * Written once, so a restart never renews it.
+ */
+export const SCHEDULER_CATALOGUED_PREFIX = "scheduler:catalogued:";
+const cataloguedName = (jobName: string): string => `${SCHEDULER_CATALOGUED_PREFIX}${jobName}`;
+
+const markerRow = (name: string, at: Date): typeof jobs.$inferInsert =>
+  ({ name, status: "completed", attempts: 1, maxAttempts: 1, runAt: at, startedAt: at, completedAt: at });
+
+/** Record the jobs not yet catalogued. Two instances racing may both insert; the earliest row is read. */
+export async function recordCataloguedJobs(jobNames: readonly string[], at: Date = new Date()): Promise<void> {
+  if (jobNames.length === 0) return;
+  const names = jobNames.map(cataloguedName);
+  const existing = await db.select({ name: jobs.name }).from(jobs).where(inArray(jobs.name, names));
+  const recorded = new Set(existing.map((row) => row.name));
+  const missing = names.filter((name) => !recorded.has(name));
+  if (missing.length > 0) await db.insert(jobs).values(missing.map((name) => markerRow(name, at)));
+}
+
+/** When each job was first catalogued, for the jobs that have a record. */
+export async function cataloguedSince(jobNames: readonly string[]): Promise<ReadonlyMap<string, Date>> {
+  if (jobNames.length === 0) return new Map();
+  const rows = await db.select({ name: jobs.name, first: min(jobs.startedAt) }).from(jobs)
+    .where(inArray(jobs.name, jobNames.map(cataloguedName))).groupBy(jobs.name);
+  const since = new Map<string, Date>();
+  for (const row of rows) {
+    if (row.first) since.set(row.name.slice(SCHEDULER_CATALOGUED_PREFIX.length), row.first);
+  }
+  return since;
+}
+
 export async function recordSchedulerStart(at: Date = new Date()): Promise<void> {
   try {
     // Two instances starting together may both insert; the epoch is the earliest row, so that is harmless.
     const [existing] = await db.select({ id: jobs.id }).from(jobs).where(eq(jobs.name, SCHEDULER_START_MARKER)).limit(1);
-    if (!existing) {
-      await db.insert(jobs).values({
-        name: SCHEDULER_START_MARKER, status: "completed", attempts: 1, maxAttempts: 1, runAt: at, startedAt: at, completedAt: at,
-      });
-    }
+    if (!existing) await db.insert(jobs).values(markerRow(SCHEDULER_START_MARKER, at));
+    await recordCataloguedJobs(SCHEDULED_JOB_SPECS.map((spec) => spec.name), at);
     hasStartRecordFailed = false;
   } catch (error) {
     hasStartRecordFailed = true;
