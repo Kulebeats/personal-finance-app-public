@@ -78,6 +78,7 @@ services:
         generateValue: true
       # Optional feature vars — set in the Render dashboard when enabling each feature:
       #   SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, SMTP_FROM  (email / weekly recap)
+      #   SMTP_FROM_NAME                                                      (optional From display name)
       #   ANTHROPIC_API_KEY, ANTHROPIC_MODEL, AI_ANTHROPIC_DAILY_CALL_CAP     (AI assistant, Claude primary)
       #   GEMINI_API_KEY, GEMINI_MODEL, AI_GEMINI_DAILY_CALL_CAP              (AI assistant, Gemini fallback)
       #   VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY                                 (web push)

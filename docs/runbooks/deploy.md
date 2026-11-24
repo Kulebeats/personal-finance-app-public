@@ -69,6 +69,7 @@ Browser ──HTTPS──> Render proxy (TLS) ──HTTP──> Web Service: nod
 | `DATABASE_SSL_CA_FILE` | optional | mounted PEM path from a Render Secret File |
 | `DATABASE_SSL_CA_CERT` | optional | inline PEM fallback; use `\n` escapes for dashboard env vars |
 | `SMTP_HOST` … `SMTP_FROM` | feature | email / weekly recap; unset ⇒ email disabled, boot OK |
+| `SMTP_FROM_NAME` | optional | From display name; unset or blank ⇒ `Personal Finance App` |
 | `GEMINI_API_KEY` | feature | AI assistant |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | feature | web push |
 | `REDIS_URL` | yes (prod) | required production dependency; shared rate limits/cache need it. A logical DB is not eviction isolation, and durable job/AI authority belongs in PostgreSQL under the governing contracts |
