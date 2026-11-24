@@ -1,9 +1,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, DrizzleQueryError, eq, inArray } from "drizzle-orm";
 import { auditLogs, householdMembers, households, notificationDeliveries, userDisplaySettings, userNotificationPreferences, users } from "@shared/schema";
 import { db, pool } from "../../../db";
 import { sendEmail } from "../../../services/emailService";
 import { businessAuditService } from "../../../services/BusinessAuditService";
+import { householdRepository } from "../../../repositories/HouseholdRepository";
 import { runWeeklyRecap } from "../../../core/scheduling/jobRunners";
 import { SCHEDULED_JOBS } from "../../../core/scheduling/jobRegistry";
 import { runScheduledJob, type JobRunDependencies, type JobSummary } from "../../../core/scheduling/scheduledJob";
@@ -55,6 +56,15 @@ async function enableRecap(recipient: Recipient, day?: number): Promise<void> {
 async function runAt(instant: Date): Promise<JobSummary> {
   vi.setSystemTime(instant);
   return runWeeklyRecap({ identity: `recap.weekly@${instant.toISOString()}`, scheduledFor: instant });
+}
+async function ledgerRow(recipient: Recipient): Promise<{ status: string; reason: string | null } | undefined> {
+  const [row] = await db.select({ status: notificationDeliveries.status, reason: notificationDeliveries.reason })
+    .from(notificationDeliveries).where(eq(notificationDeliveries.userId, actors.get(recipient)!.id));
+  return row;
+}
+/** A connection fault as Drizzle reports it: the query error wraps the driver's own. */
+function wrappedConnectionError(cause: Error): DrizzleQueryError {
+  return new DrizzleQueryError('select "role" from "household_members"', [], cause);
 }
 async function ledgerStatus(recipient: Recipient): Promise<string | undefined> {
   const [row] = await db.select({ status: notificationDeliveries.status }).from(notificationDeliveries)
@@ -231,6 +241,26 @@ describe("OPS-007: each user's recap goes out on their chosen day, in household 
     expect(first.failed).toBe(1);
     expect(later.failed).toBe(0);
     expect(smtp).not.toHaveBeenCalled();
+    expect(await ledgerRow("owner")).toEqual({ status: "suppressed", reason: "recap_unbuildable" });
+  });
+
+  it.each([
+    ["a reset socket", () => Object.assign(new Error("read ECONNRESET"), { errno: -104, code: "ECONNRESET", syscall: "read" })],
+    ["a dropped connection with no code", () => new Error("Connection terminated unexpectedly")],
+  ])("retries a digest whose build hit %s on a later tick", async (_label, connectionFault) => {
+    await enableRecap("owner", WEDNESDAY);
+    const findMember = vi.spyOn(householdRepository, "findMember").mockRejectedValueOnce(wrappedConnectionError(connectionFault()));
+    try {
+      const first = await runAt(WEDNESDAY_RUN);
+      expect(first.failed).toBe(1);
+      expect(await ledgerRow("owner")).toMatchObject({ status: "failed" });
+      expect(smtp).not.toHaveBeenCalled();
+
+      await runAt(new Date("2026-11-25T09:20:00Z"));
+      expect(findMember).toHaveBeenCalledTimes(2);
+    } finally { findMember.mockRestore(); }
+
+    expect(await sendsTo("owner")).toBe(1);
   });
 
   it("never resends after SMTP accepted it but the egress audit failed, and reports the run failed", async () => {
