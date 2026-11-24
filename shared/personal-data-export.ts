@@ -27,6 +27,12 @@ export interface PersonalExportSections {
   grzTBills?: number;
   receipts?: number;
   tags?: number;
+  // Activity sections (A-27 follow-up); absent on earlier version 2 manifests.
+  aiConversations?: number;
+  aiMessages?: number;
+  recapFeedback?: number;
+  savedViews?: number;
+  investmentActivity?: number;
 }
 
 /** Version 2 (A-27): one ZIP holding the JSON document and one CSV per section. */
@@ -35,6 +41,7 @@ export const PERSONAL_EXPORT_JSON_ENTRY = "personal-data.json";
 export const PERSONAL_EXPORT_CSV_SECTIONS = [
   "profile", "memberships", "preferences", "accounts", "transactions", "categories", "securityEvents",
   "goals", "budgets", "recurringRules", "holdings", "grzBonds", "grzBondPayments", "grzTBills", "receipts", "tags",
+  "aiConversations", "aiMessages", "recapFeedback", "savedViews", "investmentActivity",
 ] as const;
 export type PersonalExportCsvSection = (typeof PERSONAL_EXPORT_CSV_SECTIONS)[number];
 export function personalExportCsvEntry(section: PersonalExportCsvSection): string {

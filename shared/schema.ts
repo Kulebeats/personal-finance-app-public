@@ -346,6 +346,9 @@ export const users = pgTable("users", {
   backupCodesExpiryIdx: index("idx_users_backup_codes_expiry")
     .on(table.mfaBackupCodesGeneratedAt)
     .where(sql`mfa_enabled = true AND mfa_backup_codes IS NOT NULL`),
+  // One account per address whatever its case: register, sign-in, reset and
+  // resend all look e-mail up with lower() (UserRepository.sameEmail).
+  emailLowerUnique: uniqueIndex("users_email_lower_unique").on(sql`lower(${table.email})`),
 }));
 
 /**
@@ -3924,7 +3927,16 @@ export const jobs = pgTable("jobs", {
   result: jsonb("result").$type<Record<string, unknown>>(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow(),
-});
+}, (table) => ({
+  // OPS-013 fencing: a scheduled period has at most one running and one
+  // completed run. The generic job queue's rows are not scheduled runs.
+  scheduledPeriodRunning: uniqueIndex("idx_jobs_scheduled_period_running")
+    .on(table.name, table.idempotencyKey)
+    .where(sql`${table.name} LIKE 'scheduled:%' AND ${table.status} = 'running'`),
+  scheduledPeriodCompleted: uniqueIndex("idx_jobs_scheduled_period_completed")
+    .on(table.name, table.idempotencyKey)
+    .where(sql`${table.name} LIKE 'scheduled:%' AND ${table.status} = 'completed'`),
+}));
 
 // ============================================================================
 // BACKGROUND JOBS - ZOD

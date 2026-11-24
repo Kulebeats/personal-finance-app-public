@@ -7,7 +7,9 @@
  * never set and no name can escape the archive root. An archive the classic
  * format cannot hold (an entry or the whole file at 4 GiB or more, more than
  * 65,535 entries) is refused with a clear 413 before any byte is returned, so
- * the caller never writes a partial file. Every entry carries the writer's
+ * the caller never writes a partial file. So is an export too large to build
+ * in memory at all (a string or buffer past the runtime's limit), which would
+ * otherwise surface as a 500. Every entry carries the writer's
  * fixed timestamp, so the same content always produces the same bytes.
  */
 import { HttpError } from "../../core/errors";
@@ -26,6 +28,17 @@ export class ArchiveLimitError extends HttpError {
     super(`This export is too large to package as one file (${detail}).`);
     this.name = "ArchiveLimitError";
   }
+}
+
+const OUT_OF_MEMORY_CODES = new Set(["ERR_STRING_TOO_LONG", "ERR_BUFFER_TOO_LARGE"]);
+/** V8's own wording for a string or buffer it cannot allocate; other RangeErrors (an invalid date) stay errors. */
+const OUT_OF_MEMORY_MESSAGE = /^(?:Invalid string length|Invalid array length|Array buffer allocation failed)/;
+
+/** A string or buffer past the runtime's size limit: the export is too large to build in memory. */
+export function isOutOfMemoryBuild(error: unknown): boolean {
+  if (error instanceof RangeError && OUT_OF_MEMORY_MESSAGE.test(error.message)) return true;
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && OUT_OF_MEMORY_CODES.has(code);
 }
 
 /** A name the export will not store; a programming error, never user data. */
@@ -56,6 +69,7 @@ export function buildStoredZip(entries: readonly ArchiveEntryInput[]): Buffer {
     return writeZip(entries);
   } catch (error) {
     if (error instanceof ZipLimitError) throw new ArchiveLimitError(error.detail);
+    if (isOutOfMemoryBuild(error)) throw new ArchiveLimitError("the archive is too large to build in memory");
     throw error;
   }
 }

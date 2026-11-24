@@ -129,6 +129,12 @@ export async function runDailySecurityReport(): Promise<JobSummary> {
   return { processed: allUsers.length - failed, failed };
 }
 
+/** AH-11: the 7-day and 1-day MFA grace reminders, once each through the delivery ledger. */
+export async function runMfaGraceReminders(): Promise<JobSummary> {
+  const { sendMfaGraceReminders } = await import("../../modules/auth/auth.mfa-reminders");
+  return sendMfaGraceReminders();
+}
+
 export async function runNotificationCleanup(): Promise<JobSummary> {
   const archived = await notificationRepository.autoArchiveOldRead(READ_NOTIFICATION_ARCHIVE_DAYS);
   const purged = await notificationRepository.purgeArchived(ARCHIVED_NOTIFICATION_RETENTION_DAYS);

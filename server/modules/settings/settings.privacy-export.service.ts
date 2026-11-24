@@ -25,7 +25,8 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { dataExports, householdMembers } from "@shared/schema";
 import { db } from "../../db";
 import { withTransaction, type TransactionType } from "../../utils/withTransaction";
-import { HttpError, NotFoundError } from "../../core/errors";
+import { ConflictError, HttpError, NotFoundError } from "../../core/errors";
+import { getPostgresError } from "../../utils/postgresError";
 import { asStorageFailure, assertPersonalExportStorage } from "./settings.privacy-export.storage";
 import { can } from "../../core/authz/capabilities";
 import { businessAuditService } from "../../services/BusinessAuditService";
@@ -39,10 +40,10 @@ import {
   isPersonalExportFileFormat, readPersonalExportFile, removePersonalExportFile, writePersonalExportFile,
   type PersonalExportFileFormat,
 } from "./settings.privacy-export.files";
-import { buildStoredZip } from "./settings.privacy-export.archive";
+import { ArchiveLimitError, buildStoredZip, isOutOfMemoryBuild } from "./settings.privacy-export.archive";
 import { buildCsvEntries } from "./settings.privacy-export.csv";
 import {
-  isStillReadable, readManifest, type HouseholdRole, type PersonalExportManifest,
+  areLedgerSourcesStillReadable, isStillReadable, readManifest, type HouseholdRole, type PersonalExportManifest,
 } from "./settings.privacy-export.recheck";
 
 const FILE_FORMAT: PersonalExportFileFormat = "zip";
@@ -100,12 +101,41 @@ async function readableHouseholds(tx: TransactionType, userId: string, lock: boo
   return new Map(memberships.filter(m => m.householdId && can(m.role, "financial.read")).map(m => [m.householdId!, m.role]));
 }
 
-/** The requester's current membership, locked so it cannot change mid-export. */
-async function lockMembership(tx: TransactionType, userId: string, householdId?: string): Promise<HouseholdContext | null> {
+/** The requester's membership in the snapshot; `lock` holds it FOR SHARE until commit. */
+async function readMembership(
+  tx: TransactionType, userId: string, householdId: string | undefined, lock: boolean,
+): Promise<HouseholdContext | null> {
   if (!householdId) return null;
-  const [membership] = await tx.select({ role: householdMembers.role }).from(householdMembers)
-    .where(and(eq(householdMembers.userId, userId), eq(householdMembers.householdId, householdId))).for("share");
+  const query = tx.select({ role: householdMembers.role }).from(householdMembers)
+    .where(and(eq(householdMembers.userId, userId), eq(householdMembers.householdId, householdId)));
+  const [membership] = lock ? await query.for("share") : await query;
   return membership ? { userId, householdId, role: membership.role } : null;
+}
+
+const ACCESS_CHANGED = "Your household access or data changed while the export was being prepared. Request it again.";
+
+/**
+ * Lock the membership the export was read under, just before it is recorded.
+ * Under REPEATABLE READ a membership changed since the snapshot fails the lock
+ * (40001, mapped to 409 by the caller, as is any other serialization failure
+ * of this transaction); any other difference is refused too.
+ */
+async function confirmMembership(tx: TransactionType, read: HouseholdContext | null, userId: string, householdId?: string): Promise<void> {
+  const locked = await readMembership(tx, userId, householdId, true);
+  if (locked?.role !== read?.role) throw new ConflictError(ACCESS_CHANGED);
+}
+
+/** JSON and CSV in memory, then the ZIP; a build too large for memory is the same 413 as one too large for ZIP. */
+function packageExport(document: Parameters<typeof buildCsvEntries>[0]): Buffer {
+  try {
+    return buildStoredZip([
+      { name: PERSONAL_EXPORT_JSON_ENTRY, data: Buffer.from(JSON.stringify(document, null, 2), "utf8") },
+      ...buildCsvEntries(document),
+    ]);
+  } catch (error) {
+    if (isOutOfMemoryBuild(error)) throw new ArchiveLimitError("the data is too large to build in memory");
+    throw error;
+  }
 }
 
 export async function createPersonalExport(input: {
@@ -118,15 +148,14 @@ export async function createPersonalExport(input: {
   let fileAttempted = false;
   try {
     // REPEATABLE READ: every section reads the same snapshot, so counts and
-    // balances in one file agree with each other.
+    // balances in one file agree with each other. The reads hold no lock; the
+    // membership is locked only once the file is built (confirmMembership).
     return await db.transaction(async (tx) => {
-      const actor = await lockMembership(tx, input.userId, input.householdId);
+      const actor = await readMembership(tx, input.userId, input.householdId, false);
       const { document, sections, sources } = await collectPersonalData(tx, input.userId, actor);
       // Built whole in memory: a refused archive throws here, before any row or file.
-      const bytes = buildStoredZip([
-        { name: PERSONAL_EXPORT_JSON_ENTRY, data: Buffer.from(JSON.stringify(document, null, 2), "utf8") },
-        ...buildCsvEntries(document),
-      ]);
+      const bytes = packageExport(document);
+      await confirmMembership(tx, actor, input.userId, input.householdId);
       const householdId = actor?.householdId ?? null;
       const manifest: PersonalExportManifest = {
         kind: PERSONAL_EXPORT_TYPE, version: PERSONAL_EXPORT_VERSION, householdId,
@@ -160,6 +189,7 @@ export async function createPersonalExport(input: {
           cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError)));
       });
     }
+    if (getPostgresError(error)?.code === "40001") throw new ConflictError(ACCESS_CHANGED);
     throw fileAttempted ? asStorageFailure(error) : error;
   }
 }
@@ -176,7 +206,7 @@ export async function listPersonalExports(userId: string): Promise<PersonalExpor
       let status = statusOf(row, manifest);
       if (status === "ready" && manifest?.householdId) {
         readable ??= await readableHouseholds(tx, userId, false);
-        if (!await isStillReadable(tx, userId, manifest, readable, false)) status = "revoked";
+        if (!await isStillReadable(tx, userId, manifest, readable)) status = "revoked";
       }
       items.push(toItem(row, manifest, status));
     }
@@ -203,6 +233,10 @@ async function readIntactFile(exportId: string, format: PersonalExportFileFormat
  * The file bytes for the requester's own ready, unexpired, intact export, only
  * while they can still read its household. Writes the egress audit row first;
  * if it fails, nothing is returned.
+ *
+ * Every source is re-checked with plain reads and the file is read holding no
+ * lock. Only then are membership and the ledger sources taken FOR SHARE and
+ * re-checked, held just until the audit row commits.
  */
 export async function releasePersonalExport(
   userId: string,
@@ -219,11 +253,15 @@ export async function releasePersonalExport(
     if (status === "expired") throw new ExportExpiredError();
     if (status !== "ready" || !isPersonalExportFileFormat(row.fileFormat)) throw new NotFoundError("Export not found");
     const format = row.fileFormat;
-    if (manifest.householdId) {
-      const readable = await readableHouseholds(tx, userId, true);
-      if (!await isStillReadable(tx, userId, manifest, readable, true)) throw new NotFoundError("Export not found");
+    if (manifest.householdId &&
+        !await isStillReadable(tx, userId, manifest, await readableHouseholds(tx, userId, false))) {
+      throw new NotFoundError("Export not found");
     }
     const bytes = await readIntactFile(exportId, format, manifest.sha256);
+    if (manifest.householdId &&
+        !await areLedgerSourcesStillReadable(tx, userId, manifest, await readableHouseholds(tx, userId, true))) {
+      throw new NotFoundError("Export not found");
+    }
     await businessAuditService.log({
       tx, userId, householdId: null, action: "PROCESS", entityType: "data_export", entityId: exportId,
       details: { event: "download", exportType: PERSONAL_EXPORT_TYPE, sourceHouseholdId: manifest.householdId,

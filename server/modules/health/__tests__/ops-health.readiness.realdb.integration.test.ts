@@ -1,9 +1,10 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import request from "supertest";
-import { inArray } from "drizzle-orm";
+import { inArray, like } from "drizzle-orm";
 import { jobs } from "@shared/schema";
 import { db, pool } from "../../../db";
+import { SCHEDULER_CATALOGUED_PREFIX } from "../../../core/scheduling/jobJournal";
 import { createHealthController } from "../health.controller";
 
 /**
@@ -21,8 +22,12 @@ const DAILY_JOBS = [
   "security.daily-report",
   // A-21
   "market.stale-price-alerts", "recurring.remind", "goals.deadlines", "budget.alerts",
+  // AH-11
+  "security.mfa-reminders",
   // OPS-007: runs daily; each user is sent on their own day.
   "recap.weekly",
+  // OPS-003
+  "receipts.match",
 ] as const;
 const WEEKLY_JOB = "goals.weekly-report";
 const WEEKLY_JOBS = [WEEKLY_JOB] as const;
@@ -62,6 +67,8 @@ const jobReport = (body: { scheduledJobs?: { jobs?: JobReport[] } }, name: strin
 describe("readiness reports revision and scheduled-job freshness (OPS-002)", () => {
   beforeEach(async () => {
     await db.delete(jobs).where(inArray(jobs.name, journalNames));
+    // A scheduler started by an earlier suite catalogued the real jobs; this suite measures from its own journal.
+    await db.delete(jobs).where(like(jobs.name, `${SCHEDULER_CATALOGUED_PREFIX}%`));
     vi.stubEnv("RENDER_GIT_COMMIT", REVISION);
     vi.stubEnv("CRON_SECRET", OPERATOR_SECRET);
   });

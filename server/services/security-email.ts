@@ -4,7 +4,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { passwordResetTokens, securityAuditLogs, users } from "@shared/schema";
 import { db } from "../db";
-import { userRepository } from "../repositories/UserRepository";
+import { sameEmail, userRepository } from "../repositories/UserRepository";
 import { verifyPassword } from "../auth";
 import { UnauthorizedError, ValidationError, InvalidCredentialsError, RateLimitError } from "../core/errors";
 import { sha256Hex } from "../core/tokenHash";
@@ -58,7 +58,7 @@ export async function requestEmailChange(req: Request, newEmail: string, passwor
   if (!await verifyPassword(password, snapshot.passwordHash)) throw new InvalidCredentialsError("Invalid password");
   return withTransaction(async (tx) => {
     const current = await lockCurrentSessionCredential(tx, snapshot, req.sessionID, req.session.securityGeneration);
-    const [existing] = await tx.select({ id: users.id }).from(users).where(eq(users.email, newEmail)).limit(1);
+    const [existing] = await tx.select({ id: users.id }).from(users).where(sameEmail(newEmail)).limit(1);
     if (existing) throw new ValidationError("This email is already in use");
     const issued = challenge();
     await tx.update(users).set({ pendingEmail: newEmail, emailVerificationToken: sha256Hex(issued.token),
@@ -98,7 +98,8 @@ export async function issueInitialEmailVerification(email: string) {
   if (!snapshot) return null;
   return withTransaction(async (tx) => {
     const [current] = await tx.select().from(users).where(eq(users.id, snapshot.id)).for("update");
-    if (!live(current) || current.email !== email || current.emailVerified || current.pendingEmail) return null;
+    // The lookup is case-insensitive; this only checks the address did not change since it.
+    if (!live(current) || current.email !== snapshot.email || current.emailVerified || current.pendingEmail) return null;
     // Public replies remain generic and cannot reveal registration/cooldown state.
     if (resendDelay(current) > 0) return null;
     const issued = challenge();
