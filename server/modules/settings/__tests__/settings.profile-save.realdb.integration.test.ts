@@ -11,6 +11,7 @@ import { db, pool } from "../../../db";
 import { auditLogs, householdMembers, households, users } from "@shared/schema";
 import { hashPassword } from "../../../auth";
 import { getTestApp } from "../../../__tests__/fixtures";
+import { businessAuditService } from "../../../services/BusinessAuditService";
 import type { HouseholdMemberDto } from "@shared/household-members";
 
 const password = "SyntheticProfileSave123!";
@@ -178,6 +179,19 @@ describe("PUT /api/settings/profile saves every offered field", () => {
     expect(allRows.length).toBeGreaterThan(0);
     for (const audit of allRows) expectNoPersonalValues(audit.details);
     await request(app).put("/api/settings/profile").set("Cookie", owner.cookie).send(fullProfile).expect(200);
+  });
+
+  it("rolls the save back when its audit row cannot be written (AH-07)", async () => {
+    const auditWrite = vi.spyOn(businessAuditService, "log").mockRejectedValueOnce(new Error("synthetic audit failure"));
+    try {
+      await request(app).put("/api/settings/profile").set("Cookie", owner.cookie)
+        .send({ occupation: "Must Not Save" }).expect(500);
+    } finally {
+      auditWrite.mockRestore();
+    }
+
+    const [stored] = await db.select().from(users).where(eq(users.id, owner.id));
+    expect(stored.occupation).toBe(fullProfile.occupation);
   });
 
   it("another member of the household cannot read the saved personal fields", async () => {

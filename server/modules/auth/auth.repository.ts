@@ -24,6 +24,7 @@
 import { db } from "../../db";
 import { users } from "@shared/schema";
 import { eq, sql } from "drizzle-orm";
+import { sameEmail } from "../../repositories/UserRepository";
 
 /**
  * User data for creation
@@ -48,7 +49,7 @@ export const authRepository = {
     const [user] = await db
       .select()
       .from(users)
-      .where(eq(users.email, email))
+      .where(sameEmail(email))
       .limit(1);
     return user || null;
   },

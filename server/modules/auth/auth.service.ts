@@ -21,6 +21,7 @@ import {
 import { seedDefaultNotificationPreferences } from "../../seed";
 import { auditService, AuditEventType } from "../../services/AuditService";
 import { logger } from "../../utils/logger";
+import { isPostgresError } from "../../utils/postgresError";
 import {
   LoginInput,
   RegisterInput,
@@ -143,6 +144,12 @@ export const authService = {
       emailVerificationToken: sha256Hex(verificationToken),
       emailVerificationExpiry: verificationExpiry,
       emailVerified: false,
+    }).catch((error: unknown) => {
+      // A concurrent registration of the same address (any case) loses on the unique index: same 409.
+      if (isPostgresError(error, "23505", "users_email")) {
+        throw new ConflictError("Unable to create account. Please try a different email.");
+      }
+      throw error;
     });
 
     // Create default display settings. New accounts start on the light theme;
