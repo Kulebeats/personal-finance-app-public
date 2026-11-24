@@ -8,12 +8,16 @@ import {
   YAxis,
 } from "recharts";
 import { cn } from "@/lib/utils";
+import { useDisplaySettings } from "@/hooks/use-settings";
+import { formatCurrency as formatCurrencyValue } from "@/lib/format";
+import { toMoneyNumber } from "@/lib/money";
+import type { PerformanceDataPoint } from "@shared/investment-performance";
 
 // P1-5 FIX: Extract type alias for timeframe
 type PerformanceTimeframe = "1M" | "3M" | "YTD" | "1Y" | "ALL";
 
 interface InvestmentPerformanceProps {
-  data: { date: string; value: number; benchmark?: number }[];
+  data: PerformanceDataPoint[];
   timeframe: PerformanceTimeframe;
   onTimeframeChange: (timeframe: PerformanceTimeframe) => void;
   displayCurrency: string;
@@ -29,6 +33,11 @@ export function InvestmentPerformance({
   formatCurrency,
   totalGainLossPercent,
 }: InvestmentPerformanceProps) {
+  const { data: displaySettings } = useDisplaySettings();
+  // Only the chart coordinate is approximate. The tooltip reads the exact DTO.
+  const chartData = data.map(point => ({ ...point, plotValue: toMoneyNumber(point.value) }));
+  const reportingCurrency = data[0]?.value.currency;
+
   return (
     <Card className="p-6 shadow-sm border-border">
       <div className="flex justify-between items-center mb-6">
@@ -69,7 +78,7 @@ export function InvestmentPerformance({
       </div>
       <div className="h-[400px] w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={data.length > 0 ? data : []}>
+          <AreaChart data={chartData}>
             <defs>
               <linearGradient id="colorPerf" x1="0" y1="0" x2="0" y2="1">
                 <stop
@@ -102,7 +111,7 @@ export function InvestmentPerformance({
                 fontSize: 12,
                 fill: "hsl(var(--muted-foreground))",
               }}
-              tickFormatter={(val) => `$${val / 1000}k`}
+              tickFormatter={(val) => `${reportingCurrency ?? ""} ${val / 1000}k`.trim()}
             />
             <Tooltip
               contentStyle={{
@@ -111,14 +120,19 @@ export function InvestmentPerformance({
                 border: "1px solid hsl(var(--border))",
               }}
               itemStyle={{ color: "hsl(var(--foreground))" }}
-              formatter={(val: number, name: string) => [
-                formatCurrency(val, displayCurrency),
-                name === "value" ? "Portfolio" : "LuSE ASI",
-              ]}
+              formatter={(val: number, name: string, item) => {
+                const point = item.payload as PerformanceDataPoint | undefined;
+                if (name === "plotValue" && point) {
+                  const { amount, currency } = point.value;
+                  const label = formatCurrencyValue(amount as `${number}`, currency, displaySettings?.numberFormat);
+                  return [label, "Portfolio"];
+                }
+                return [formatCurrency(val, displayCurrency), "LuSE ASI"];
+              }}
             />
             <Area
               type="monotone"
-              dataKey="value"
+              dataKey="plotValue"
               stroke="hsl(var(--primary))"
               strokeWidth={2}
               fillOpacity={1}
