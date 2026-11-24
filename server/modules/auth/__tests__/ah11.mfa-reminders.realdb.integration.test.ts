@@ -20,7 +20,9 @@ const REMINDER_AUDIT = "MFA_GRACE_REMINDER_SENT";
 const created: string[] = [];
 
 interface Member { id: string; email: string }
-async function member(graceIn: string, { mfaEnabled = false, emailVerified = true } = {}): Promise<Member> {
+async function member(
+  graceIn: string, { mfaEnabled = false as boolean | null, emailVerified = true } = {},
+): Promise<Member> {
   const id = randomUUID();
   const email = `ah11-reminder-${id}@example.invalid`;
   await db.insert(users).values({
@@ -81,6 +83,39 @@ describe("AH-11 MFA grace reminders", () => {
     await sendMfaGraceReminders();
     expect(subjectsTo(weekLeft)).toEqual([expect.stringMatching(/7 days left/), expect.stringMatching(/1 day left/)]);
     expect(await audits(weekLeft)).toBe(2);
+  });
+
+  it("reminds a member whose MFA flag is NULL, whom the grace gate treats as not enrolled", async () => {
+    const unset = await member("6 days", { mfaEnabled: null });
+
+    await sendMfaGraceReminders();
+
+    expect(subjectsTo(unset)).toEqual([expect.stringMatching(/6 days left/)]);
+    expect(await audits(unset)).toBe(1);
+  });
+
+  it("re-reads each member before sending: one who enrolled mid-run is not e-mailed, a new address is used", async () => {
+    // Members are taken earliest deadline first, so `first` is sent before the other two.
+    const first = await member("1 minute");
+    const enrolsMidRun = await member("6 days 23 hours");
+    const movesMidRun = await member("6 days 22 hours");
+    const newAddress = `ah11-reminder-moved-${movesMidRun.id}@example.invalid`;
+    smtp.mockImplementation(async (message) => {
+      if (message.to === first.email) {
+        await db.update(users).set({ mfaEnabled: true }).where(eq(users.id, enrolsMidRun.id));
+        await db.update(users).set({ email: newAddress }).where(eq(users.id, movesMidRun.id));
+      }
+      return true;
+    });
+
+    await sendMfaGraceReminders();
+
+    expect(subjectsTo(first)).toHaveLength(1);
+    expect(subjectsTo(enrolsMidRun)).toEqual([]);
+    expect(await ledger(enrolsMidRun)).toEqual([expect.objectContaining({ status: "suppressed" })]);
+    expect(await audits(enrolsMidRun)).toBe(0);
+    expect(subjectsTo(movesMidRun)).toEqual([]);
+    expect(smtp.mock.calls.filter(([message]) => message.to === newAddress)).toHaveLength(1);
   });
 
   it("retries a definite rejection on the next run, but never resends a lost acknowledgement", async () => {

@@ -1,5 +1,7 @@
 import { SCHEDULED_JOB_SPECS, type ScheduledJobSpec } from "./jobCatalog";
-import { didSchedulerStartRecordFail, listScheduledJobStatus, scheduledJournalEpoch, type ScheduledJobStatus } from "./jobJournal";
+import {
+  cataloguedSince, didSchedulerStartRecordFail, listScheduledJobStatus, scheduledJournalEpoch, type ScheduledJobStatus,
+} from "./jobJournal";
 import { isSchedulerEnabled, isSchedulerExpected, type FlagEnv } from "./schedulerConfig";
 
 /**
@@ -12,7 +14,9 @@ import { isSchedulerEnabled, isSchedulerExpected, type FlagEnv } from "./schedul
  * a deploy before its first slot comes round. Only a non-production process
  * that itself runs the scheduler, on a database with neither fact (a fresh dev
  * or test database), falls back to its own start; in production a never-run
- * job with no persisted epoch is stale.
+ * job with no persisted epoch is stale. A job added after that first start is
+ * measured from when a running scheduler first catalogued it (jobJournal.ts),
+ * so a deploy that adds a job does not read stale before its first slot.
  *
  * Readiness is also never healthy when the scheduler is switched off in a
  * profile that should run it (production; see schedulerConfig.ts), or when
@@ -56,6 +60,7 @@ export interface JobHealthOptions {
   readonly hasStartRecordFailed?: boolean;
   readonly readStatus?: (jobNames: readonly string[]) => Promise<ScheduledJobStatus[]>;
   readonly readEpoch?: (jobNames: readonly string[]) => Promise<Date | null>;
+  readonly readCatalogued?: (jobNames: readonly string[]) => Promise<ReadonlyMap<string, Date>>;
 }
 
 /**
@@ -74,9 +79,10 @@ export async function readScheduledJobsHealth(options: JobHealthOptions = {}): P
   const env = options.env ?? process.env;
   const schedulerEnabled = isSchedulerEnabled(env);
   const names = specs.map((spec) => spec.name);
-  const [statuses, epoch] = await Promise.all([
+  const [statuses, epoch, catalogued] = await Promise.all([
     (options.readStatus ?? listScheduledJobStatus)(names),
     (options.readEpoch ?? scheduledJournalEpoch)(names),
+    (options.readCatalogued ?? cataloguedSince)(names),
   ]);
   const isExpected = isSchedulerExpected(env);
   // Process start is renewed by every restart, so it is never an epoch in production.
@@ -84,7 +90,8 @@ export async function readScheduledJobsHealth(options: JobHealthOptions = {}): P
   const since = epoch ?? processEpoch;
   const jobs = specs.map((spec, index) => {
     const lastSuccessAt = statuses[index]?.lastSuccessAt ?? null;
-    return { jobName: spec.name, lastSuccessAt, stale: isJobStale(lastSuccessAt, spec.intervalMs, now, since) };
+    const jobSince = catalogued.get(spec.name) ?? since;
+    return { jobName: spec.name, lastSuccessAt, stale: isJobStale(lastSuccessAt, spec.intervalMs, now, jobSince) };
   });
   const reasons = degradedReasons(schedulerEnabled, isExpected, options.hasStartRecordFailed ?? didSchedulerStartRecordFail());
   return {
