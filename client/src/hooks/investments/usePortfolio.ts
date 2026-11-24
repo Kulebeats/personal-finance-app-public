@@ -7,6 +7,7 @@
  */
 
 import { useQuery } from "@tanstack/react-query";
+import type { PerformanceDataPoint } from "@shared/investment-performance";
 import { apiRequest } from "../../lib/queryClient";
 import { investmentKeys } from "./keys";
 import type { PortfolioSummary, AttributionResult } from "./types";
@@ -53,9 +54,7 @@ export function useInvestmentPerformance(timeframe: string = "1M") {
         "GET",
         `/api/investments/analytics/performance?timeframe=${timeframe}`
       );
-      return response.json() as Promise<
-        { date: string; value: number; benchmark?: number }[]
-      >;
+      return response.json() as Promise<PerformanceDataPoint[]>;
     },
     staleTime: 5 * 60 * 1000,
   });

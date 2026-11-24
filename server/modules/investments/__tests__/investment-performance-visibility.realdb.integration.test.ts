@@ -3,7 +3,7 @@
  *
  * A member sees Shared investment accounts and their own private ones, never
  * another member's private account and never a soft-deleted account. Balances
- * are summed exactly (0.10 + 0.20 is 0.3, not 0.30000000000000004). A cash
+ * are summed exactly (0.10 + 0.20 is 0.30). A cash
  * flow linked to another member's private receipt must not move the asking
  * member's return, or the percentage would reveal the hidden amount.
  * Real HTTP against real Postgres over both performance routes; no mocks.
@@ -13,6 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import request from "supertest";
 import { eq, inArray } from "drizzle-orm";
 import { db, pool } from "../../../db";
+import type { PerformanceDataPoint as PerformancePoint } from "@shared/investment-performance";
 import {
   accountBalanceSnapshots, accounts, auditLogs, householdMembers, households, investmentTransactions, transactions, users,
 } from "@shared/schema";
@@ -21,13 +22,13 @@ import { hashPassword } from "../../../auth";
 
 type Member = "alice" | "bob";
 type MemberLogins = Map<Member, { id: string; cookie: string }>;
-interface PerformancePoint { date: string; value: number; twrIndex?: number; twrReturnPercent?: number }
 interface AccountFields { isPrivate: boolean; ownerUserId: string | null; deletedAt?: Date }
 
 const password = "SyntheticPerformance123!";
 const FIRST_DAY = "2026-10-01";
 const SECOND_DAY = "2026-10-02";
 const ROUTES = ["/api/investments/performance", "/api/investments/analytics/performance"] as const;
+const zmw = (amount: string) => ({ amount, currency: "ZMW" });
 let app: Awaited<ReturnType<typeof getTestApp>>;
 
 async function seedHousehold(householdId: string, name: string): Promise<MemberLogins> {
@@ -97,13 +98,13 @@ describe("C3-24 investment performance visibility over real HTTP", () => {
 
   it.each(ROUTES)("Alice's series on %s holds Shared plus her own account only, summed exactly", async route => {
     const series = await readSeries(members, "alice", route);
-    expect(series.map(point => [point.date, point.value])).toEqual([[FIRST_DAY, 0.3], [SECOND_DAY, 0.6]]);
+    expect(series.map(point => [point.date, point.value])).toEqual([[FIRST_DAY, zmw("0.30")], [SECOND_DAY, zmw("0.60")]]);
     expect(series[1].twrIndex).toBe(200);
   });
 
   it.each(ROUTES)("Bob's series on %s holds Shared plus his own account only", async route => {
     const series = await readSeries(members, "bob", route);
-    expect(series.map(point => [point.date, point.value])).toEqual([[FIRST_DAY, 5000.1], [SECOND_DAY, 7000.2]]);
+    expect(series.map(point => [point.date, point.value])).toEqual([[FIRST_DAY, zmw("5000.10")], [SECOND_DAY, zmw("7000.20")]]);
   });
 });
 
@@ -134,14 +135,14 @@ describe("C3-24 a flow linked to another member's private receipt stays hidden",
 
   it.each(ROUTES)("Alice's return on %s is not shifted by Bob's hidden deposit", async route => {
     const series = await readSeries(members, "alice", route);
-    expect(series.map(point => [point.date, point.value])).toEqual([[FIRST_DAY, 100], [SECOND_DAY, 150]]);
+    expect(series.map(point => [point.date, point.value])).toEqual([[FIRST_DAY, zmw("100.00")], [SECOND_DAY, zmw("150.00")]]);
     // Counting the hidden 50 as a contribution would give 100 and reveal it.
     expect(series[1]).toMatchObject({ twrIndex: 150, twrReturnPercent: 50 });
   });
 
   it.each(ROUTES)("Bob, who owns the receipt, sees the deposit as a contribution on %s", async route => {
     const series = await readSeries(members, "bob", route);
-    expect(series.map(point => [point.date, point.value])).toEqual([[FIRST_DAY, 100], [SECOND_DAY, 150]]);
+    expect(series.map(point => [point.date, point.value])).toEqual([[FIRST_DAY, zmw("100.00")], [SECOND_DAY, zmw("150.00")]]);
     expect(series[1]).toMatchObject({ twrIndex: 100, twrReturnPercent: 0 });
   });
 });

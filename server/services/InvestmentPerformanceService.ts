@@ -90,7 +90,7 @@ export class InvestmentPerformanceService {
         gte(investmentTransactions.transactionDate, startDate),
         visibleInvestmentTransactionPredicate(caller),
       ));
-      return buildPerformanceSeries(snapshots, flows.map(flow => flowInReportingCurrency(flow, base)));
+      return buildPerformanceSeries(snapshots, flows.map(flow => flowInReportingCurrency(flow, base)), base);
     }, { isolationLevel: "repeatable read", accessMode: "read only" });
   }
 }

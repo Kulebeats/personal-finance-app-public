@@ -1,14 +1,9 @@
 import Decimal from "decimal.js";
 import { differenceInCalendarDays } from "date-fns";
-import { Money } from "../core/money";
+import type { PerformanceDataPoint } from "@shared/investment-performance";
+import { Money, toMoneyDto } from "../core/money";
 
-export interface PerformanceDataPoint {
-  date: string;
-  value: number;
-  benchmark?: number; // Placeholder for now
-  twrIndex?: number;
-  twrReturnPercent?: number;
-}
+export type { PerformanceDataPoint } from "@shared/investment-performance";
 
 export interface PerformanceSnapshot {
   date: string;
@@ -25,11 +20,11 @@ export interface PerformanceFlow {
 const INDEX_BASE = new Decimal(100);
 const INDEX_PLACES = 4;
 
-/** Exact per-date totals; a number appears only at the response boundary. */
-function totalsByDate(snapshots: readonly PerformanceSnapshot[]): Map<string, Money> {
+/** Exact per-date totals in the same reporting currency as the flows. */
+function totalsByDate(snapshots: readonly PerformanceSnapshot[], currency: string): Map<string, Money> {
   const totals = new Map<string, Money>();
   for (const snapshot of snapshots) {
-    totals.set(snapshot.date, (totals.get(snapshot.date) ?? Money.zero()).add(snapshot.balance));
+    totals.set(snapshot.date, (totals.get(snapshot.date) ?? Money.zero(currency)).add(snapshot.balance));
   }
   return totals;
 }
@@ -60,20 +55,24 @@ function periodReturn(prevDate: string, prevValue: Decimal, date: string, value:
 }
 
 /** Pure: the caller has already restricted both inputs to visible accounts. */
-export function buildPerformanceSeries(snapshots: readonly PerformanceSnapshot[], flows: readonly PerformanceFlow[]): PerformanceDataPoint[] {
-  const totals = totalsByDate(snapshots);
+export function buildPerformanceSeries(
+  snapshots: readonly PerformanceSnapshot[],
+  flows: readonly PerformanceFlow[],
+  currency: string,
+): PerformanceDataPoint[] {
+  const totals = totalsByDate(snapshots, currency);
   const dates = Array.from(totals.keys()).sort((a, b) => a.localeCompare(b));
   const flowsByDate = signedFlowsByDate(flows);
   let index = INDEX_BASE;
   return dates.map((date, position) => {
     const value = totals.get(date)!;
-    if (position === 0) return { date, value: value.toNumber(), twrIndex: 100, twrReturnPercent: 0 };
+    if (position === 0) return { date, value: toMoneyDto(value), twrIndex: 100, twrReturnPercent: 0 };
     const prevDate = dates[position - 1];
     const growth = periodReturn(prevDate, totals.get(prevDate)!.amount, date, value.amount, flowsByDate);
     index = index.times(growth.plus(1));
     return {
       date,
-      value: value.toNumber(),
+      value: toMoneyDto(value),
       twrIndex: index.toDecimalPlaces(INDEX_PLACES).toNumber(),
       twrReturnPercent: index.minus(INDEX_BASE).toDecimalPlaces(INDEX_PLACES).toNumber(),
     };
