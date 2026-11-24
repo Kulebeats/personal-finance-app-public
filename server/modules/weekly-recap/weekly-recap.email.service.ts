@@ -316,7 +316,7 @@ async function prepareRecapEmail(
     // OPS-007 P2: only the recap's own data (no currency, a refused recipient, a missing FX rate)
     // settles the digest for the week; a database or network error, or anything unknown, is retried.
     const outcome = classifyRecapBuildFailure(error);
-    logger.error("Failed to prepare weekly recap email", { userId, settledForWeek: outcome === "unbuildable" }, error as Error);
+    logger.error("Failed to prepare weekly recap email", { userId, status: outcome }, error as Error);
     return { outcome };
   }
 }
