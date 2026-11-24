@@ -215,7 +215,9 @@ describe("R04 weekly recap recurring projection follows the signed viewer and di
       ({ ...await original(...args), role: "operator" }) as never);
     await expect(weeklyRecapService.getRecap(a, actors.get("member")!.id, day(-3), day(3)))
       .rejects.toMatchObject({ statusCode: 403 });
-    expect(await sendWeeklyRecapEmail(actors.get("member")!.id, a, "synthetic@example.invalid", day(-3), day(3))).toBe("failed");
+    // OPS-007 P2: refused by the recap's own check, so it is settled rather than retried. The
+    // member's real address passes the delivery grant, so the refusal comes from requireRecapRecipient.
+    expect(await sendWeeklyRecapEmail(actors.get("member")!.id, a, await recipientEmail("member"), day(-3), day(3))).toBe("unbuildable");
     expect(smtp).not.toHaveBeenCalled();
   });
 
