@@ -81,7 +81,12 @@ function statusFor(results: readonly DoorJobResult[]): number {
   return 200;
 }
 
-/** The lock or the journal was unavailable before the work ran. */
+/**
+ * The lock or the journal was unavailable before the work ran. Holds only
+ * while runScheduledJob throws nothing after the work starts except
+ * JobOutcomeUnknownError: its attempt() catches the job's own errors, and the
+ * lock release after the work logs instead of throwing.
+ */
 const RUNNER_UNAVAILABLE = "JOB_RUNNER_UNAVAILABLE";
 const DOOR_RUN_OPTIONS: ScheduledRunOptions = Object.freeze({ jobLockWaitMs: 0 });
 

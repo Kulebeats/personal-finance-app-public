@@ -37,6 +37,9 @@ export const SCHEDULED_JOB_SPECS = Object.freeze([
   { name: "cleanup.merchant-logos", cron: "15 2 * * *", lockKey: 110, intervalMs: DAY_MS },
   { name: "cleanup.personal-exports", cron: "30 2 * * *", lockKey: 111, intervalMs: DAY_MS },
   { name: "snapshots.daily", cron: "0 3 * * *", lockKey: 107, intervalMs: DAY_MS },
+  // OPS-003: daily, the shortest shape the slot parser supports; uploads still match at once.
+  // Lock key 119 belongs to security.mfa-reminders.
+  { name: "receipts.match", cron: "0 4 * * *", lockKey: 120, intervalMs: DAY_MS },
   { name: "recurring.remind", cron: "0 6 * * *", lockKey: 114, intervalMs: DAY_MS },
   { name: "goals.deadlines", cron: "15 6 * * *", lockKey: 115, intervalMs: DAY_MS },
   { name: "budget.alerts", cron: "30 6 * * *", lockKey: 116, intervalMs: DAY_MS },

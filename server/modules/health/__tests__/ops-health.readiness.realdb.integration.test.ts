@@ -26,6 +26,8 @@ const DAILY_JOBS = [
   "security.mfa-reminders",
   // OPS-007: runs daily; each user is sent on their own day.
   "recap.weekly",
+  // OPS-003
+  "receipts.match",
 ] as const;
 const WEEKLY_JOB = "goals.weekly-report";
 const WEEKLY_JOBS = [WEEKLY_JOB] as const;
