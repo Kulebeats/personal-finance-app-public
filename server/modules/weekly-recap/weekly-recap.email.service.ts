@@ -14,6 +14,8 @@ import { Money } from "../../core/money";
 import { requireRecapRecipient } from "./weekly-recap.service";
 import { logger } from "../../utils/logger";
 import { db } from "../../db";
+import { withTransaction } from "../../utils/withTransaction";
+import { classifyRecapBuildFailure, RecapCurrencyMissingError } from "./recap-failure";
 import { businessAuditService } from "../../services/BusinessAuditService";
 import { effectiveRecapEmail } from "../../repositories/UserNotificationPreferences";
 import { readDigestRelease, type DigestData } from "./digest-release";
@@ -302,7 +304,7 @@ async function prepareRecapEmail(
     // defaults to false, so an un-consented household is silently excluded.
     const grant = await readDeliveryGrant(userId, householdId, email);
     if (grant.outcome !== "ready") return { outcome: grant.outcome };
-    if (!grant.currency) throw new Error("Missing household currency for recap");
+    if (!grant.currency) throw new RecapCurrencyMissingError();
     const actor = await requireRecapRecipient(householdId, userId);
     // OPS-007: excluded upcoming bills are never read for the digest.
     const { includeRecurring } = await getWeeklyRecapSettings(userId);
@@ -311,8 +313,11 @@ async function prepareRecapEmail(
     if (release.outcome !== "ready") return { outcome: release.outcome };
     return { outcome: "ready", html: generateEmailTemplate(release.data, grant.currency) };
   } catch (error) {
-    logger.error("Failed to prepare weekly recap email", { userId }, error as Error);
-    return { outcome: "failed" };
+    // OPS-007 P2: only the recap's own data (no currency, a refused recipient, a missing FX rate)
+    // settles the digest for the week; a database or network error, or anything unknown, is retried.
+    const outcome = classifyRecapBuildFailure(error);
+    logger.error("Failed to prepare weekly recap email", { userId, status: outcome }, error as Error);
+    return { outcome };
   }
 }
 
@@ -351,8 +356,10 @@ export async function sendWeeklyRecapEmail(
 
   try {
     // SCP-319: DPA audit — record the financial-PII email egress (metadata only,
-    // never the recap contents) so each send is traceable.
-    await businessAuditService.log({
+    // never the recap contents) so each send is traceable. Written through a tx
+    // so an insert failure reaches the catch below instead of being swallowed.
+    await withTransaction(tx => businessAuditService.log({
+      tx,
       userId,
       householdId,
       action: "PROCESS",
@@ -364,7 +371,7 @@ export async function sendWeeklyRecapEmail(
         weekEnd,
         recipient: email.substring(0, 3) + "***",
       },
-    });
+    }));
   } catch (error) {
     // The e-mail left the server: it must not be sent again, but its missing egress row must be seen.
     logger.error("Weekly recap email sent but its egress audit row failed", { userId, weekStart, weekEnd }, error as Error);
@@ -383,10 +390,11 @@ export async function sendWeeklyRecapEmail(
  */
 export async function processWeeklyRecapEmails(
   now: Date = new Date(),
-): Promise<{ sent: number; failed: number; skipped: number }> {
+): Promise<{ sent: number; failed: number; skipped: number; unknown: number }> {
   let sent = 0;
   let failed = 0;
   let skipped = 0;
+  let unknown = 0;
 
   try {
     // OPS-007: a user is sent on their chosen day of their household's
@@ -456,6 +464,7 @@ export async function processWeeklyRecapEmails(
         if (outcome === "sent") sent++;
         else if (outcome === "sent_unaudited") { sent++; failed++; }
         else if (outcome === "skipped") skipped++;
+        else if (outcome === "unknown") unknown++;
         else if (outcome === "failed") failed++;
       } catch (error) {
         logger.error("Failed to send email to user", { userId: pref.userId ?? "unknown" }, error as Error);
@@ -463,10 +472,10 @@ export async function processWeeklyRecapEmails(
       }
     }
 
-    logger.info("Weekly recap email job completed", { sent, failed, skipped });
+    logger.info("Weekly recap email job completed", { sent, failed, skipped, unknown });
   } catch (error) {
     logger.error("Weekly recap email job failed", {}, error as Error);
   }
 
-  return { sent, failed, skipped };
+  return { sent, failed, skipped, unknown };
 }

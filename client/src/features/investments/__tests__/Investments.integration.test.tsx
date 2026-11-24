@@ -8,6 +8,10 @@ import * as useInvestmentsDataHook from "../hooks/useInvestmentsData";
 vi.mock("../hooks/useInvestmentsData");
 // These dashboard-composition cases do not open the lifetime-owned holding form.
 vi.mock("@/contexts/SessionContext", () => ({ useSession: () => ({ status: null, lifetime: null }) }));
+vi.mock("@/hooks/use-settings", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/hooks/use-settings")>(),
+  useDisplaySettings: () => ({ data: undefined }),
+}));
 
 // The page subscribes to useHoldings directly (deduped by query key) to surface
 // load errors vs. an empty portfolio. It is not part of useInvestmentsData, so
@@ -86,7 +90,7 @@ describe("Investments Page Integration", () => {
       totalGainLoss: { amount: "100.00", currency: "ZMW" },
       totalGainLossPercent: 10,
     },
-    performanceHistory: [{ date: "Jan", value: 1000 }],
+    performanceHistory: [{ date: "Jan", value: { amount: "1000.00", currency: "ZMW" } }],
     allocationData: [
       { name: "Stocks", value: 100, amount: 1000, color: "#000" },
     ],
