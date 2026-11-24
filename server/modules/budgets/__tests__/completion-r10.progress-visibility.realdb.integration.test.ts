@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import request from "supertest";
 import { Client } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { and, eq, inArray } from "drizzle-orm";
-import { accounts, auditLogs, budgetPeriods, budgets, categories, categoryGroups, fxRates, householdMembers, householdPreferences, households, notifications, providerFxQuotes, transactions, transactionSplits, userNotificationPreferences, userPushSubscriptions, users } from "@shared/schema";
+import { and, eq, inArray, lte } from "drizzle-orm";
+import { accounts, auditLogs, budgetPeriods, budgets, categories, categoryGroups, fxRates, householdFxRateOverrides, householdMembers, householdPreferences, households, notifications, transactions, transactionSplits, userNotificationPreferences, userPushSubscriptions, users } from "@shared/schema";
 import { db } from "../../../db";
 import { budgetService } from "../../../services/BudgetService";
 import { budgetRepository } from "../../../repositories/BudgetRepository";
@@ -19,7 +19,7 @@ import { postCronDoor } from "../../../__tests__/cron-door-fixture";
 
 const group = randomUUID(), categoryA = randomUUID(), categoryB = randomUUID();
 const categoryBudget = randomUUID(), groupBudget = randomUUID(), flexBudget = randomUUID();
-const quoteIds: string[] = [], legacyQuoteIds: string[] = [];
+const rateIds: string[] = [];
 const date = "2026-02-15", from = "2026-02-01", to = "2026-02-28";
 vi.mock("web-push", () => ({ default: { setVapidDetails: vi.fn(), sendNotification: vi.fn().mockResolvedValue({}) } }));
 type Source = { amount: string; accountId?: string; owner?: string; private?: boolean; currency?: string; pending?: boolean;
@@ -51,8 +51,8 @@ async function clean() {
   await db.delete(budgets).where(inArray(budgets.householdId, [a, b]));
   await db.delete(categories).where(inArray(categories.householdId, [a, b]));
   await db.delete(categoryGroups).where(inArray(categoryGroups.householdId, [a, b]));
-  if (quoteIds.length) await db.delete(providerFxQuotes).where(inArray(providerFxQuotes.id, quoteIds.splice(0)));
-  if (legacyQuoteIds.length) await db.delete(fxRates).where(inArray(fxRates.id, legacyQuoteIds.splice(0)));
+  await db.delete(householdFxRateOverrides).where(inArray(householdFxRateOverrides.householdId, [a, b]));
+  if (rateIds.length) await db.delete(fxRates).where(inArray(fxRates.id, rateIds.splice(0)));
 }
 function get(role: Role = "member", month = 2, year = 2026) {
   return request(app).get(`/api/budgets/progress?year=${year}&month=${month}`).set("Cookie", actors.get(role)!.cookie)
@@ -81,10 +81,21 @@ async function financialState() {
     accounts: await db.select().from(accounts).where(eq(accounts.householdId, a)).orderBy(accounts.id),
   };
 }
-async function quote(effectiveDate = date, quotedAt = `${date}T10:00:00Z`) {
-  const id = randomUUID(); quoteIds.push(id);
-  await db.insert(providerFxQuotes).values({ id, fromCurrency: "USD", toCurrency: "ZMW", rate: "2", provider: "yahoo_finance",
-    effectiveDate, validThrough: effectiveDate, quotedAt: new Date(quotedAt) });
+// FIN-06: budgets read the same rates as Reports: the shared fx_rates row the
+// market refresh writes, or the household's own manual rate.
+async function quote(rateDate = date, rate = "2") {
+  const id = randomUUID(); rateIds.push(id);
+  await db.insert(fxRates).values({ id, fromCurrency: "USD", toCurrency: "ZMW", rate, date: rateDate, source: "yahoo_finance" });
+  return id;
+}
+async function householdRate(householdId: string, rate: string, effectiveDate: string) {
+  await db.insert(householdFxRateOverrides).values({ householdId, actorUserId: actors.get(householdId === a ? "owner" : "outsider")!.id,
+    fromCurrency: "USD", toCurrency: "ZMW", effectiveDate, validThrough: effectiveDate, rate });
+}
+async function noOtherRates(onOrBefore: string) {
+  const rows = await db.select({ id: fxRates.id }).from(fxRates)
+    .where(and(eq(fxRates.fromCurrency, "USD"), eq(fxRates.toCurrency, "ZMW"), lte(fxRates.date, onOrBefore)));
+  expect(rows.filter(row => !rateIds.includes(row.id))).toEqual([]);
 }
 async function alignCurrentCronMonth() {
   const today = new Date();
@@ -143,8 +154,8 @@ describe("R10 signed budget progress uses the reader's visible posted activity a
     const denied = await get(); expect([403, 404, 409]).toContain(denied.status); expect(denied.body.data).toBeUndefined();
   });
 
-  it("converts visible ordinary and split foreign spend only with a trusted dated provider observation", async () => {
-    await quote();
+  it("converts visible ordinary and split foreign spend at the dated shared rate Reports uses", async () => {
+    await noOtherRates(date); await quote("2026-02-10");
     await source({ amount: "15", currency: "USD" }); await source({ amount: "10", currency: "USD", split: ["6", "4"] });
     expect(await progress()).toEqual(expected("182.00", "19818.00", "210.00", "19790.00"));
   });
@@ -170,10 +181,11 @@ describe("R10 signed budget progress uses the reader's visible posted activity a
     expect(JSON.stringify(own.body)).not.toMatch(/7777|6666|QPX/);
   });
 
-  it.each(["no quote", "mutable local quote", "wrong date"])("fails closed for visible foreign spend with %s without modifying financial state", async kind => {
+  it.each(["no rate", "only a later shared rate", "only another household's manual rate"])("fails closed for visible foreign spend with %s without modifying financial state", async kind => {
+    await noOtherRates(date);
     await source({ amount: "15", currency: "USD" });
-    if (kind === "mutable local quote") { const id = randomUUID(); legacyQuoteIds.push(id); await db.insert(fxRates).values({ id, fromCurrency: "USD", toCurrency: "ZMW", rate: "999", date, source: "manual" }); }
-    if (kind === "wrong date") await quote("2026-02-16", "2026-02-16T10:00:00Z");
+    if (kind === "only a later shared rate") await quote("2026-02-16");
+    if (kind === "only another household's manual rate") await householdRate(b, "999", date);
     const before = await financialState(), failed = await get().expect(422);
     expect(failed.body.error.code).toBe("FINANCIAL_DATA_UNAVAILABLE"); expect(await financialState()).toEqual(before);
   });
@@ -463,17 +475,15 @@ describe("R10 signed budget progress uses the reader's visible posted activity a
     await db.update(budgets).set({ amount: "500" }).where(eq(budgets.householdId, a));
     await source({ amount: "200", currency: "USD" });
     const current = await alignCurrentCronMonth(); await channelPreferences(true, false);
-    const effectiveDate = new Date().toISOString().slice(0, 10), firstQuote = randomUUID(), replacement = randomUUID();
-    quoteIds.push(firstQuote, replacement);
-    await db.insert(providerFxQuotes).values({ id: firstQuote, fromCurrency: "USD", toCurrency: "ZMW", rate: "3", provider: "yahoo_finance",
-      effectiveDate, validThrough: effectiveDate, quotedAt: new Date(`${effectiveDate}T00:00:00.000Z`) });
+    const effectiveDate = new Date().toISOString().slice(0, 10);
+    await quote(effectiveDate, "3");
     const original = Client.prototype.query; let changed = false;
     const intercept = function(this: Client, ...args: unknown[]) {
       const command = args[0], statement = typeof command === "string" ? command : command && typeof command === "object" && "text" in command ? String(command.text) : "";
       if (!changed && /insert into "notifications"/i.test(statement)) {
         changed = true;
-        return db.insert(providerFxQuotes).values({ id: replacement, fromCurrency: "USD", toCurrency: "ZMW", rate: "0.1", provider: "yahoo_finance",
-          effectiveDate, validThrough: effectiveDate, quotedAt: new Date(`${effectiveDate}T00:00:00.001Z`) }).then(() => Reflect.apply(original, this, args));
+        // A new household manual rate outranks the shared row the gate locked.
+        return householdRate(a, "0.1", effectiveDate).then(() => Reflect.apply(original, this, args));
       }
       return Reflect.apply(original, this, args);
     };
@@ -540,10 +550,8 @@ describe("R10 signed budget progress uses the reader's visible posted activity a
       await request(app).post("/api/notifications/push/subscribe").set("Cookie", actors.get("member")!.cookie)
         .send({ subscription: { endpoint: `https://fcm.googleapis.com/fcm/send/${randomUUID()}`, keys: { p256dh: "mock-key", auth: "mock-auth" } } }).expect(200);
     }
-    const effectiveDate = new Date().toISOString().slice(0, 10), firstQuote = randomUUID(), replacement = randomUUID();
-    quoteIds.push(firstQuote, replacement);
-    await db.insert(providerFxQuotes).values({ id: firstQuote, fromCurrency: "USD", toCurrency: "ZMW", rate: "3", provider: "yahoo_finance",
-      effectiveDate, validThrough: effectiveDate, quotedAt: new Date(`${effectiveDate}T00:00:00.000Z`) });
+    const effectiveDate = new Date().toISOString().slice(0, 10);
+    await quote(effectiveDate, "3");
     const transport = vi.spyOn(emailDelivery, "sendEmail").mockResolvedValue(true);
     const original = Client.prototype.query; let changed = false;
     const intercept = function(this: Client, ...args: unknown[]) {
@@ -553,8 +561,7 @@ describe("R10 signed budget progress uses the reader's visible posted activity a
         : /from "user_push_subscriptions"/i.test(statement) && /for share/i.test(statement);
       if (!changed && destinationRead) {
         changed = true;
-        return db.insert(providerFxQuotes).values({ id: replacement, fromCurrency: "USD", toCurrency: "ZMW", rate: "0.1", provider: "yahoo_finance",
-          effectiveDate, validThrough: effectiveDate, quotedAt: new Date(`${effectiveDate}T00:00:00.001Z`) }).then(() => Reflect.apply(original, this, args));
+        return householdRate(a, "0.1", effectiveDate).then(() => Reflect.apply(original, this, args));
       }
       return Reflect.apply(original, this, args);
     };
