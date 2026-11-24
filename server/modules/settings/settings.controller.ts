@@ -27,7 +27,8 @@ import {
 } from "./settings.validation";
 import { settingsAccountController } from "./settings.account.controller";
 import { toOwnProfileDto } from "../auth/auth.dto";
-import { changedProfileFields, profileFieldErrors, profileForStorage } from "./settings.profile.helpers";
+import { profileFieldErrors } from "./settings.profile.helpers";
+import { saveOwnProfile } from "./settings.profile.service";
 import { changeOwnPassword } from "./settings.password.service";
 import { updateHouseholdPolicy } from "../../core/authz/household-policy";
 import { writeNotificationPreferences } from "../../repositories/UserNotificationPreferences";
@@ -127,30 +128,15 @@ export const settingsController = {
       }
 
       const userId = req.session.userId!;
-      const existingUser = await userRepository.findById(userId);
-      if (!existingUser) {
-        throw new NotFoundError("User not found");
-      }
-
-      const updatedUser = await userRepository.update(userId, profileForStorage(parseResult.data));
-      if (!updatedUser) {
-        throw new NotFoundError("User not found");
-      }
-
-      const changedFields = changedProfileFields(existingUser, updatedUser, parseResult.data);
+      // AH-07: the save and its audit row commit together (settings.profile.service.ts).
+      const { user: updatedUser, changedFields } = await saveOwnProfile({
+        userId,
+        householdId: req.householdContext?.householdId ?? null,
+        ipAddress: businessAuditService.getIpAddress(req),
+      }, parseResult.data);
       logger.info("Profile updated", {
         userId: userId.substring(0, 8),
         changedFields,
-      });
-
-      // Field names only: the profile holds phone, address and income values.
-      await businessAuditService.logUpdate({
-        householdId: req.householdContext?.householdId ?? null,
-        userId,
-        entityType: "user",
-        entityId: userId,
-        ipAddress: businessAuditService.getIpAddress(req),
-        metadata: { changedFields },
       });
 
       success(res, { profile: toOwnProfileDto(updatedUser) }, 200, {

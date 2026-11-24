@@ -8,13 +8,15 @@
  * `<field>Currency`, and a two-decimal amount, negative ones included, stays a
  * numeric cell (validated, never re-parsed). A withheld or missing amount or
  * an unproven unit is written "unavailable"; an amount that does not apply to
- * the row is written "none". Neither is ever zero.
+ * the row is written "none". Neither is ever zero. A rate, yield or quantity
+ * (a plain decimal, not an amount) is a numeric cell too, so a negative yield
+ * is never neutralised into text.
  */
 import {
   PERSONAL_EXPORT_CSV_SECTIONS, PERSONAL_EXPORT_NONE, PERSONAL_EXPORT_UNAVAILABLE, personalExportCsvEntry,
   type PersonalExportAmount, type PersonalExportCsvSection,
 } from "@shared/personal-data-export";
-import { CsvDecimal, createCsv } from "../../core/csv";
+import { CsvDecimal, CsvNumeric, createCsv } from "../../core/csv";
 import type { ArchiveEntryInput } from "./settings.privacy-export.archive";
 import { SECTION_COLUMNS, type SectionColumns } from "./settings.privacy-export.columns";
 import type { PersonalExportDocument } from "./settings.privacy-export.data";
@@ -63,6 +65,7 @@ function amountCells(value: unknown): unknown[] {
 export function sectionCsv(rows: readonly Record<string, unknown>[], spec: SectionColumns): string {
   const columns = [...spec.columns];
   const amountKeys = new Set([...spec.amounts, ...Object.keys(spec.amountCurrency ?? {})]);
+  const numericKeys = new Set(spec.numerics ?? []);
   for (const row of rows) {
     for (const [key, value] of Object.entries(row)) {
       if (isAmount(value)) amountKeys.add(key);
@@ -77,6 +80,7 @@ export function sectionCsv(rows: readonly Record<string, unknown>[], spec: Secti
     const value = row[key];
     const label = spec.nullLabel?.[key];
     if ((value === null || value === undefined) && label) return [label(row)];
+    if (numericKeys.has(key) && typeof value === "string" && CsvNumeric.isNumeric(value)) return [new CsvNumeric(value)];
     return [cell(value)];
   }));
   return `${createCsv(headers, body)}\n`;

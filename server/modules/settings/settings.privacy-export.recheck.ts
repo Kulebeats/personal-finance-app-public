@@ -6,16 +6,20 @@
  * its owner), revokes the export: fail closed. Version 1 manifests keep the
  * version 1 rule (accounts and transactions only).
  *
- * Locks: the download holds membership, then transactions, then accounts FOR
- * SHARE, as before. The version 2 sets (goals, rules, holdings, bonds, bond
- * payments, bills, receipts) are re-read afterwards with plain reads, so the
- * download holds no new locks and no lock for longer: a re-point committed
- * after the read is the same as a download that finished just before it.
+ * Locks: the download first re-checks everything with plain reads and reads
+ * its file holding no lock. Only then does it take membership, transactions
+ * and accounts FOR SHARE (the version 1 sources, in the ordinary writer's
+ * order) and re-check those under the lock until its audit row commits
+ * ({@link areLedgerSourcesStillReadable}). The version 2 sets (goals, rules,
+ * holdings, bonds, bond payments, bills, receipts, investment activity) are
+ * plain reads only: a re-point committed after the read is the same as a
+ * download that finished just before it.
  */
 import { and, sql, type SQL } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import {
-  accounts, grzBondPayments, grzBonds, grzTBills, holdings, pendingReceipts, recurringTransactions, transactions,
+  accounts, grzBondPayments, grzBonds, grzTBills, holdings, investmentTransactions, pendingReceipts, recurringTransactions,
+  transactions,
 } from "@shared/schema";
 import {
   PERSONAL_EXPORT_ARCHIVE_VERSION, PERSONAL_EXPORT_TYPE, type PersonalExportSections,
@@ -23,7 +27,7 @@ import {
 import type { TransactionType } from "../../utils/withTransaction";
 import type { HouseholdContext } from "../../middleware/householdGuard";
 import { retainedAccountPredicate, retainedTransactionPredicate } from "../../core/authz/transaction-visibility";
-import { visibleHoldingPredicate } from "../../core/authz/investment-visibility";
+import { visibleHoldingPredicate, visibleInvestmentTransactionPredicate } from "../../core/authz/investment-visibility";
 import { visibleReceiptPredicate } from "../../core/authz/receipt-visibility";
 import { visibleRulePredicate } from "../../services/recurring/RecurringAudienceQuery";
 import { readGoalSourceVisibility } from "../../services/goal/GoalViewerProgress";
@@ -31,12 +35,13 @@ import {
   visibleBillPredicate, visibleBondPaymentPredicate, visibleBondPredicate,
 } from "../../services/grz/holdingVisibility";
 import type { InventorySources } from "./settings.privacy-export.sections";
+import type { ActivitySources } from "./settings.privacy-export.activity";
 
 const INVENTORY_SOURCE_KEYS = [
   "sourceGoalIds", "sourceRuleIds", "sourceHoldingIds", "sourceBondIds", "sourceBondPaymentIds", "sourceTBillIds", "sourceReceiptIds",
 ] as const satisfies readonly (keyof InventorySources)[];
 
-export interface PersonalExportManifest extends Partial<InventorySources> {
+export interface PersonalExportManifest extends Partial<InventorySources>, Partial<ActivitySources> {
   kind: typeof PERSONAL_EXPORT_TYPE;
   version: number;
   /** Household the snapshot was taken from; null without a household. */
@@ -62,7 +67,7 @@ export function readManifest(value: unknown): PersonalExportManifest | null {
   const manifest = value as Partial<PersonalExportManifest>;
   if (manifest.kind !== PERSONAL_EXPORT_TYPE || typeof manifest.sha256 !== "string") return null;
   if (manifest.householdId !== null && typeof manifest.householdId !== "string") return null;
-  const lists = ["sourceAccountIds", "sourceTransactionIds", ...INVENTORY_SOURCE_KEYS] as const;
+  const lists = ["sourceAccountIds", "sourceTransactionIds", "sourceInvestmentActivityIds", ...INVENTORY_SOURCE_KEYS] as const;
   if (lists.some(key => manifest[key] !== undefined && !isSourceIdList(manifest[key]))) return null;
   return manifest as PersonalExportManifest;
 }
@@ -127,22 +132,51 @@ async function inventorySourcesReadable(
     await allVisible(tx, grzBonds.id, sourceBondIds, visibleBondPredicate(actor)) &&
     await allVisible(tx, grzBondPayments.id, sourceBondPaymentIds, visibleBondPaymentPredicate(actor)) &&
     await allVisible(tx, grzTBills.id, sourceTBillIds, visibleBillPredicate(actor)) &&
-    await allVisible(tx, pendingReceipts.id, sourceReceiptIds, visibleReceiptPredicate(actor));
+    await allVisible(tx, pendingReceipts.id, sourceReceiptIds, visibleReceiptPredicate(actor)) &&
+    await activitySourcesReadable(tx, actor, manifest);
+}
+
+/** Investment activity, on manifests that exported it (earlier version 2 exports did not). */
+async function activitySourcesReadable(
+  tx: TransactionType, actor: HouseholdContext, manifest: PersonalExportManifest,
+): Promise<boolean> {
+  if (manifest.sections.investmentActivity === undefined) return true;
+  const ids = manifest.sourceInvestmentActivityIds;
+  if (!ids || new Set(ids).size !== manifest.sections.investmentActivity) return false;
+  return allVisible(tx, investmentTransactions.id, ids, visibleInvestmentTransactionPredicate(actor));
+}
+
+function actorFor(userId: string, manifest: PersonalExportManifest, readable: ReadonlyMap<string, HouseholdRole>): HouseholdContext | null {
+  const role = manifest.householdId ? readable.get(manifest.householdId) : undefined;
+  return manifest.householdId && role ? { userId, householdId: manifest.householdId, role } : null;
 }
 
 /**
- * Recheck every captured source under current privacy. A household export
- * without complete source evidence reads as revoked.
+ * Recheck every captured source under current privacy, with plain reads. A
+ * household export without complete source evidence reads as revoked.
  */
 export async function isStillReadable(
   tx: TransactionType, userId: string, manifest: PersonalExportManifest | null,
-  readable: ReadonlyMap<string, HouseholdRole>, lock: boolean,
+  readable: ReadonlyMap<string, HouseholdRole>,
 ): Promise<boolean> {
   if (!manifest?.householdId) return true;
-  const role = readable.get(manifest.householdId);
-  if (!role) return false;
-  const actor: HouseholdContext = { userId, householdId: manifest.householdId, role };
-  if (!await ledgerSourcesReadable(tx, actor, manifest, lock)) return false;
+  const actor = actorFor(userId, manifest, readable);
+  if (!actor) return false;
+  if (!await ledgerSourcesReadable(tx, actor, manifest, false)) return false;
   if (manifest.version < PERSONAL_EXPORT_ARCHIVE_VERSION) return true;
   return inventorySourcesReadable(tx, actor, manifest);
+}
+
+/**
+ * The download's locked tail: the version 1 sources again, FOR SHARE, after
+ * the plain re-check and the file read. `readable` must come from a locked
+ * membership read in the same transaction.
+ */
+export async function areLedgerSourcesStillReadable(
+  tx: TransactionType, userId: string, manifest: PersonalExportManifest,
+  readable: ReadonlyMap<string, HouseholdRole>,
+): Promise<boolean> {
+  if (!manifest.householdId) return true;
+  const actor = actorFor(userId, manifest, readable);
+  return actor !== null && ledgerSourcesReadable(tx, actor, manifest, true);
 }

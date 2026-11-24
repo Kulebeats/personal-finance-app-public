@@ -33,6 +33,25 @@ export class CsvDecimal {
   }
 }
 
+const CSV_NUMERIC_PATTERN = /^-?\d+(?:\.\d+)?$/;
+
+/**
+ * A plain decimal that is not an amount (a rate, a yield, a quantity),
+ * written as a numeric CSV cell: "-0.0125" is a number, not a formula.
+ */
+export class CsvNumeric {
+  readonly text: string;
+
+  constructor(text: string) {
+    if (!CSV_NUMERIC_PATTERN.test(text)) throw new Error("Invalid CSV numeric value");
+    this.text = text;
+  }
+
+  static isNumeric(text: string): boolean {
+    return CSV_NUMERIC_PATTERN.test(text);
+  }
+}
+
 /**
  * Exact fixed two-decimal CSV amount from a MoneyDto through the Money class.
  * An absent amount is written as 0.00 (the previous behaviour); a malformed
@@ -52,7 +71,7 @@ export function csvMoney(value?: MoneyDto): CsvDecimal {
 export function sanitizeCsvField(value: unknown): string {
   if (value === null || value === undefined) return "";
   // A validated two-decimal amount stays numeric: "-58.12" is not a formula.
-  if (value instanceof CsvDecimal) return value.text;
+  if (value instanceof CsvDecimal || value instanceof CsvNumeric) return value.text;
 
   // Escape quotes by doubling them, then neutralize formula injection
   const str = neutralizeCsvFormula(String(value).replaceAll('"', '""'));

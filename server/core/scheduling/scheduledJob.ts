@@ -1,11 +1,12 @@
 import { logger } from "../../utils/logger";
 import { withJobAdvisoryLock, type JobLease, type JobLockRequest, type LockOutcome, type LockSkipReason } from "./advisoryLock";
 import {
-  finishJobRun, hasCompletedPeriod, renewJobRun, startJobRun, type JobRunFinish, type JobSummary, type ScheduledPeriod,
+  finishJobRun, hasCompletedPeriod, renewJobRun, RUN_SUPERSEDED, startJobRun, type JobRunFinish, type JobSummary, type ScheduledPeriod,
 } from "./jobJournal";
 import { periodIdentity, scheduledSlotAtOrBefore } from "./schedulePeriod";
 
 export type { JobSummary } from "./jobJournal";
+export { RUN_SUPERSEDED } from "./jobJournal";
 
 /** A summary with `failed > 0` closes the run as failed with this code. */
 export const PARTIAL_FAILURE = "PARTIAL_FAILURE";
@@ -14,7 +15,12 @@ export const LOCK_LOST = "LOCK_LOST";
 /** The work ran, but the journal row could not be closed: its outcome is not recorded. */
 export const JOB_OUTCOME_UNKNOWN = "JOB_OUTCOME_UNKNOWN";
 
-/** Thrown when the work ran but closing its journal row failed; never retry it as "not started". */
+/**
+ * Thrown when the work ran but closing its journal row failed. The row stays
+ * `running`, so the period is not done: a later run of it (the door, or the
+ * scheduler's recovery tick) closes that row as RUN_SUPERSEDED and runs the
+ * work again. Callers must not report it as "not started".
+ */
 export class JobOutcomeUnknownError extends Error {
   readonly code = JOB_OUTCOME_UNKNOWN;
 
@@ -52,7 +58,8 @@ export type JobRunOutcome =
 export interface JobRunDependencies {
   readonly withLock: <T>(request: JobLockRequest, work: (lease: JobLease) => Promise<T>) => Promise<LockOutcome<T>>;
   readonly hasCompletedPeriod: (jobName: string, identity: string) => Promise<boolean>;
-  readonly startRun: (jobName: string, period: ScheduledPeriod) => Promise<string>;
+  /** Null when the period completed meanwhile (see startJobRun). */
+  readonly startRun: (jobName: string, period: ScheduledPeriod) => Promise<string | null>;
   readonly renewRun: (runId: string) => Promise<void>;
   readonly finishRun: (runId: string, finish: JobRunFinish) => Promise<void>;
 }
@@ -87,6 +94,9 @@ async function attempt(job: ScheduledJobDefinition, period: ScheduledPeriod): Pr
   }
 }
 
+const isSuperseded = (error: unknown): boolean =>
+  typeof error === "object" && error !== null && (error as { code?: unknown }).code === RUN_SUPERSEDED;
+
 function closeLost(result: Attempt, lease: JobLease): Attempt {
   if (!lease.isLost()) return result;
   return { outcome: { status: "failed", errorCode: LOCK_LOST, summary: result.outcome.summary }, error: result.error };
@@ -99,6 +109,7 @@ async function runJournaled(
   if (await deps.hasCompletedPeriod(job.name, period.identity)) return { status: "skipped", reason: "PERIOD_DONE" };
   const startedAt = Date.now();
   const runId = await deps.startRun(job.name, period);
+  if (runId === null) return { status: "skipped", reason: "PERIOD_DONE" };
   lease.onRenewed(() => deps.renewRun(runId));
   const { outcome, error } = closeLost(await attempt(job, period), lease);
   try {
@@ -108,6 +119,13 @@ async function runJournaled(
       summary: outcome.summary,
     });
   } catch (journalError) {
+    if (isSuperseded(journalError)) {
+      // Fenced off: a newer run of this period took over while this one worked.
+      logger.error("Scheduled job finished after a newer run of its period took over; its result is not recorded", {
+        jobName: job.name, runId, runStatus: outcome.status,
+      });
+      return { status: "failed", errorCode: RUN_SUPERSEDED, summary: outcome.summary };
+    }
     logger.error("Scheduled job ran, but its journal row could not be closed", {
       jobName: job.name, runId, runStatus: outcome.status, error: journalError,
     });

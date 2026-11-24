@@ -12,7 +12,9 @@
  *
  * Version 2 (A-27) adds goals, budgets, recurring rules, holdings, GRZ bonds,
  * bond payments and T-bills, receipts (metadata only) and tags
- * (settings.privacy-export.sections.ts).
+ * (settings.privacy-export.sections.ts). Its activity sections add the
+ * requester's AI conversations and messages, recap feedback, saved views and
+ * investment activity (settings.privacy-export.activity.ts).
  */
 import { and, asc, eq, isNull } from "drizzle-orm";
 import {
@@ -34,11 +36,14 @@ import { couponCashDescriptionFields } from "../../services/grz/couponCashDescri
 import {
   emptyInventory, readHouseholdInventory, type HouseholdInventory, type InventorySources,
 } from "./settings.privacy-export.sections";
+import {
+  emptyActivity, readActivitySections, type ActivitySections, type ActivitySources,
+} from "./settings.privacy-export.activity";
 
 export const PERSONAL_EXPORT_FORMAT = "personal-data-export";
 export const PERSONAL_EXPORT_VERSION = PERSONAL_EXPORT_ARCHIVE_VERSION;
 
-export interface PersonalExportDocument extends HouseholdInventory {
+export interface PersonalExportDocument extends HouseholdInventory, ActivitySections {
   format: typeof PERSONAL_EXPORT_FORMAT;
   version: typeof PERSONAL_EXPORT_VERSION;
   generatedAt: string;
@@ -127,7 +132,7 @@ async function readHouseholdSections(tx: TransactionType, actor: HouseholdContex
 }
 
 /** Every source the download re-checks, captured from the same snapshot as the file. */
-export interface PersonalExportSources extends InventorySources {
+export interface PersonalExportSources extends InventorySources, ActivitySources {
   sourceAccountIds: string[];
   sourceTransactionIds: string[];
 }
@@ -152,6 +157,7 @@ export async function collectPersonalData(
     .orderBy(asc(securityAuditLogs.createdAt), asc(securityAuditLogs.id));
   const household = actor ? await readHouseholdSections(tx, actor) : { accounts: [], transactions: [], categories: [] };
   const { inventory, sources } = actor ? await readHouseholdInventory(tx, actor) : emptyInventory();
+  const { activity, sources: activitySources } = actor ? await readActivitySections(tx, actor) : emptyActivity();
 
   const document: PersonalExportDocument = {
     format: PERSONAL_EXPORT_FORMAT,
@@ -164,6 +170,7 @@ export async function collectPersonalData(
     ...household,
     securityEvents,
     ...inventory,
+    ...activity,
   };
   const sections: PersonalExportSections = {
     profile: 1,
@@ -182,12 +189,18 @@ export async function collectPersonalData(
     grzTBills: inventory.grzTBills.length,
     receipts: inventory.receipts.length,
     tags: inventory.tags.length,
+    aiConversations: activity.aiConversations.length,
+    aiMessages: activity.aiMessages.length,
+    recapFeedback: activity.recapFeedback.length,
+    savedViews: activity.savedViews.length,
+    investmentActivity: activity.investmentActivity.length,
   };
   return {
     document,
     sections,
     sources: {
       ...sources,
+      ...activitySources,
       sourceAccountIds: household.accounts.map(account => account.id),
       sourceTransactionIds: household.transactions.map(transaction => transaction.id),
     },

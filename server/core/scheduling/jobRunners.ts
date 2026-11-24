@@ -108,7 +108,8 @@ export async function runSnapshots(period: ScheduledPeriod): Promise<JobSummary>
 /** OPS-007 P2: household dates are judged at the period's slot, so a late retry tick serves the same users. */
 export async function runWeeklyRecap(period: ScheduledPeriod): Promise<JobSummary> {
   const result = await processWeeklyRecapEmails(period.scheduledFor);
-  return { sent: result.sent, failed: result.failed, skipped: result.skipped };
+  // An unknown SMTP outcome is reported, not failed: the ledger never repeats it, so a retry would do nothing.
+  return { sent: result.sent, failed: result.failed, skipped: result.skipped, unknown: result.unknown };
 }
 
 export async function runDailySecurityReport(): Promise<JobSummary> {
@@ -126,6 +127,12 @@ export async function runDailySecurityReport(): Promise<JobSummary> {
     }
   }
   return { processed: allUsers.length - failed, failed };
+}
+
+/** AH-11: the 7-day and 1-day MFA grace reminders, once each through the delivery ledger. */
+export async function runMfaGraceReminders(): Promise<JobSummary> {
+  const { sendMfaGraceReminders } = await import("../../modules/auth/auth.mfa-reminders");
+  return sendMfaGraceReminders();
 }
 
 export async function runNotificationCleanup(): Promise<JobSummary> {

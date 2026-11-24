@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, eq, inArray } from "drizzle-orm";
 import { auditLogs, householdMembers, households, notificationDeliveries, userDisplaySettings, userNotificationPreferences, users } from "@shared/schema";
-import { db } from "../../../db";
+import { db, pool } from "../../../db";
 import { sendEmail } from "../../../services/emailService";
 import { businessAuditService } from "../../../services/BusinessAuditService";
 import { runWeeklyRecap } from "../../../core/scheduling/jobRunners";
@@ -84,7 +84,7 @@ describe("OPS-007: each user's recap goes out on their chosen day, in household 
     await reset();
     smtp.mockReset();
     smtp.mockResolvedValue(true);
-    await db.update(households).set({ aiConsentGiven: true, timeZone: LUSAKA }).where(eq(households.id, a));
+    await db.update(households).set({ aiConsentGiven: true, timeZone: LUSAKA, currency: "ZMW" }).where(eq(households.id, a));
     await db.update(households).set({ aiConsentGiven: true, timeZone: LUSAKA }).where(eq(households.id, b));
     await db.update(users).set({ emailVerified: true }).where(inArray(users.id, allActorIds()));
     vi.useFakeTimers({ toFake: ["Date"], now: MONDAY_RUN });
@@ -182,6 +182,55 @@ describe("OPS-007: each user's recap goes out on their chosen day, in household 
 
     expect(await sendsTo("owner")).toBe(1);
     expect(await ledgerStatus("owner")).toBe("unknown");
+  });
+
+  it("counts an ambiguous SMTP reply as unknown, not as a failed run", async () => {
+    await enableRecap("owner", WEDNESDAY);
+    smtp.mockImplementationOnce(async (message) => {
+      if (message.throwOnUnknownDelivery) throw new Error("SMTP acceptance could not be determined");
+      return false;
+    });
+
+    const summary = await runAt(WEDNESDAY_RUN);
+
+    expect(summary).toMatchObject({ sent: 0, failed: 0, unknown: 1 });
+  });
+
+  it("reports the run failed when Postgres refuses the egress audit row after SMTP accepted", async () => {
+    await enableRecap("owner", WEDNESDAY);
+    const ownerId = actors.get("owner")!.id;
+    expect(ownerId).toMatch(/^[0-9a-f-]{36}$/);
+    // A real insert failure, not a mocked service: the audit row is refused by the database itself.
+    await pool.query(`CREATE OR REPLACE FUNCTION r17_refuse_recap_audit() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.user_id = '${ownerId}' AND NEW.details->>'exportType' = 'weekly_recap_email' THEN
+          RAISE EXCEPTION 'synthetic audit outage';
+        END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql`);
+    await pool.query("CREATE TRIGGER r17_refuse_recap_audit BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION r17_refuse_recap_audit()");
+    try {
+      expect(await runAt(WEDNESDAY_RUN)).toMatchObject({ sent: 1, failed: 1 });
+      await runAt(new Date("2026-11-25T09:20:00Z"));
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS r17_refuse_recap_audit ON audit_logs");
+      await pool.query("DROP FUNCTION IF EXISTS r17_refuse_recap_audit()");
+    }
+
+    expect(await sendsTo("owner")).toBe(1);
+    expect(await ledgerStatus("owner")).toBe("sent");
+  });
+
+  it("does not rebuild a digest its data cannot make on every later tick that day", async () => {
+    await enableRecap("owner", WEDNESDAY);
+    await db.update(households).set({ currency: null }).where(eq(households.id, a));
+
+    const first = await runAt(WEDNESDAY_RUN);
+    const later = await runAt(new Date("2026-11-25T09:20:00Z"));
+
+    expect(first.failed).toBe(1);
+    expect(later.failed).toBe(0);
+    expect(smtp).not.toHaveBeenCalled();
   });
 
   it("never resends after SMTP accepted it but the egress audit failed, and reports the run failed", async () => {
