@@ -5,7 +5,7 @@ import { visibleAccountPredicate, visibleTransactionPredicate } from "../../core
 import { lockTransactionCreateGrant } from "../../repositories/TransactionCreateBoundary";
 import { ConflictError, NotFoundError, ValidationError } from "../../utils/errorHandler";
 import type { TransactionType } from "../../utils/withTransaction";
-import { receiptRepository } from "../../repositories/ReceiptRepository";
+import { lockReceiptHousehold, receiptRepository } from "../../repositories/ReceiptRepository";
 
 export interface ReceiptConversionInput {
   accountId: string;
@@ -31,6 +31,7 @@ export function receiptRequestHash(input: ReceiptConversionInput): string {
 export async function lockedConversionResult(
   tx: TransactionType, receiptId: string, householdId: string, userId: string, hash: string,
 ): Promise<string | undefined> {
+  await lockReceiptHousehold(tx, householdId);
   const actor = await lockTransactionCreateGrant(tx, householdId, { createActor: { householdId, userId } });
   if (!actor) throw new NotFoundError("Transaction");
   // R6-08: a receipt the caller cannot read is missing, before the linked checks.

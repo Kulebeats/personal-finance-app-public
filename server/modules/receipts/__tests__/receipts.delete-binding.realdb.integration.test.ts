@@ -66,7 +66,7 @@ async function receiptAudits(id: string) {
 }
 
 async function refuseReceiptAudit<T>(action: "CREATE" | "DELETE" | "UPDATE", run: () => Promise<T>): Promise<T> {
-  await pool.query(`create function refuse_receipt_audit_for_test() returns trigger language plpgsql as $$
+  await pool.query(`create or replace function refuse_receipt_audit_for_test() returns trigger language plpgsql as $$
     begin
       if new.entity_type = 'receipt' and new.action = TG_ARGV[0] then
         raise exception 'synthetic audit rejection' using errcode = '23514';

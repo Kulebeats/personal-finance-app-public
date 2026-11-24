@@ -332,7 +332,9 @@ export const receiptsController = {
       const { householdId } = req.householdContext!;
       const { id } = req.params;
 
-      const result = await receiptService.attemptMatch(id, householdId, req.session.userId!);
+      const result = await receiptService.attemptMatch(
+        id, householdId, req.session.userId!, "request", businessAuditService.getIpAddress(req),
+      );
       return success(res, {
         matched: result.matched,
         transactionId: result.transactionId ?? null,

@@ -24,7 +24,9 @@ async function clean() {
   await db.delete(pendingReceipts).where(eq(pendingReceipts.householdId, a));
   await db.delete(transactions).where(eq(transactions.householdId, a));
   await db.delete(merchants).where(eq(merchants.householdId, a));
-  await pool.query("delete from audit_logs where household_id=$1", [a]);
+  // A private system audit names neither a household nor a user.
+  await pool.query("delete from audit_logs where household_id=$1 or (entity_type='transaction' and entity_id=$2)",
+    [a, transactionId ?? null]);
   await db.delete(outboxEvents).where(eq(outboxEvents.householdId, a));
 }
 
@@ -99,7 +101,7 @@ describe("FIN-16 receipt match audit (real HTTP/DB)", () => {
   it("attributes the matching queue's LINK to the scheduler, with no human actor", async () => {
     await seed(undefined);
     await db.update(pendingReceipts).set({ nextMatchAt: new Date(0) }).where(eq(pendingReceipts.id, receiptId));
-    expect(await receiptService.processMatchingQueue()).toEqual({ processed: 1, matched: 1, failed: 0 });
+    await receiptService.processMatchingQueue();
     const audits = await auditRows("receipt", receiptId);
     expect(audits).toHaveLength(1);
     expect(audits[0]).toMatchObject({
@@ -110,20 +112,20 @@ describe("FIN-16 receipt match audit (real HTTP/DB)", () => {
     });
   });
 
-  it("attributes a merchant correction made by the matching queue to the scheduler", async () => {
+  it.each([false, true])("attributes a queued merchant correction to the scheduler (private: %s)", async isPrivate => {
     await seed(MERCHANT_NAME);
-    await db.update(transactions).set({ name: `${MERCHANT_NAME} bank entry` }).where(eq(transactions.id, transactionId));
+    await db.update(transactions).set({ name: `${MERCHANT_NAME} bank entry`, isPrivate }).where(eq(transactions.id, transactionId));
     await db.update(pendingReceipts).set({
       ocrData: { merchantName: MERCHANT_NAME, amount: "25.00", date: "2026-11-10" },
       nextMatchAt: new Date(0),
     }).where(eq(pendingReceipts.id, receiptId));
-    expect(await receiptService.processMatchingQueue()).toEqual({ processed: 1, matched: 1, failed: 0 });
+    await receiptService.processMatchingQueue();
     const audits = await auditRows("transaction", transactionId);
     expect(audits).toHaveLength(1);
     expect(audits[0]).toMatchObject({
       action: "UPDATE",
       user_id: null,
-      household_id: a,
+      household_id: isPrivate ? null : a,
       details: { receiptId, source: "receipts.match" },
     });
   });

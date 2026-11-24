@@ -20,7 +20,7 @@ import {
   ensureMerchantAlias,
   resolveMerchantMatch,
 } from "../merchantRecognition";
-import { receiptRepository } from "../../repositories/ReceiptRepository";
+import { lockReceiptHousehold, receiptRepository } from "../../repositories/ReceiptRepository";
 import { transactionRepository } from "../../repositories/TransactionRepository";
 import { accountRepository } from "../../repositories/AccountRepository";
 import {
@@ -92,6 +92,7 @@ export class ReceiptTransactionService {
 
     // Serialize linking with OCR, other linkers and the posting's current privacy.
     return withTransaction(async (tx) => {
+      await lockReceiptHousehold(tx, householdId);
       const actor = await lockTransactionCreateGrant(tx, householdId, { createActor: { householdId, userId: visibilityUserId } });
       if (!actor) throw new NotFoundError("Transaction");
       const locked = await receiptRepository.lockVisibleReceiptForWrite(tx, actor, receiptId);

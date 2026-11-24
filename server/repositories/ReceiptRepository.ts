@@ -21,6 +21,7 @@ import { lockTransactionCreateGrant } from "./TransactionCreateBoundary";
 import type { HouseholdContext } from "../middleware/householdGuard";
 import {
   accounts,
+  households,
   pendingReceipts,
   receiptConversionRecords,
   transactions,
@@ -58,8 +59,16 @@ type UpdatePendingReceiptInput = Partial<{
   nextMatchAt: Date;
 }>;
 
+/** Audit FK order. Ownership transfer locks the household before membership. */
+export async function lockReceiptHousehold(tx: TransactionType, householdId: string): Promise<void> {
+  const [household] = await tx.select({ id: households.id }).from(households)
+    .where(eq(households.id, householdId)).for("share");
+  if (!household) throw new NotFoundError("Receipt not found");
+}
+
 async function lockReceiptWriter(tx: TransactionType, householdId: string, userId: string): Promise<HouseholdContext | undefined> {
   try {
+    await lockReceiptHousehold(tx, householdId);
     return await lockTransactionCreateGrant(tx, householdId, { createActor: { householdId, userId } });
   } catch (error: unknown) {
     if (error instanceof ForbiddenError || error instanceof NotFoundError) return undefined;
