@@ -132,7 +132,8 @@ export async function sendEmail(options: SendEmailOptions): Promise<boolean> {
     }
 
     const message = {
-      from: `"Personal Finance App" <${fromEmail}>`,
+      // nodemailer encodes the display name itself, so quotes and non-ASCII are safe.
+      from: { name: fromDisplayName(), address: fromEmail },
       to: options.to,
       // A user name in a subject must not be able to add headers.
       subject: options.subject.replace(/[\r\n]+/g, " "),
@@ -153,6 +154,17 @@ export async function sendEmail(options: SendEmailOptions): Promise<boolean> {
     }
     return false;
   }
+}
+
+const DEFAULT_FROM_NAME = "Personal Finance App";
+
+/**
+ * The From display name: SMTP_FROM_NAME, or the app's name when unset or blank.
+ * Line breaks become spaces, so the name can never start a header of its own.
+ */
+function fromDisplayName(): string {
+  const configured = (process.env.SMTP_FROM_NAME ?? "").replace(/[\r\n]+/g, " ").trim();
+  return configured || DEFAULT_FROM_NAME;
 }
 
 // Generate verification token
