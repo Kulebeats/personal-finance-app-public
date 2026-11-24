@@ -5,7 +5,9 @@ import { jobs } from "@shared/schema";
 import { db } from "../../../db";
 import { jobService } from "../../jobs/service";
 import { readScheduledJobsHealth } from "../jobHealth";
-import { recordSchedulerStart, SCHEDULED_RUN_PREFIX, SCHEDULER_START_MARKER } from "../jobJournal";
+import {
+  recordCataloguedJobs, recordSchedulerStart, SCHEDULED_RUN_PREFIX, SCHEDULER_CATALOGUED_PREFIX, SCHEDULER_START_MARKER,
+} from "../jobJournal";
 import { runScheduledJob, type ScheduledJobDefinition } from "../scheduledJob";
 
 // OPS-002 against real Postgres: the runner's journal row is what readiness
@@ -33,7 +35,11 @@ const DISABLED_IN_PRODUCTION = { NODE_ENV: "production", SCHEDULER_ENABLED: "fal
 const DEV = { NODE_ENV: "development" };
 const DEV_ENABLED = { NODE_ENV: "development", SCHEDULER_ENABLED: "true" };
 
-const ownRows = or(like(jobs.name, `${SCHEDULED_RUN_PREFIX}test.health-%-${runTag}`), eq(jobs.name, SCHEDULER_START_MARKER));
+const ownRows = or(
+  like(jobs.name, `${SCHEDULED_RUN_PREFIX}test.health-%-${runTag}`), eq(jobs.name, SCHEDULER_START_MARKER),
+  like(jobs.name, `${SCHEDULER_CATALOGUED_PREFIX}test.health-%-${runTag}`),
+);
+const cataloguedRows = (jobName: string) => db.select().from(jobs).where(eq(jobs.name, `${SCHEDULER_CATALOGUED_PREFIX}${jobName}`));
 
 describe("scheduled-job health reads the runner's journal (real Postgres)", () => {
   // The start marker is database-wide; this suite owns it while it runs.
@@ -99,6 +105,36 @@ describe("scheduled-job health reads the runner's journal (real Postgres)", () =
     expect(await db.select().from(jobs).where(eq(jobs.name, probe))).toEqual([]);
     const [marker] = await db.select().from(jobs).where(eq(jobs.name, SCHEDULER_START_MARKER));
     expect(marker?.startedAt?.toISOString()).toBe(longAgo.toISOString());
+  });
+
+  it("measures a job added after the first start from when the scheduler first catalogued it", async () => {
+    await recordSchedulerStart(new Date(Date.now() - 30 * DAY_MS));
+    // With no catalogue record, a job that never ran is measured from that first start: stale.
+    expect((await readScheduledJobsHealth({ specs, env: ENABLED })).jobs[0]).toMatchObject({ stale: true });
+
+    const deployedAt = new Date(Date.now() - 60 * 60 * 1000);
+    await recordCataloguedJobs([daily.name], deployedAt);
+    // A restart does not renew it.
+    await recordCataloguedJobs([daily.name], new Date());
+
+    const rows = await cataloguedRows(daily.name);
+    expect(rows.map((row) => row.startedAt?.toISOString())).toEqual([deployedAt.toISOString()]);
+    expect((await readScheduledJobsHealth({ specs, env: ENABLED })).jobs[0])
+      .toEqual({ jobName: daily.name, lastSuccessAt: null, stale: false });
+    // Two intervals after it was catalogued, a job that never succeeded is stale.
+    const later = new Date(deployedAt.getTime() + 2 * DAY_MS + 60_000);
+    expect((await readScheduledJobsHealth({ specs, env: ENABLED, now: later })).jobs[0]).toMatchObject({ stale: true });
+  });
+
+  it("keeps catalogue records through a jobs-table prune, and records one per catalogued job on start", async () => {
+    const longAgo = new Date(Date.now() - 30 * DAY_MS);
+    await recordCataloguedJobs([weekly.name], longAgo);
+
+    await jobService.cleanup(7);
+
+    expect((await cataloguedRows(weekly.name)).map((row) => row.startedAt?.toISOString())).toEqual([longAgo.toISOString()]);
+    await recordSchedulerStart();
+    expect(await cataloguedRows("security.mfa-reminders")).toHaveLength(1);
   });
 
   it("falls back to process start only in a non-production process that runs the scheduler", async () => {
