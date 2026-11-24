@@ -70,6 +70,26 @@ describe("e-mail addresses are case-insensitive (real HTTP, real PostgreSQL)", {
     expect(await accountsFor(first.email)).toBe(1);
   });
 
+  it("lets only one of two simultaneous case-variant sign-ups through (users_email_lower_unique)", async () => {
+    const tag = randomUUID().slice(0, 8);
+    const email = `Case.race-${tag}@Example.invalid`;
+    // Both requests pass the look-up before either inserts; the lower(email) index decides.
+    const [upper, lower] = await Promise.all([email, email.toLowerCase()].map((address, index) =>
+      request(app).post("/api/auth/register").send({ email: address, username: `case_race${index}_${tag}`, password })));
+    const { rows } = await pool.query("SELECT id FROM users WHERE lower(email) = lower($1)", [email]);
+    createdIds.push(...rows.map((row: { id: string }) => row.id));
+
+    expect([upper.status, lower.status].sort()).toEqual([201, 409]);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("has the lower(email) unique index in the migrated schema", async () => {
+    const { rows } = await pool.query(
+      "SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'users' AND indexname = 'users_email_lower_unique'");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].indexdef).toMatch(/UNIQUE INDEX .* \(lower\(\(email\)::text\)\)/);
+  });
+
   it("signs a member in whatever case they type", async () => {
     const member = await register("login");
     await pool.query("UPDATE users SET email_verified = true WHERE id = $1", [member.id]);
