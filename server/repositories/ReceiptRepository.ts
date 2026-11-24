@@ -5,6 +5,7 @@ import {
   eq,
   gte,
   ilike,
+  isNotNull,
   isNull,
   lte,
   ne,
@@ -260,6 +261,11 @@ export class ReceiptRepository {
     return { receipts, total: Number(totalResult[0]?.count ?? 0) };
   }
 
+  /**
+   * Due receipts for receipts.match. A receipt with no OCR data cannot be
+   * matched and its attempt returns before nextMatchAt advances, so it is left
+   * out; otherwise abandoned uploads would fill every batch.
+   */
   async findForMatching(limit: number = 50): Promise<PendingReceipt[]> {
     return await db
       .select()
@@ -267,7 +273,8 @@ export class ReceiptRepository {
       .where(
         and(
           eq(pendingReceipts.matchStatus, "pending"),
-          lte(pendingReceipts.nextMatchAt, new Date())
+          lte(pendingReceipts.nextMatchAt, new Date()),
+          isNotNull(pendingReceipts.ocrData),
         )
       )
       .orderBy(asc(pendingReceipts.nextMatchAt))

@@ -22,8 +22,8 @@
  * FX tables are GLOBAL, so the two sides use different currencies to
  * avoid defeating each other: TZS (no rate seeded anywhere) for the
  * fail-closed household, MWK (rate seeded here) for the conversion household.
- * Budget comparison requires a provider quote covering the expense date;
- * the other report families use the legacy fx_rates fixture.
+ * FIN-06: budget comparison resolves rates exactly as the other report
+ * families do, so one fx_rates fixture serves them all.
  *
  * Run against the test DB ONLY (never finance_app):
  *   DATABASE_URL=...finance_app_test npx vitest run \
@@ -47,7 +47,6 @@ import {
   transactions,
   fxRates,
   householdMembers,
-  providerFxQuotes,
   users,
 } from "@shared/schema";
 import { CashflowReportRepository } from "../CashflowReportRepository";
@@ -61,7 +60,6 @@ const TO = "2026-01-31";
 // Budget comparison requires a persisted reader membership, even for shared rows.
 const USER_ID = randomUUID();
 const OUTSIDER_USER_ID = randomUUID();
-const PROVIDER_QUOTE_ID = randomUUID();
 // Currency of the household that has NO rate row → reports must fail closed.
 const UNRATED_CURRENCY = "TZS";
 // Currency of the household whose rate IS seeded → reports must convert.
@@ -237,22 +235,9 @@ describe("Report SQL aggregation — FX fail-closed (real DB)", () => {
       date: "2026-01-01",
       source: "manual",
     });
-
-    // Budget comparison accepts dated provider evidence, not a manual rate.
-    await db.insert(providerFxQuotes).values({
-      id: PROVIDER_QUOTE_ID,
-      fromCurrency: RATED_CURRENCY,
-      toCurrency: "USD",
-      provider: "exchangerate_api",
-      quotedAt: new Date("2026-01-15T00:00:00Z"),
-      effectiveDate: "2026-01-15",
-      validThrough: "2026-01-15",
-      rate: "0.0450",
-    });
   });
 
   afterAll(async () => {
-    await db.delete(providerFxQuotes).where(eq(providerFxQuotes.id, PROVIDER_QUOTE_ID));
     await deleteRatePair(RATED_CURRENCY, "USD");
     await cleanupHousehold(noRate.householdId);
     await cleanupHousehold(withRate.householdId);
@@ -382,7 +367,7 @@ describe("Report SQL aggregation — FX fail-closed (real DB)", () => {
       });
     });
 
-    it("converts per-category spending at the dated provider quote", async () => {
+    it("converts per-category spending at the same dated rate as the other reports", async () => {
       const result = await budgetComparisonRepo.getSpendingByCategory(
         withRate.householdId,
         {

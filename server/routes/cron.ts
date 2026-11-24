@@ -11,12 +11,19 @@
  * period the scheduler completed is not run again, a run cannot overlap the
  * scheduler's, and every door run is journaled like a scheduled one. Jobs held
  * back from the scheduler (jobCatalog.ts) are refused.
+ *
+ * The door never waits for the job lock: while another period of the job runs
+ * it answers 409 JOB_BUSY at once, instead of holding a pool connection for
+ * the scheduler's wait bound. Call again later.
  */
 import { Router, type Request, type Response } from "express";
 import { verifyCronSecret } from "../core/scheduling/cronSecret";
 import { recoveryWindowDays, type ScheduledJobName } from "../core/scheduling/jobCatalog";
 import { SCHEDULED_JOBS } from "../core/scheduling/jobRegistry";
-import { runScheduledJob, type JobRunOutcome, type ScheduledJobDefinition } from "../core/scheduling/scheduledJob";
+import {
+  JOB_OUTCOME_UNKNOWN, JobOutcomeUnknownError, runScheduledJob, type JobRunOutcome, type ScheduledJobDefinition,
+  type ScheduledRunOptions,
+} from "../core/scheduling/scheduledJob";
 import { isWithinScheduledWindow, scheduledSlotAtOrBefore } from "../core/scheduling/schedulePeriod";
 import { logger } from "../utils/logger";
 import { strictLimiter } from "../middleware/rateLimit";
@@ -74,16 +81,35 @@ function statusFor(results: readonly DoorJobResult[]): number {
   return 200;
 }
 
+/**
+ * The lock or the journal was unavailable before the work ran. Holds only
+ * while runScheduledJob throws nothing after the work starts except
+ * JobOutcomeUnknownError: its attempt() catches the job's own errors, and the
+ * lock release after the work logs instead of throwing.
+ */
+const RUNNER_UNAVAILABLE = "JOB_RUNNER_UNAVAILABLE";
+const DOOR_RUN_OPTIONS: ScheduledRunOptions = Object.freeze({ jobLockWaitMs: 0 });
+
 async function runDoorJob(job: ScheduledJobDefinition): Promise<DoorJobResult> {
   const now = new Date();
   const days = recoveryWindowDays(job.name);
   if (days !== undefined && !isWithinScheduledWindow(scheduledSlotAtOrBefore(job.cron, now), now, days)) {
     return { name: job.name, status: "skipped", reason: "WINDOW_CLOSED" };
   }
-  return { name: job.name, ...await runScheduledJob(job, undefined, now) };
+  try {
+    return { name: job.name, ...await runScheduledJob(job, undefined, now, DOOR_RUN_OPTIONS) };
+  } catch (error) {
+    // Unknown: the work ran and its journal row may still read "running".
+    const errorCode = error instanceof JobOutcomeUnknownError ? JOB_OUTCOME_UNKNOWN : RUNNER_UNAVAILABLE;
+    logger.error("Cron: scheduled job runner failed", { jobName: job.name, errorCode, error });
+    return { name: job.name, status: "failed", errorCode, summary: null };
+  }
 }
 
-/** Runs every job of the route, even after one fails: the scheduler runs them independently. */
+/**
+ * Runs every job of the route, even after one fails or its runner throws: the
+ * scheduler runs them independently.
+ */
 async function runDoorJobs(jobs: readonly ScheduledJobDefinition[]): Promise<DoorJobResult[]> {
   const results: DoorJobResult[] = [];
   for (const job of jobs) results.push(await runDoorJob(job));
@@ -108,11 +134,11 @@ for (const [route, jobs] of DOOR_JOBS) {
       const status = statusFor(results);
       res.status(status).json({ success: status === 200, jobs: results, timestamp: new Date().toISOString() });
     } catch (error) {
-      // The lock or the journal was unavailable; the job did not run.
-      logger.error("Cron: scheduled job runner failed", { route, error });
+      // Each job's runner errors are its own result above; this is anything else.
+      logger.error("Cron: the door failed", { route, error });
       res.status(500).json({
         success: false,
-        error: { code: "JOB_RUNNER_UNAVAILABLE", message: "The job could not be started" },
+        error: { code: "CRON_DOOR_FAILED", message: "The cron door failed; check the job journal for each job's outcome" },
       });
     }
   });

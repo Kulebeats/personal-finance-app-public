@@ -1,10 +1,11 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
-import { accounts, budgetPeriods, budgets, categories, categoryGroups, householdMembers, householdPreferences, households, providerFxQuotes, transactions, transactionSplits, type Budget } from "@shared/schema";
+import { accounts, budgetPeriods, budgets, categories, categoryGroups, householdMembers, householdPreferences, households, transactions, transactionSplits, type Budget } from "@shared/schema";
 import { db } from "../db";
 import { readableMembershipPredicate, visibleTransactionPredicate } from "../core/authz/transaction-visibility";
 import { ForbiddenError } from "../core/errors";
 import { assertBudgetReadContext, type BudgetReadContext } from "./BudgetReadContext";
 import { BUDGET_GROUP_TYPES } from "./budgetGroupTypes";
+import { budgetFlowRates } from "./fx/budgetFlowRates";
 import type { BudgetSpendInputs } from "./BudgetSpendBatchQueries";
 
 export interface BudgetProgressInputs extends BudgetSpendInputs, Record<string, unknown> {
@@ -15,7 +16,7 @@ export interface BudgetProgressInputs extends BudgetSpendInputs, Record<string, 
   categorySettings: Array<{ id: string; groupId: string | null; rolloverEnabled: boolean | null; rolloverStartBalance: string | null }>;
   groupSettings: Array<{ id: string; type: string; rolloverEnabled: boolean }>;
   periods: Array<{ id: string; budgetId: string; from: string; to: string; amount: string; currency: string | null; rolloverIn?: string | null; version: number }>;
-  lockTargets?: { transactions: string[]; accounts: string[]; categories: string[]; groups: string[]; budgets: string[]; periods: string[]; quotes: string[] };
+  lockTargets?: { transactions: string[]; accounts: string[]; categories: string[]; groups: string[]; budgets: string[]; periods: string[]; fxOverrides: string[]; fxRates: string[] };
 }
 
 /** Limits, preferences, identity, both months, audience and provider evidence
@@ -82,11 +83,7 @@ export function budgetProgressInputsQuery(householdId: string, year: number, mon
     where exists(select 1 from current_budgets b where b.category_id=f.category_id or b.category_group_id=f.group_id
       or (b.is_flex_bucket=true and f.group_id is not null and f.type='expense'))
   ), selected_quotes as (
-    select distinct on(q.from_currency,q.effective_date) q.* from ${providerFxQuotes} q cross join base
-    where q.to_currency=base.currency and q.from_currency<>base.currency and q.provider in ('yahoo_finance','exchangerate_api')
-      and q.quoted_at<=transaction_timestamp() and (q.quoted_at at time zone 'UTC')::date=q.effective_date and q.valid_through>=q.effective_date
-      and exists(select 1 from grouped_flows f where f.currency=q.from_currency and f.date=q.effective_date and f.amount<>0)
-    order by q.from_currency,q.effective_date,q.quoted_at desc,q.provider,q.id
+    ${budgetFlowRates(householdId, sql`(select currency from base)`)}
   ) select ${permitted} as allowed,(select currency from base) as currency,
     ${context.kind === "actor" ? sql`(select role::text from ${householdMembers} where household_id=${householdId}::uuid and user_id=${context.actor.userId}::uuid)` : sql`null`} as "readerRole",
     jsonb_build_object('autoRolloverBudget',coalesce((select auto_rollover from base),false),'rolloverPercentage',coalesce((select rollover_percentage from base),100),
@@ -102,9 +99,8 @@ export function budgetProgressInputsQuery(householdId: string, year: number, mon
       'amount',budget_amount::text,'currency',currency,'version',version) order by id) from relevant_periods),'[]'::jsonb) as periods,
     coalesce((select jsonb_agg(jsonb_build_object('categoryId',category_id,'groupId',group_id,'type',type::text,'date',to_char(date,'YYYY-MM-DD'),
       'currency',currency,'amount',amount::text,'invalid',invalid) order by category_id,type,date,currency) from grouped_flows),'[]'::jsonb) as flows,
-    coalesce((select jsonb_agg(jsonb_build_object('from',from_currency,'date',to_char(effective_date,'YYYY-MM-DD'),'rate',rate::text,
-      'id',id,'provider',provider,'quotedAt',to_char(quoted_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'validThrough',to_char(valid_through,'YYYY-MM-DD'))
-      order by from_currency,effective_date) from selected_quotes),'[]'::jsonb) as quotes,false as "invalidSplits",
+    coalesce((select jsonb_agg(jsonb_build_object('from',from_currency,'date',to_char(effective_date,'YYYY-MM-DD'),'rate',rate::text)
+      order by from_currency,effective_date) from selected_quotes where rate is not null),'[]'::jsonb) as quotes,false as "invalidSplits",
     jsonb_build_object('transactions',coalesce((select jsonb_agg(parent_id order by parent_id) from used_parents),'[]'::jsonb),
       'accounts',coalesce((select jsonb_agg(id order by id) from(select distinct account_id as id from used_parents) s),'[]'::jsonb),
       'categories',coalesce((select jsonb_agg(id order by id) from(select category_id as id from eligible_flows where parent_id in(select parent_id from used_parents)
@@ -114,7 +110,8 @@ export function budgetProgressInputsQuery(householdId: string, year: number, mon
         union select c.group_id from eligible_categories c inner join current_budgets b on b.category_id=c.id where c.group_id is not null) s),'[]'::jsonb),
       'budgets',coalesce((select jsonb_agg(id order by id) from current_budgets),'[]'::jsonb),
       'periods',coalesce((select jsonb_agg(id order by id) from relevant_periods),'[]'::jsonb),
-      'quotes',coalesce((select jsonb_agg(id order by id) from selected_quotes),'[]'::jsonb)) as "lockTargets"`;
+      'fxOverrides',coalesce((select jsonb_agg(id order by id) from(select distinct override_id as id from selected_quotes where override_id is not null) s),'[]'::jsonb),
+      'fxRates',coalesce((select jsonb_agg(id order by id) from(select distinct shared_id as id from selected_quotes where shared_id is not null) s),'[]'::jsonb)) as "lockTargets"`;
 }
 
 export async function readBudgetProgressInputs(householdId: string, year: number, month: number, context: BudgetReadContext,

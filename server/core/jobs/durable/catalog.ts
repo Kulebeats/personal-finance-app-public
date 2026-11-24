@@ -31,7 +31,7 @@ export const REQUIRED_JOB_CATALOG: readonly CatalogEntry[] = Object.freeze([
   source("grz.coupon-due", "grz", ["GRZ schedule/payment surface"], null, "unresolved", ["missing-producer"]),
   source("grz.bond-maturity", "grz", ["master R14 maturity family"], null, "unresolved", ["missing-producer"]),
   source("outbox.dispatch", "outbox", ["server/core/events/processor.ts"], "event processor", "external"),
-  source("receipts.match", "receipts", ["server/core/jobs/receiptMatcher.ts"], "receipt matching queue", "database"),
+  source("receipts.match", "receipts", ["server/jobs/receiptMatcher.ts"], "receipt matching queue", "database"),
   source("receipts.retry", "receipts", ["server/services/receipt/matching.service.ts"], "receipt retry path", "database"),
   source("recap.weekly", "recap", ["scheduler", "processWeeklyRecapEmails"], "weekly-recap", "external"),
   source("security.daily-report", "security", ["scheduler"], "daily-security-report", "external"),

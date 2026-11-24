@@ -50,6 +50,12 @@ export interface JobLockRequest {
   readonly lockKey: number;
   /** The job and its scheduled slot; see schedulePeriod.ts. */
   readonly periodIdentity: string;
+  /**
+   * Bounds this request's wait for the job lock instead of the timing's
+   * maxWaitMs. The HTTP cron door passes 0: it answers JOB_BUSY at once rather
+   * than hold a pool connection while an earlier period runs.
+   */
+  readonly maxWaitMs?: number;
 }
 
 export interface JobLease {
@@ -81,6 +87,9 @@ function validate(request: JobLockRequest): void {
   if (!Number.isInteger(lockKey) || lockKey <= 0 || lockKey > MAX_INT4) throw new Error("Invalid scheduler lock key");
   if (typeof periodIdentity !== "string" || periodIdentity.length === 0 || periodIdentity.length > MAX_PERIOD_IDENTITY_LENGTH) {
     throw new Error("Invalid scheduler period identity");
+  }
+  if (request.maxWaitMs !== undefined && (!Number.isInteger(request.maxWaitMs) || request.maxWaitMs < 0)) {
+    throw new Error("Invalid scheduler lock wait");
   }
 }
 
@@ -178,7 +187,8 @@ async function holdAndRun<T>(
     return { outcome: { acquired: false, reason: "PERIOD_HELD" }, isClean: true };
   }
   const releasePeriod = () => unlock(client, PERIOD_UNLOCK_SQL, [periodKey], request.lockKey);
-  const waited = await settle(() => waitForJobLock(client, request.lockKey, timing));
+  const waitTiming = request.maxWaitMs === undefined ? timing : { ...timing, maxWaitMs: request.maxWaitMs };
+  const waited = await settle(() => waitForJobLock(client, request.lockKey, waitTiming));
   if (!waited.isOk) {
     await releasePeriod();
     throw waited.error;

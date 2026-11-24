@@ -17,8 +17,8 @@
  * other people's stay. A's own invitation to B at an address A left for B keeps
  * B's address. A who goes X -> Y -> X gets the tombstone in rows from both X
  * periods and the Y period, not in a row from the gap when nobody held X.
- * Another account registering A's address in another case while A holds it does
- * not make rows about A keep A's address.
+ * Another account cannot register A's address in another case while A holds it
+ * (users_email_lower_unique); rows about A still take A's tombstone.
  * Real HTTP registration, e-mail change and erasure against real Postgres;
  * only mail transport is stubbed.
  */
@@ -296,11 +296,15 @@ it("A who changes X to Y and back to X: rows written while A held each address t
   expect(await securityDetails(gap)).toEqual({ email: home, reason: "bad_password" });
 }, 120_000);
 
-it("a case-variant sign-up while A holds the address does not keep A's address in rows about A", async () => {
+it("a case-variant sign-up while A holds the address is refused, and rows about A still take A's tombstone", async () => {
   const held = `a49-case-${run}@example.invalid`;
   const member = await registerVerified(held, "case");
-  // Another account registers the same address in another case while A still holds it.
-  await registerVerified(held.toUpperCase(), "case-variant");
+  // Since users_email_lower_unique (migration 0061) no second account can hold A's address in
+  // another case, so the sign-up is refused and nobody but A ever holds it.
+  await request(app).post("/api/auth/register")
+    .send({ email: held.toUpperCase(), username: `a49-case-variant-${run}`, password }).expect(409);
+  const holders = await db.select({ id: users.id }).from(users).where(sql`lower(${users.email}) = lower(${held})`);
+  expect(holders.map(row => row.id)).toEqual([member]);
   const [audit] = await db.insert(auditLogs).values({ householdId, userId: member, action: "UPDATE",
     entityType: "user", entityId: member, details: { email: held } }).returning();
   auditIds.push(audit.id);
