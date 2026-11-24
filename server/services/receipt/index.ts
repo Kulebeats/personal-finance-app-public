@@ -9,7 +9,7 @@
 
 import type { OcrExtractedData, PendingReceipt } from "@shared/schema";
 import { receiptUploadService } from "./upload.service";
-import { receiptMatchingService, type MatchingQueueTotals } from "./matching.service";
+import { receiptMatchingService, type MatchingQueueTotals, type MatchOrigin } from "./matching.service";
 import { receiptTransactionService } from "./transaction.service";
 import { receiptQueryService } from "./query.service";
 import type { ReceiptUpload } from "./image";
@@ -64,7 +64,7 @@ export class ReceiptService {
       ocrData,
       confidence,
       rawText,
-      (rId, hId) => this.attemptMatch(rId, hId, actor.userId, true)
+      (rId, hId) => this.attemptMatch(rId, hId, actor.userId, "after-ocr")
     );
   }
 
@@ -77,20 +77,20 @@ export class ReceiptService {
     receiptId: string,
     householdId: string,
     actorUserId?: string,
-    afterOcrCommit = false,
+    origin: MatchOrigin = "request",
   ): Promise<{ matched: boolean; transactionId?: string }> {
     return receiptMatchingService.attemptMatch(
       receiptId,
       householdId,
       (rId, tId, hId, uId) => this.linkReceiptToTransaction(rId, tId, hId, uId),
       actorUserId,
-      afterOcrCommit,
+      origin,
     );
   }
 
   async processMatchingQueue(): Promise<MatchingQueueTotals> {
     return receiptMatchingService.processMatchingQueue(
-      (receiptId, householdId) => this.attemptMatch(receiptId, householdId)
+      (receiptId, householdId) => this.attemptMatch(receiptId, householdId, undefined, "queue")
     );
   }
 

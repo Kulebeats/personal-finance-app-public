@@ -19,6 +19,16 @@ import {
 
 type MatchCandidate = Transaction;
 
+/**
+ * Who asked for the match: a member's request, the automatic match after an
+ * OCR write commits, or the scheduled queue (receipts.match).
+ */
+export type MatchOrigin = "request" | "after-ocr" | "queue";
+
+/** A link refused for this receipt (access lost, transaction changed), not a fault. */
+const isRefusedLink = (error: unknown): boolean => error instanceof ForbiddenError ||
+  error instanceof NotFoundError || error instanceof ConflictError || error instanceof ValidationError;
+
 type ScoredCandidate = {
   transaction: MatchCandidate;
   score: number;
@@ -33,13 +43,13 @@ export class ReceiptMatchingService {
     householdId: string,
     linkCallback?: (receiptId: string, transactionId: string, householdId: string, userId: string) => Promise<boolean>,
     actorUserId?: string,
-    afterOcrCommit = false,
+    origin: MatchOrigin = "request",
   ): Promise<{ matched: boolean; transactionId?: string }> {
     const receipt = actorUserId
       ? await receiptRepository.findForSignedMatch(receiptId, householdId, actorUserId)
       : await receiptRepository.findById(receiptId);
     if (!receipt || receipt.householdId !== householdId) {
-      if (afterOcrCommit) return { matched: false };
+      if (origin === "after-ocr") return { matched: false };
       throw new NotFoundError("Receipt not found");
     }
 
@@ -85,11 +95,13 @@ export class ReceiptMatchingService {
         const linked = await linkCallback(receiptId, bestMatch.transaction.id, householdId, matchingUserId);
         return linked ? { matched: true, transactionId: bestMatch.transaction.id } : { matched: false };
       } catch (error: unknown) {
+        if (origin === "request" || !isRefusedLink(error)) throw error;
         // Automatic matching follows a committed OCR write. A denied or
         // outdated match leaves the result unmatched without exposing details.
-        if (afterOcrCommit && (error instanceof ForbiddenError || error instanceof NotFoundError ||
-          error instanceof ConflictError || error instanceof ValidationError)) return { matched: false };
-        throw error;
+        if (origin === "after-ocr") return { matched: false };
+        // The queue counts a refused link as an unmatched attempt below, so the
+        // receipt reaches no_match instead of failing every daily run.
+        logger.warn("Receipt match: link refused, retry scheduled", { receiptId });
       }
     }
 
