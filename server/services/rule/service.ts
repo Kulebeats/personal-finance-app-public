@@ -9,6 +9,7 @@
 import { ruleRepository } from "../../repositories/RuleRepository";
 import { transactionRepository } from "../../repositories/TransactionRepository";
 import { type Transaction } from "@shared/schema";
+import { NotFoundError } from "../../core/errors";
 import { logger } from "../../utils/logger";
 import { withTransaction } from "../../utils/withTransaction";
 import type { Rule, MerchantCache, PlannedEffect, BlockedRuleReferences, BlockedRuleRun } from "./types";
@@ -323,7 +324,7 @@ export class RuleService {
   ): Promise<number> {
     const rule = await ruleRepository.findByIdAndHousehold(ruleId, householdId);
     if (!rule) {
-      throw new Error("Rule not found");
+      throw new NotFoundError("Rule");
     }
 
     // Fetch up to 100 recent visible transactions to test against
@@ -363,7 +364,7 @@ export class RuleService {
   > {
     const rule = await ruleRepository.findByIdAndHousehold(ruleId, householdId);
     if (!rule) {
-      throw new Error("Rule not found");
+      throw new NotFoundError("Rule");
     }
 
     // SCP-334: enforce visibility — a member must NOT be able to dry-run a rule
@@ -376,7 +377,7 @@ export class RuleService {
       userId
     );
     if (!transaction) {
-      throw new Error("Transaction not found");
+      throw new NotFoundError("Transaction");
     }
 
     const merchantCache: MerchantCache = new Map();
