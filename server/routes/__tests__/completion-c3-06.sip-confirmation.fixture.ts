@@ -105,9 +105,17 @@ export async function tick(app: Express) {
   return response;
 }
 
+type DoorJob = { name: string; status?: string; summary?: Record<string, unknown> };
+type DoorResponse = { body: { jobs: readonly DoorJob[] } };
+
+/** The recurring-purchase job's result from a door response. */
+export function purchaseJob(response: DoorResponse) {
+  return response.body.jobs.find((job) => job.name === "investments.recurring-purchase");
+}
+
 /** The recurring-purchase job's journal summary from a door response. */
-export function purchaseSummary(response: { body: { jobs: readonly { name: string; summary?: Record<string, unknown> }[] } }) {
-  return response.body.jobs.find((job) => job.name === "investments.recurring-purchase")?.summary;
+export function purchaseSummary(response: DoorResponse) {
+  return purchaseJob(response)?.summary;
 }
 
 export async function configureConfirmationCalendar(app: Express, fixture: ConfirmationFixture, timeZone = "Africa/Lusaka") {

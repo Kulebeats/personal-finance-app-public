@@ -21,6 +21,8 @@ const DAILY_JOBS = [
   "security.daily-report",
   // A-21
   "market.stale-price-alerts", "recurring.remind", "goals.deadlines", "budget.alerts",
+  // AH-11
+  "security.mfa-reminders",
   // OPS-007: runs daily; each user is sent on their own day.
   "recap.weekly",
 ] as const;
