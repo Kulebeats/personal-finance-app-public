@@ -9,13 +9,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import request from "supertest";
 import { eq, inArray } from "drizzle-orm";
 import { db, pool } from "../../../db";
+import type { PerformanceDataPoint as PerformancePoint } from "@shared/investment-performance";
 import {
   accountBalanceSnapshots, accounts, auditLogs, householdFxRateOverrides, householdMembers, households, investmentTransactions, users,
 } from "@shared/schema";
 import { getTestApp } from "../../../__tests__/fixtures";
 import { hashPassword } from "../../../auth";
 
-interface PerformancePoint { date: string; value: number; twrIndex?: number; twrReturnPercent?: number }
 interface Flow { amount: string; currency: string; fxRate?: string; amountZmw?: string }
 
 const password = "SyntheticA08Return123!";
@@ -77,7 +77,10 @@ describe("A-08 investment returns are measured in the household currency", () =>
     // The dated ZMW base stored with the deposit (K200 at 20) is not a USD amount.
     const { cookie } = await seedUsdHousehold("USD", { amount: "10.00", currency: "USD", fxRate: "20.00000000", amountZmw: "200.00" });
     const series = await readSeries(cookie, route);
-    expect(series.map(point => [point.date, point.value])).toEqual([[FIRST_DAY, 100], [SECOND_DAY, 110]]);
+    expect(series.map(point => [point.date, point.value])).toEqual([
+      [FIRST_DAY, { amount: "100.00", currency: "USD" }],
+      [SECOND_DAY, { amount: "110.00", currency: "USD" }],
+    ]);
     expect(series[1]).toMatchObject({ twrIndex: 100, twrReturnPercent: 0 });
   });
 

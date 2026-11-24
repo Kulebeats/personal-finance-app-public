@@ -18,23 +18,26 @@ export function getCurrencySymbol(currency: string): string {
 }
 
 /**
- * Format a number as currency based on user settings
+ * Format currency using the viewer's number settings. Accept decimal strings
+ * so the caller can keep every digit from an exact MoneyDto.
  */
 export function formatCurrency(
-  amount: number,
+  amount: number | `${number}`,
   currency: string = "ZMW",
   numberFormat: string = "US"
 ): string {
-  const absAmount = Math.abs(amount);
   const symbol = getCurrencySymbol(currency);
+  const negative = typeof amount === "number" ? amount < 0 : amount.startsWith("-");
+  const absAmount = typeof amount === "number" ? Math.abs(amount)
+    : negative ? amount.slice(1) as `${number}` : amount;
 
-  const formatted = absAmount.toLocaleString(numberFormat === "EU" ? "de-DE" : "en-US", {
+  const formatted = new Intl.NumberFormat(numberFormat === "EU" ? "de-DE" : "en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  });
+  }).format(absAmount);
 
   // Add currency symbol
-  const sign = amount < 0 ? "-" : "";
+  const sign = negative ? "-" : "";
   return `${sign}${symbol}${formatted}`;
 }
 

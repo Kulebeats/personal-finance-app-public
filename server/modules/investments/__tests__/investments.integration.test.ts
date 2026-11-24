@@ -1157,8 +1157,8 @@ describe("Investments HTTP API Integration Tests", () => {
   describe("GET /api/investments/performance", () => {
     it("returns performance history", async () => {
       mockPerformanceService.gethistory.mockResolvedValue([
-        { date: "2026-01-01", value: 45000 },
-        { date: "2026-01-15", value: 48000 },
+        { date: "2026-01-01", value: { amount: "45000.00", currency: "ZMW" } },
+        { date: "2026-01-15", value: { amount: "48000.00", currency: "ZMW" } },
       ]);
 
       const response = await request(app)
@@ -1168,6 +1168,7 @@ describe("Investments HTTP API Integration Tests", () => {
 
       expect(response.body.success).toBe(true);
       expect(response.body.data).toHaveLength(2);
+      expect(response.body.data[0].value).toEqual({ amount: "45000.00", currency: "ZMW" });
     });
   });
 
