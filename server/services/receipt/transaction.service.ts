@@ -33,6 +33,7 @@ import { MATCH_AMOUNT_TOLERANCE } from "./matching";
 import { Money } from "../../core/money";
 import { lockedConversionResult, receiptRequestHash, requireVisibleReceiptPosting } from "./conversion-evidence";
 import { businessAuditService } from "../BusinessAuditService";
+import type { MatchOrigin } from "./matching.service";
 import { lockTransactionCreateGrant } from "../../repositories/TransactionCreateBoundary";
 import { auditTransactionUpdate, isPrivateTransactionAudit } from "../transaction/updateAudit";
 import { isPostgresError } from "../../utils/postgresError";
@@ -40,6 +41,12 @@ import { isHouseholdRole } from "../../core/authz/capabilities";
 import { normalizeTagName } from "../../modules/tags/tags.name-guard";
 
 const RECEIPT_IMPORT_TAG = normalizeTagName("Receipt Import");
+
+export interface ReceiptLinkOptions {
+  skipAmountValidation?: boolean;
+  ipAddress?: string;
+  origin?: MatchOrigin;
+}
 
 function assertReceiptAmount(receiptAmount: string, transactionAmount: string): void {
   const diff = new Money(receiptAmount).abs().subtract(new Money(transactionAmount).abs()).abs();
@@ -62,8 +69,12 @@ export class ReceiptTransactionService {
     transactionId: string,
     householdId: string,
     userId?: string,
-    options?: { skipAmountValidation?: boolean; ipAddress?: string }
+    options?: ReceiptLinkOptions,
   ): Promise<boolean> {
+    const queued = options?.origin === "queue";
+    const auditUserId = queued ? null : userId ?? null;
+    const source = queued ? { source: "receipts.match" }
+      : options?.origin === "after-ocr" ? { method: "auto" } : {};
     const visibilityUserId = userId ?? (await receiptRepository.findById(receiptId))?.uploadedBy;
     if (!visibilityUserId) throw new NotFoundError("Receipt not found");
     const receipt = await receiptRepository.findForSignedMatch(receiptId, householdId, visibilityUserId);
@@ -113,10 +124,10 @@ export class ReceiptTransactionService {
           {
             onWrite: async (writeTx, snapshot) => {
               await auditTransactionUpdate(writeTx, {
-                householdId, userId: userId ?? null, before: snapshot.before, after: snapshot.after,
+                householdId, userId: auditUserId, before: snapshot.before, after: snapshot.after,
                 privateAudit: snapshot.privateAudit || await isPrivateTransactionAudit(writeTx, snapshot.after),
                 onlyFields: ["merchantId", "name"], ipAddress: options?.ipAddress,
-                metadata: { operation: "receiptMatch", receiptId },
+                metadata: { operation: "receiptMatch", receiptId, ...source },
               });
             },
           },
@@ -135,8 +146,8 @@ export class ReceiptTransactionService {
       await this.addReceiptImportTagWithTx(tx, transactionId, householdId);
       // The link audit is part of the match, so a failed audit undoes the link.
       await businessAuditService.log({
-        tx, userId: userId ?? null, householdId, action: "LINK", entityType: "receipt", entityId: receiptId,
-        details: { transactionId }, ipAddress: options?.ipAddress,
+        tx, userId: auditUserId, householdId, action: "LINK", entityType: "receipt", entityId: receiptId,
+        details: { transactionId, ...source }, ipAddress: options?.ipAddress,
       });
       return true;
     });

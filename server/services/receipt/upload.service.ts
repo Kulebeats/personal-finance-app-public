@@ -13,6 +13,8 @@ import { receiptRepository } from "../../repositories/ReceiptRepository";
 import { logger } from "../../utils/logger";
 import { NotFoundError } from "../../utils/errorHandler";
 import { isPostgresError } from "../../utils/postgresError";
+import { withTransaction } from "../../utils/withTransaction";
+import { businessAuditService } from "../BusinessAuditService";
 import {
   validateFile,
   optimizeImage,
@@ -50,7 +52,8 @@ export class ReceiptUploadService {
   async uploadReceipt(
     upload: ReceiptUpload,
     actor: HouseholdContext,
-    idempotencyKey?: string
+    idempotencyKey?: string,
+    ipAddress?: string,
   ): Promise<{
     receiptId: string;
     isDuplicate: boolean;
@@ -116,21 +119,27 @@ export class ReceiptUploadService {
     // one whose outcome is unknown is re-read, and the files stay unless the
     // insert certainly rolled back (a committed row may name them).
     try {
-      await receiptRepository.create({
-        id: receiptId,
-        householdId,
-        uploadedBy: userId,
-        filename,
-        originalFilename: upload.originalFilename,
-        mimeType: storedMimeType,
-        size: optimizedBuffer.length,
-        storagePath,
-        thumbnailPath,
-        ocrStatus: "pending",
-        matchStatus: "pending",
-        idempotencyKey: idempotencyKey || undefined,
-        imageHash,
-        nextMatchAt: new Date(),
+      await withTransaction(async tx => {
+        await receiptRepository.create({
+          id: receiptId,
+          householdId,
+          uploadedBy: userId,
+          filename,
+          originalFilename: upload.originalFilename,
+          mimeType: storedMimeType,
+          size: optimizedBuffer.length,
+          storagePath,
+          thumbnailPath,
+          ocrStatus: "pending",
+          matchStatus: "pending",
+          idempotencyKey: idempotencyKey || undefined,
+          imageHash,
+          nextMatchAt: new Date(),
+        }, tx);
+        await businessAuditService.logCreate({
+          tx, userId, householdId, entityType: "receipt", entityId: receiptId, ipAddress,
+          newValue: { filename: upload.originalFilename, size: upload.size, mimeType: upload.mimeType },
+        });
       });
     } catch (error) {
       if (idempotencyKey && isPostgresError(error, "23505", "pending_receipts_idempotency_key_unique")) {
@@ -169,7 +178,8 @@ export class ReceiptUploadService {
     ocrData: OcrExtractedData,
     confidence: number,
     rawText?: string,
-    attemptMatch?: (receiptId: string, householdId: string) => Promise<{ matched: boolean; transactionId?: string }>
+    attemptMatch?: (receiptId: string, householdId: string) => Promise<{ matched: boolean; transactionId?: string }>,
+    ipAddress?: string,
   ): Promise<{ matched: boolean; transactionId?: string }> {
     // Sanitize extracted data
     const sanitizedData = sanitizeOcrData(ocrData);
@@ -184,7 +194,15 @@ export class ReceiptUploadService {
       ocrData: sanitizedData,
       ocrConfidence: confidence.toString(),
       ocrProcessedAt: new Date(),
-    });
+    }, tx => businessAuditService.logUpdate({
+      tx, userId: actor.userId, householdId: actor.householdId, entityType: "receipt",
+      entityId: receiptId, ipAddress, newValue: { ocrStatus: "completed", ocrConfidence: confidence.toString() },
+      metadata: {
+        hasAmount: Boolean(ocrData.amount), hasDate: Boolean(ocrData.date),
+        hasMerchant: Boolean(ocrData.merchantName), itemsCount: ocrData.lineItems?.length ?? 0,
+        hasRawText: Boolean(rawText),
+      },
+    }));
     if (!isStored) throw new NotFoundError("Receipt not found");
 
     // Trigger matching attempt if callback provided
@@ -198,9 +216,13 @@ export class ReceiptUploadService {
   /**
    * Delete a pending receipt
    */
-  async deleteReceipt(receiptId: string, actor: HouseholdContext): Promise<void> {
+  async deleteReceipt(receiptId: string, actor: HouseholdContext, ipAddress?: string): Promise<void> {
     // R6-08: a receipt the caller cannot read is a 404, before any matched check.
-    const receipt = await receiptRepository.deleteVisible(actor, receiptId);
+    const receipt = await receiptRepository.deleteVisible(actor, receiptId, (tx, removed) =>
+      businessAuditService.logDelete({
+        tx, userId: actor.userId, householdId: actor.householdId, entityType: "receipt", entityId: receiptId,
+        oldValue: { filename: removed.originalFilename }, ipAddress,
+      }));
     if (!receipt) throw new NotFoundError("Receipt not found");
 
     // Delete files (stored objects, or legacy files on the old uploads disk).
