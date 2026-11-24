@@ -346,6 +346,9 @@ export const users = pgTable("users", {
   backupCodesExpiryIdx: index("idx_users_backup_codes_expiry")
     .on(table.mfaBackupCodesGeneratedAt)
     .where(sql`mfa_enabled = true AND mfa_backup_codes IS NOT NULL`),
+  // One account per address whatever its case: register, sign-in, reset and
+  // resend all look e-mail up with lower() (UserRepository.sameEmail).
+  emailLowerUnique: uniqueIndex("users_email_lower_unique").on(sql`lower(${table.email})`),
 }));
 
 /**

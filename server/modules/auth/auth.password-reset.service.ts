@@ -83,7 +83,7 @@ export const authPasswordResetService = {
 
     const issued = await withTransaction(async (tx) => {
       const [current] = await tx.select().from(users).where(eq(users.id, user.id)).for("update");
-      if (!current || current.erasedAt || current.passwordHash.startsWith("!erased!") || current.email !== email || current.email !== user.email) return;
+      if (!current || current.erasedAt || current.passwordHash.startsWith("!erased!") || current.email !== user.email) return;
       // Invalidate any previous outstanding tokens for this user.
       await tx
         .update(passwordResetTokens)
