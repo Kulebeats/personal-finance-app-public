@@ -3,7 +3,10 @@ import { eq, inArray } from "drizzle-orm";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { accounts, households, recurringTransactionHistory, recurringTransactionLinks, recurringTransactions, transactions } from "@shared/schema";
+import { shiftCalendarDate } from "@shared/household-calendar";
 import { db } from "../../../db";
+import { recurringRepository } from "../../../repositories/RecurringRepository";
+import { recurringService } from "../../../services/RecurringService";
 import { calendarClock } from "../../../services/householdCalendarToday";
 import { a, actors, app, ids, resetAccountsAndMembership, start, stop } from "../../tags/__tests__/completion-r04.tags.fixture";
 
@@ -165,6 +168,49 @@ describe("A-52 signed recurring calendar", () => {
     const links = await request(app).get(`${path}/transactions`).set(signedHeaders("member")).expect(200);
     expect(links.body.data).toEqual([]);
     await request(app).post(`${path}/link`).set(signedHeaders("owner")).send({ transactionId }).expect(404);
+  });
+
+  it("uses the household midnight for due processing and upcoming bill windows", async () => {
+    const utcDate = new Date().toISOString().slice(0, 10);
+    const today = shiftCalendarDate(utcDate, 1);
+    vi.spyOn(calendarClock, "now").mockReturnValue(new Date(`${utcDate}T22:15:00Z`));
+    await db.update(households).set({ timeZone: "Africa/Lusaka" }).where(eq(households.id, a));
+
+    const due = { id: randomUUID(), name: "Midnight bill", nextDueDate: today, endDate: today };
+    const boundary = { id: randomUUID(), name: "Last upcoming day", nextDueDate: shiftCalendarDate(today, 7) };
+    const later = { id: randomUUID(), name: "Beyond upcoming", nextDueDate: shiftCalendarDate(today, 8) };
+    const ended = { id: randomUUID(), name: "Ended yesterday", nextDueDate: utcDate, endDate: utcDate };
+    const rules = [due, boundary, later, ended];
+    await db.insert(recurringTransactions).values(rules.map<typeof recurringTransactions.$inferInsert>(rule => ({
+      ...rule, householdId: a, accountId: ids.sharedAccount, startDate: utcDate,
+      frequency: "monthly", type: "expense", amount: "24.00", isActive: true,
+    })));
+
+    const owner = signedHeaders("owner");
+    const process = (body: object) => request(app).post("/api/recurring/process").set(owner).send(body);
+    const dueIds = [ended.id, due.id];
+    const expectedUpcoming = [due.id, boundary.id];
+    try {
+      const defaultPreview = await process({ dryRun: true });
+      expect.soft(defaultPreview.status).toBe(200);
+      expect.soft(defaultPreview.body.data?.dueRules?.map((rule: { id: string }) => rule.id)).toEqual(dueIds);
+      const explicitPreview = await process({ dryRun: true, asOfDate: today });
+      expect.soft(explicitPreview.status).toBe(200);
+      expect.soft(explicitPreview.body.data?.dueRules?.map((rule: { id: string }) => rule.id)).toEqual(dueIds);
+      expect.soft((await process({ dryRun: true, asOfDate: shiftCalendarDate(today, 1) })).status).toBe(400);
+
+      const servicePreview = await recurringService.processRecurring(a, undefined, true);
+      expect.soft(servicePreview.dueRules?.map(rule => rule.id)).toEqual(dueIds);
+      expect.soft((await recurringRepository.findUpcoming(a, 7)).map(rule => rule.id)).toEqual(expectedUpcoming);
+      const upcoming = await request(app).get("/api/recurring/upcoming").set(owner).query({ days: 7 }).expect(200);
+      expect.soft(upcoming.body.data.map((rule: { id: string }) => rule.id)).toEqual(expectedUpcoming);
+      const summary = await request(app).get("/api/recurring/summary").set(owner).expect(200);
+      expect.soft(summary.body.data.upcomingCount).toBe(2);
+      const list = await request(app).get("/api/recurring").set(owner).expect(200);
+      expect.soft(list.body.data.map((rule: { id: string }) => rule.id)).toEqual([due.id, boundary.id, later.id]);
+    } finally {
+      await db.delete(recurringTransactions).where(inArray(recurringTransactions.id, rules.map(rule => rule.id)));
+    }
   });
 
   it("posts the next due occurrence once after an advanced payment is deleted", async () => {
