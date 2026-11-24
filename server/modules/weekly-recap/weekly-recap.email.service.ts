@@ -15,7 +15,7 @@ import { requireRecapRecipient } from "./weekly-recap.service";
 import { logger } from "../../utils/logger";
 import { db } from "../../db";
 import { withTransaction } from "../../utils/withTransaction";
-import { getPostgresError } from "../../utils/postgresError";
+import { classifyRecapBuildFailure, RecapCurrencyMissingError } from "./recap-failure";
 import { businessAuditService } from "../../services/BusinessAuditService";
 import { effectiveRecapEmail } from "../../repositories/UserNotificationPreferences";
 import { readDigestRelease, type DigestData } from "./digest-release";
@@ -304,7 +304,7 @@ async function prepareRecapEmail(
     // defaults to false, so an un-consented household is silently excluded.
     const grant = await readDeliveryGrant(userId, householdId, email);
     if (grant.outcome !== "ready") return { outcome: grant.outcome };
-    if (!grant.currency) throw new Error("Missing household currency for recap");
+    if (!grant.currency) throw new RecapCurrencyMissingError();
     const actor = await requireRecapRecipient(householdId, userId);
     // OPS-007: excluded upcoming bills are never read for the digest.
     const { includeRecurring } = await getWeeklyRecapSettings(userId);
@@ -313,11 +313,11 @@ async function prepareRecapEmail(
     if (release.outcome !== "ready") return { outcome: release.outcome };
     return { outcome: "ready", html: generateEmailTemplate(release.data, grant.currency) };
   } catch (error) {
-    // OPS-007 P2: a database or network error may pass by the next tick; the recap's own data
-    // (no currency, a refused recipient, a missing FX rate) will not, so it is not rebuilt that day.
-    const transient = getPostgresError(error) !== undefined || typeof (error as { errno?: unknown } | null)?.errno === "number";
-    logger.error("Failed to prepare weekly recap email", { userId, transient }, error as Error);
-    return { outcome: transient ? "failed" : "unbuildable" };
+    // OPS-007 P2: only the recap's own data (no currency, a refused recipient, a missing FX rate)
+    // settles the digest for the week; a database or network error, or anything unknown, is retried.
+    const outcome = classifyRecapBuildFailure(error);
+    logger.error("Failed to prepare weekly recap email", { userId, settledForWeek: outcome === "unbuildable" }, error as Error);
+    return { outcome };
   }
 }
 
