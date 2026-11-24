@@ -174,6 +174,19 @@ describe("scheduled-job health reads the runner's journal (real Postgres)", () =
     expect(health.jobs).toEqual([{ jobName, lastSuccessAt: null, stale: true }]);
   });
 
+  it("keeps a dated success visible when another legacy completion has no timestamp", async () => {
+    const now = new Date();
+    const completion = new Date(now.getTime() - 60_000);
+    const name = `${SCHEDULED_RUN_PREFIX}${daily.name}`;
+    await db.insert(jobs).values([
+      { name, status: "completed", startedAt: completion, completedAt: completion },
+      { name, status: "completed", startedAt: now, completedAt: null },
+    ]);
+
+    const health = await readScheduledJobsHealth({ specs, env: ENABLED, now });
+    expect(health.jobs[0]).toEqual({ jobName: daily.name, lastSuccessAt: completion.toISOString(), stale: false });
+  });
+
   it("falls back to process start only in a non-production process that runs the scheduler", async () => {
     const devRunning = await readScheduledJobsHealth({ specs, env: DEV_ENABLED, processStartedAt: new Date() });
     expect(devRunning.jobs.every((job) => !job.stale)).toBe(true);

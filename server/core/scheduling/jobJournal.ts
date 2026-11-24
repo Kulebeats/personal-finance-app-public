@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, min } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, min } from "drizzle-orm";
 import { jobs } from "@shared/schema";
 import { db } from "../../db";
 import { isPostgresError } from "../../utils/postgresError";
@@ -231,7 +231,7 @@ export async function listScheduledJobStatus(jobNames: readonly string[]): Promi
     name: jobs.name, status: jobs.status, lastError: jobs.lastError, startedAt: jobs.startedAt,
   }).from(jobs).where(inArray(jobs.name, names)).orderBy(jobs.name, desc(jobs.startedAt));
   const succeeded = await db.selectDistinctOn([jobs.name], { name: jobs.name, completedAt: jobs.completedAt })
-    .from(jobs).where(and(inArray(jobs.name, names), eq(jobs.status, "completed")))
+    .from(jobs).where(and(inArray(jobs.name, names), eq(jobs.status, "completed"), isNotNull(jobs.completedAt)))
     .orderBy(jobs.name, desc(jobs.completedAt));
   return jobNames.map((jobName) => {
     const run = latest.find((row) => row.name === journalName(jobName));
