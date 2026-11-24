@@ -7,6 +7,7 @@ import { db } from "../../../db";
 import { Money } from "../../../core/money";
 import { BudgetDenominationUnavailable } from "../../../core/money/budget-denomination";
 import { calculateBudgetSpentBatch } from "../../../repositories/BudgetSpendBatchQueries";
+import { getPostgresError } from "../../../utils/postgresError";
 import { a, b, actors, app, resetAccountsAndMembership, start, stop } from "../../tags/__tests__/completion-r04.tags.fixture";
 
 // FIN-06: Budgets (spend batch, progress, preview), the transaction summary and
@@ -17,6 +18,7 @@ import { a, b, actors, app, resetAccountsAndMembership, start, stop } from "../.
 const RATED = "CHF", UNRATED = "NOK";
 const group = randomUUID(), category = randomUUID(), budget = randomUUID(), account = randomUUID();
 const sharedRateIds: string[] = [];
+const positiveRateConstraint = "chk_fx_rates_positive";
 let month: string, firstDay: string, lastDay: string, flowDate: string, rateDate: string, year: number, monthNumber: number;
 const zmw = (amount: string) => ({ amount, currency: "ZMW" });
 
@@ -28,6 +30,26 @@ async function sharedRate(from: string, date: string, rate: string) {
   const id = randomUUID(); sharedRateIds.push(id);
   // Synthetic shared rate, shaped like the market refresh's fx_rates mirror.
   await db.insert(fxRates).values({ id, fromCurrency: from, toCurrency: "ZMW", rate, date, source: "yahoo_finance" });
+}
+
+async function legacySharedRate(rate: string) {
+  const id = randomUUID();
+  sharedRateIds.push(id);
+  await db.transaction(async tx => {
+    const existing = await tx.execute<{ definition: string }>(sql`
+      SELECT pg_get_constraintdef(oid) AS definition
+      FROM pg_constraint
+      WHERE conrelid = 'fx_rates'::regclass AND conname = ${positiveRateConstraint}
+    `);
+    const definition = existing.rows[0]?.definition;
+    if (definition) await tx.execute(sql`ALTER TABLE fx_rates DROP CONSTRAINT chk_fx_rates_positive`);
+    // Recreate the pre-0062 state on the marked synthetic target. The fixture
+    // and restored constraint become visible together to the signed requests.
+    await tx.insert(fxRates).values({ id, fromCurrency: UNRATED, toCurrency: "ZMW", rate, date: flowDate, source: "test_legacy_rate" });
+    if (definition) {
+      await tx.execute(sql.raw(`ALTER TABLE fx_rates ADD CONSTRAINT chk_fx_rates_positive ${definition}`));
+    }
+  });
 }
 async function householdRate(householdId: string, from: string, rate: string) {
   await db.insert(householdFxRateOverrides).values({ householdId, actorUserId: actors.get(householdId === a ? "owner" : "outsider")!.id,
@@ -128,6 +150,27 @@ describe("FIN-06 Budgets, the transaction summary and Reports share one FX resol
       await expense("15.00", UNRATED);
       await expectUnavailableEverywhere();
     });
+
+  it.each(["0.0000", "-2.5000", "NaN"])(
+    "returns the missing-rate error for the latest legacy rate %s even with an older positive quote",
+    async rate => {
+      await noOtherRates(UNRATED);
+      await expense("15.00", UNRATED);
+      await expectUnavailableEverywhere();
+
+      await sharedRate(UNRATED, rateDate, "2.5000");
+      await legacySharedRate(rate);
+      await expectUnavailableEverywhere();
+    },
+  );
+
+  it.each(["0.0000", "-2.5000", "NaN"])("rejects a new shared rate of %s", async rate => {
+    const outcome = await sharedRate(UNRATED, rateDate, rate).then(
+      () => undefined,
+      (error: unknown) => getPostgresError(error),
+    );
+    expect(outcome).toMatchObject({ code: "23514", constraint: positiveRateConstraint });
+  });
 
   it("re-reads the summary on every request: a new posting and a new rate show at once (FIN-17, no cache)", async () => {
     await noOtherRates(RATED);
