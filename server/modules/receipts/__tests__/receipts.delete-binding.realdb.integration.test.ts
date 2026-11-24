@@ -18,6 +18,7 @@ import { db, pool } from "../../../db";
 import { hashPassword } from "../../../auth";
 import { readUploadObject, removeUploadObject, uploadNameOf } from "../../../core/storage/upload-objects";
 import { createSignedHousehold, insertAccount, type SignedHousehold } from "../../../__tests__/signed-household-fixture";
+import { holdHouseholdLocks } from "../../household/__tests__/householdLockBarrier";
 
 const PASSWORD = "SyntheticReceiptDeleteBinding123!";
 
@@ -207,3 +208,33 @@ describe("NEW-32 receipt writes roll back on audit failure", () => {
     expect(await manifestCount()).toBe(priorCount);
   });
 });
+
+it("serializes a receipt DELETE with an ownership transfer on the same household", async () => {
+  const id = await insertReceipt(null);
+  const barrier = await holdHouseholdLocks([owner.householdId]);
+  const transfer = request(owner.app).post("/api/household/transfer-ownership")
+    .set(owner.headers).send({ newOwnerId: member.userId }).timeout(20_000).then(response => response);
+  const pending = [transfer];
+  void transfer.catch(() => undefined);
+  try {
+    // The transfer must get the household first. Before the fix the DELETE
+    // holds its membership row while its audit insert queues on the household.
+    await barrier.waitForWaiters(1);
+    const deletion = request(owner.app).delete(`/api/receipts/${id}`)
+      .set(owner.headers).timeout(20_000).then(response => response);
+    pending.push(deletion);
+    void deletion.catch(() => undefined);
+    await barrier.waitForWaiters(2);
+  } finally {
+    await barrier.release();
+    await Promise.allSettled(pending);
+  }
+  const [ownership, deletion] = await Promise.all(pending);
+  expect(ownership.status, JSON.stringify(ownership.body)).toBe(200);
+  expect(deletion.status, JSON.stringify(deletion.body)).toBe(200);
+  const roles = await db.select({ userId: householdMembers.userId, role: householdMembers.role })
+    .from(householdMembers).where(eq(householdMembers.householdId, owner.householdId));
+  expect(roles.filter(row => row.role === "owner")).toEqual([{ userId: member.userId, role: "owner" }]);
+  expect(await receiptExists(id)).toBe(false);
+  expect(await receiptAudits(id)).toMatchObject([{ action: "DELETE", userId: owner.userId }]);
+}, 25_000);
