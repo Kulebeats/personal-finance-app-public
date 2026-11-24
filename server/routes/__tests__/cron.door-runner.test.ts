@@ -13,7 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type NextFunction, type Request, type Response } from "express";
 import request from "supertest";
-import type { JobRunOutcome, ScheduledJobDefinition } from "../../core/scheduling/scheduledJob";
+import { JobOutcomeUnknownError, type JobRunOutcome, type ScheduledJobDefinition } from "../../core/scheduling/scheduledJob";
 import { SCHEDULED_JOB_SPECS } from "../../core/scheduling/jobCatalog";
 
 const runner = vi.hoisted(() => ({ run: vi.fn() }));
@@ -162,8 +162,39 @@ describe("the cron door runs catalogued jobs through the scheduler's runner", ()
 
     const response = await post("budget-rollover").expect(500);
 
-    expect(response.body).toMatchObject({ success: false });
+    expect(response.body).toMatchObject({ success: false,
+      jobs: [{ name: "budget.rollover", status: "failed", errorCode: "JOB_RUNNER_UNAVAILABLE", summary: null }] });
     expect(JSON.stringify(response.body)).not.toContain("synthetic journal outage");
+  });
+
+  it("a runner error on one job still runs the route's next job, as the scheduler runs them independently", async () => {
+    runner.run.mockRejectedValueOnce(Object.assign(new Error("synthetic lock outage"), { code: "57P01" }))
+      .mockResolvedValueOnce(completed);
+
+    const response = await post("investment-automation").expect(500);
+
+    expect(ranJobs()).toEqual(["investments.tbill-maturity", "investments.recurring-purchase"]);
+    expect(response.body).toMatchObject({ success: false, jobs: [
+      { name: "investments.tbill-maturity", status: "failed", errorCode: "JOB_RUNNER_UNAVAILABLE", summary: null },
+      { name: "investments.recurring-purchase", status: "completed" },
+    ] });
+  });
+
+  it("a journal failure after the work ran answers JOB_OUTCOME_UNKNOWN, not that the job could not start", async () => {
+    runner.run.mockRejectedValue(new JobOutcomeUnknownError("budget.rollover"));
+
+    const response = await post("budget-rollover").expect(500);
+
+    expect(response.body).toMatchObject({ success: false,
+      jobs: [{ name: "budget.rollover", status: "failed", errorCode: "JOB_OUTCOME_UNKNOWN", summary: null }] });
+    expect(JSON.stringify(response.body)).not.toContain("could not be started");
+  });
+
+  it("never waits for another period's job lock: the runner is asked for no wait, so a busy job answers 409 at once", async () => {
+    await post("recurring").expect(200);
+
+    expect(runner.run).toHaveBeenCalledWith(expect.objectContaining({ name: "recurring.materialize" }), undefined,
+      expect.any(Date), { jobLockWaitMs: 0 });
   });
 });
 
@@ -174,5 +205,12 @@ describe("the cron door refuses jobs held back from the scheduler", () => {
     expect(response.body).toMatchObject({ success: false, error: { code: "JOB_HELD" } });
     expect(runner.run).not.toHaveBeenCalled();
     expectNoDirectWork();
+  });
+
+  it("the scheduler's catalog has none of the held jobs, and leaves their lock keys 112 and 113 unused", () => {
+    const names = SCHEDULED_JOB_SPECS.map((spec) => spec.name);
+    for (const held of ["goals.status", "market.price-refresh", "market.price-alerts"]) expect(names).not.toContain(held);
+    const keys = SCHEDULED_JOB_SPECS.map((spec) => spec.lockKey);
+    for (const key of [112, 113]) expect(keys).not.toContain(key);
   });
 });

@@ -7,7 +7,7 @@
  *     so the door cannot post recurring transactions alongside the scheduler;
  *   - jobs held back from the scheduler are refused (409 JOB_HELD).
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import { and, eq } from "drizzle-orm";
 import { jobs } from "@shared/schema";
@@ -43,7 +43,15 @@ beforeAll(async () => {
   app = await getTestApp();
 }, 60_000);
 
+// The test derives the period from the same clock the door reads: frozen for
+// each test, so a slot boundary between the two reads cannot split them.
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date());
+});
+
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllEnvs();
 });
 
