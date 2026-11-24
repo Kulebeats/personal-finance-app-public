@@ -27,7 +27,9 @@ test("the transaction summary refreshes after a transaction is added", async ({ 
 
   await page.goto("/transactions");
   const summary = page.getByRole("region", { name: "Transaction summary" });
-  await expect(summary).toContainText(/\b0 transactions\b/);
+  // The count has its own element. Matching it exactly keeps the date range out of
+  // the match, and "10 transactions" does not pass for "0 transactions".
+  await expect(summary.getByText("0 transactions", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Add Transaction", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Add Transaction", exact: true });
@@ -44,7 +46,7 @@ test("the transaction summary refreshes after a transaction is added", async ({ 
   await expect(dialog).toBeHidden();
 
   // No reload: the open page must pick up the write by itself.
-  await expect(summary).toContainText(/\b1 transaction\b/);
+  await expect(summary.getByText("1 transaction", { exact: true })).toBeVisible();
   await expect(summary).toContainText("20.00");
   expect(responses.slice(responses.indexOf("write") + 1)).toContain("summary");
 });

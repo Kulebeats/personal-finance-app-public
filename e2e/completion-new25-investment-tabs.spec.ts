@@ -33,6 +33,13 @@ test("the Reports income link opens the investments tax tab", async ({ page }) =
   await signInAs(page, fixture);
 
   await page.goto("/reports");
+  // A new household gets the one-time reports onboarding dialog. It is modal, so the
+  // report tabs behind it are out of the accessibility tree until it closes.
+  const onboarding = page.getByRole("dialog", { name: "Welcome to Your Reports Dashboard", exact: true });
+  await expect(onboarding).toBeVisible();
+  await onboarding.getByRole("button", { name: "Skip for Now", exact: true }).click();
+  await expect(onboarding).toBeHidden();
+
   await page.getByRole("button", { name: "Income report tab", exact: true }).click();
   await page.getByRole("link", { name: "Investment Tax Reports", exact: true }).click();
 
