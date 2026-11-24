@@ -37,9 +37,6 @@ hypothesis until it is proven against code and a green CI run (Verification Rule
   re-check and morning reports (`REGISTER-RECHECK-<date>.md`, `MORNING-<date>.md`), which
   also sit untracked in the owner's main checkout, under that folder's `reviews/`, and are
   not in this repository.
-- **Linear.** This file has said since June 2026 that live remediation status is in Linear.
-  Whether Linear is still in use is an open question with the owner; until it is answered,
-  the Linear lines further down stand as written.
 - **Staging.** An Oracle Cloud VM runs the application on a two-week soak that started
   23 Nov 2026, with outbound mail through Brevo SMTP. Staging changes only on the owner's
   typed go, and only through the dedicated `safe-test-site` session. The production host is
@@ -708,7 +705,6 @@ Before marking ANY fix as done:
 - [ ] If the change touches more than one table/row: it is inside `withTransaction`, with
       `FOR UPDATE` on balance/owner/role paths
 - [ ] Used the correct status label (✅/⚠️/❌/🔍)
-- [ ] Linear issue moved to Done only after CI is green
 
 ---
 
@@ -725,9 +721,8 @@ Before marking ANY fix as done:
 > **Source-of-truth note.** `docs/issues/known-issues.md`, `docs/reviews/open-issues-summary.md`,
 > and `docs/security/risk-register.md` assert resolved items that the 2026-06-04 audit refuted
 > against code, and the January 2026 module scores in older docs do not agree with each other.
-> Treat them as historical. **Live status is in Linear** (open question, see Current state).
-> Do not edit these files to mark a fix done, and do not count `parseFloat → Number()` as a
-> remediation.
+> Treat them as historical; live status is where Current state says. Do not edit these files
+> to mark a fix done, and do not count `parseFloat → Number()` as a remediation.
 
 ### Code Review Skills (Slash Commands)
 
@@ -751,7 +746,7 @@ the verifier.
 
 **Starting work:** research first (read relevant files); use plan mode for multi-file tasks;
 use `docs/` context before asking. **During implementation:** incremental changes; run
-`npm run check` after each edit; update the Linear issue (not the status docs). **Before
+`npm run check` after each edit; report status in the PR (not the status docs). **Before
 finishing:** run the full suite + type check; check LOC limits; confirm CI is green on the
 branch before claiming done. **Communication:** concise; no over-explanation; link to files as
 `[file.ts:123](server/index-dev.ts#L123)`; report blockers with what you tried and why it failed.
