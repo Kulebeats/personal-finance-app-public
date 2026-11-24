@@ -6,7 +6,8 @@
  * on that date, else the shared rate dated on or before it (`fx_rates`, which
  * the market refresh fills from provider quotes). Another household's manual
  * rate is never read, and a missing rate is NULL — never 1. Callers fail
- * closed on NULL.
+ * closed on NULL. An invalid selected rate is also NULL; it does not authorize
+ * a fallback to a different row.
  *
  * @module repositories/fx/resolvedFxRate
  */
@@ -46,8 +47,13 @@ function sharedRateRow(currencyExpr: SQL, baseCurrency: FxBaseCurrency, dateExpr
      LIMIT 1`;
 }
 
+function positiveRate(rate: SQL): SQL {
+  // PostgreSQL numeric sorts NaN above Infinity, so > 0 alone accepts NaN.
+  return sql`CASE WHEN ${rate} > 0 AND ${rate} < 'Infinity'::numeric THEN ${rate} END`;
+}
+
 /**
- * The resolved rate for one currency on one date, or NULL when none exists.
+ * The resolved rate for one currency on one date, or NULL when unusable.
  *
  * @param householdId - The household whose own manual rates may apply
  * @param currencyExpr - SQL expression yielding the source currency
@@ -64,7 +70,9 @@ export function resolvedFxRate(
 ): SQL {
   const own = householdRateRow(householdId, currencyExpr, baseCurrency, onDateOf(dateExpr));
   const shared = sharedRateRow(currencyExpr, baseCurrency, dateExpr);
-  return sql`COALESCE((SELECT own.rate FROM (${own}) own), (SELECT shared.rate FROM (${shared}) shared))`;
+  return sql`(SELECT ${positiveRate(sql`selected.rate`)} FROM (
+    SELECT COALESCE((SELECT own.rate FROM (${own}) own), (SELECT shared.rate FROM (${shared}) shared)) AS rate
+  ) selected)`;
 }
 
 /**
@@ -81,8 +89,11 @@ export function resolvedFxRateSource(
 ): SQL {
   const own = householdRateRow(householdId, currencyExpr, baseCurrency, dateExpr);
   const shared = sharedRateRow(currencyExpr, baseCurrency, dateExpr);
-  return sql`(SELECT COALESCE(own.rate, shared.rate) AS rate, own.id AS override_id, shared.id AS shared_id
+  return sql`(SELECT usable.rate,
+    CASE WHEN usable.rate IS NOT NULL THEN own.id END AS override_id,
+    CASE WHEN usable.rate IS NOT NULL THEN shared.id END AS shared_id
     FROM (SELECT 1) seed
     LEFT JOIN LATERAL (${own}) own ON true
-    LEFT JOIN LATERAL (${shared}) shared ON own.id IS NULL)`;
+    LEFT JOIN LATERAL (${shared}) shared ON own.id IS NULL
+    CROSS JOIN LATERAL (SELECT ${positiveRate(sql`COALESCE(own.rate, shared.rate)`)} AS rate) usable)`;
 }
