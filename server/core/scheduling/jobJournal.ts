@@ -1,6 +1,7 @@
 import { and, desc, eq, inArray, min } from "drizzle-orm";
 import { jobs } from "@shared/schema";
 import { db } from "../../db";
+import { isPostgresError } from "../../utils/postgresError";
 import { SCHEDULED_JOB_SPECS } from "./jobCatalog";
 import { withTransaction } from "../../utils/withTransaction";
 
@@ -48,6 +49,8 @@ const journalName = (jobName: string): string => `${SCHEDULED_RUN_PREFIX}${jobNa
 
 /** A run whose period a newer run took over: its close is rejected (OPS-013 fencing). */
 export const RUN_SUPERSEDED = "RUN_SUPERSEDED";
+export const SCHEDULED_RUNNING_INDEX = "idx_jobs_scheduled_period_running";
+const SCHEDULED_COMPLETED_INDEX = "idx_jobs_scheduled_period_completed";
 
 export class RunSupersededError extends Error {
   readonly code = RUN_SUPERSEDED;
@@ -105,14 +108,25 @@ export async function hasCompletedPeriod(jobName: string, identity: string): Pro
 /** Close a running run; a run that is no longer `running` was superseded, and its close is rejected. */
 export async function finishJobRun(runId: string, finish: JobRunFinish): Promise<void> {
   const now = new Date();
-  const closed = await db.update(jobs).set({
-    status: finish.isOk ? "completed" : "failed",
-    completedAt: now,
-    updatedAt: now,
-    lastError: finish.errorCode,
-    result: finish.summary ?? null,
-  }).where(and(eq(jobs.id, runId), eq(jobs.status, "running"))).returning({ id: jobs.id });
-  if (closed.length === 0) throw new RunSupersededError(runId);
+  const running = and(eq(jobs.id, runId), eq(jobs.status, "running"));
+  try {
+    const closed = await db.update(jobs).set({
+      status: finish.isOk ? "completed" : "failed",
+      completedAt: now,
+      updatedAt: now,
+      lastError: finish.errorCode,
+      result: finish.summary ?? null,
+    }).where(running).returning({ id: jobs.id });
+    if (closed.length === 0) throw new RunSupersededError(runId);
+  } catch (error) {
+    if (!finish.isOk || !isPostgresError(error, "23505", SCHEDULED_COMPLETED_INDEX)) throw error;
+    // The period already has a committed completion. Close only the obsolete
+    // running row and keep the completed row and its outcome intact.
+    await db.update(jobs).set({
+      status: "failed", lastError: RUN_SUPERSEDED, completedAt: now, updatedAt: now,
+    }).where(running);
+    throw new RunSupersededError(runId);
+  }
 }
 
 const iso = (value: Date | null | undefined): string | null => (value ? value.toISOString() : null);
@@ -153,18 +167,34 @@ export async function recordCataloguedJobs(jobNames: readonly string[], at: Date
   const names = jobNames.map(cataloguedName);
   const existing = await db.select({ name: jobs.name }).from(jobs).where(inArray(jobs.name, names));
   const recorded = new Set(existing.map((row) => row.name));
-  const missing = names.filter((name) => !recorded.has(name));
-  if (missing.length > 0) await db.insert(jobs).values(missing.map((name) => markerRow(name, at)));
+  const missing = jobNames.filter((name) => !recorded.has(cataloguedName(name)));
+  if (missing.length === 0) return;
+  const attempts = await earliestStarts(missing.map(journalName));
+  await db.insert(jobs).values(missing.map((name) => {
+    const attempted = attempts.get(journalName(name));
+    // Save the grace anchor in the retained marker before run retention can
+    // remove the evidence. The marker's completion is still its record time.
+    return { ...markerRow(cataloguedName(name), at), startedAt: attempted && attempted < at ? attempted : at };
+  }));
 }
 
-/** When each job was first catalogued, for the jobs that have a record. */
+async function earliestStarts(names: string[]) {
+  const rows = await db.select({ name: jobs.name, first: min(jobs.startedAt) }).from(jobs)
+    .where(inArray(jobs.name, names)).groupBy(jobs.name);
+  return new Map(rows.map((row) => [row.name, row.first]));
+}
+
+/** Start of a catalogued job's grace period, including an earlier actual attempt. */
 export async function cataloguedSince(jobNames: readonly string[]): Promise<ReadonlyMap<string, Date>> {
   if (jobNames.length === 0) return new Map();
-  const rows = await db.select({ name: jobs.name, first: min(jobs.startedAt) }).from(jobs)
-    .where(inArray(jobs.name, jobNames.map(cataloguedName))).groupBy(jobs.name);
+  const names = jobNames.flatMap((name) => [cataloguedName(name), journalName(name)]);
+  const firstByName = await earliestStarts(names);
   const since = new Map<string, Date>();
-  for (const row of rows) {
-    if (row.first) since.set(row.name.slice(SCHEDULER_CATALOGUED_PREFIX.length), row.first);
+  for (const name of jobNames) {
+    const catalogued = firstByName.get(cataloguedName(name));
+    if (!catalogued) continue;
+    const attempted = firstByName.get(journalName(name));
+    since.set(name, attempted && attempted < catalogued ? attempted : catalogued);
   }
   return since;
 }

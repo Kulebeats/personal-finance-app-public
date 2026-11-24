@@ -16,7 +16,9 @@ import { isSchedulerEnabled, isSchedulerExpected, type FlagEnv } from "./schedul
  * or test database), falls back to its own start; in production a never-run
  * job with no persisted epoch is stale. A job added after that first start is
  * measured from when a running scheduler first catalogued it (jobJournal.ts),
- * so a deploy that adds a job does not read stale before its first slot.
+ * so a deploy that adds a job does not read stale before its first slot. If the
+ * job ran before its catalogue entry was recorded, that first attempt still
+ * counts toward the grace period.
  *
  * Readiness is also never healthy when the scheduler is switched off in a
  * profile that should run it (production; see schedulerConfig.ts), or when
@@ -29,6 +31,16 @@ export const STALE_INTERVAL_MULTIPLIER = 2;
 
 /** Module load is process start, to within startup time. */
 const PROCESS_STARTED_AT = new Date();
+
+// These jobs were already scheduled before markers. The first catalogue
+// marker was an upgrade event, so it cannot renew their existing grace.
+const PRE_CATALOGUE_JOBS: ReadonlySet<string> = new Set([
+  "market.fx-refresh", "market.stale-price-alerts", "recurring.materialize",
+  "investments.tbill-maturity", "investments.recurring-purchase", "budget.rollover",
+  "cleanup.notifications", "cleanup.merchant-logos", "cleanup.personal-exports",
+  "snapshots.daily", "recurring.remind", "goals.deadlines", "budget.alerts",
+  "security.daily-report", "security.mfa-reminders", "recap.weekly", "goals.weekly-report",
+]);
 
 export interface ScheduledJobFreshness {
   readonly jobName: string;
@@ -90,7 +102,10 @@ export async function readScheduledJobsHealth(options: JobHealthOptions = {}): P
   const since = epoch ?? processEpoch;
   const jobs = specs.map((spec, index) => {
     const lastSuccessAt = statuses[index]?.lastSuccessAt ?? null;
-    const jobSince = catalogued.get(spec.name) ?? since;
+    const firstCatalogued = catalogued.get(spec.name);
+    const useEarlierEpoch = PRE_CATALOGUE_JOBS.has(spec.name) && since !== null
+      && (firstCatalogued === undefined || since < firstCatalogued);
+    const jobSince = useEarlierEpoch ? since : firstCatalogued ?? since;
     return { jobName: spec.name, lastSuccessAt, stale: isJobStale(lastSuccessAt, spec.intervalMs, now, jobSince) };
   });
   const reasons = degradedReasons(schedulerEnabled, isExpected, options.hasStartRecordFailed ?? didSchedulerStartRecordFail());

@@ -148,6 +148,9 @@ describe("runScheduledJob", () => {
 
   it.each([
     [Object.assign(new Error("duplicate key value violates PRIVATE_SENTINEL"), { code: "23505" }), "PG_23505"],
+    [new Error("Wrapped PRIVATE_SENTINEL", {
+      cause: Object.assign(new Error("duplicate key PRIVATE_SENTINEL"), { code: "23505" }),
+    }), "PG_23505"],
     [Object.assign(new Error("PRIVATE_SENTINEL"), { code: "HOUSEHOLD_CALENDAR_REQUIRED" }), "HOUSEHOLD_CALENDAR_REQUIRED"],
     [new Error("PRIVATE_SENTINEL amount 777.77"), "JOB_FAILED"],
     ["PRIVATE_SENTINEL", "JOB_FAILED"],
@@ -187,6 +190,22 @@ describe("runScheduledJob", () => {
     await expect(runScheduledJob(job(run), { ...deps, startRun: vi.fn(async () => null) }, NOW))
       .resolves.toEqual({ status: "skipped", reason: "PERIOD_DONE" });
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it("reports the running-index race as busy before the runner starts work", async () => {
+    const { deps } = fakeLockDependencies();
+    const contention = new Error("Wrapped journal race", {
+      cause: Object.assign(new Error("duplicate running slot"), {
+        code: "23505", constraint: "idx_jobs_scheduled_period_running",
+      }),
+    });
+    const startRun = vi.fn(async () => { throw contention; });
+    const run = vi.fn(async () => ({ processed: 1 }));
+
+    await expect(runScheduledJob(job(run), { ...deps, startRun }, NOW))
+      .resolves.toEqual({ status: "skipped", reason: "JOB_BUSY" });
+    expect(run).not.toHaveBeenCalled();
+    expect(deps.finishRun).not.toHaveBeenCalled();
   });
 
   it("passes a caller's bound on the job-lock wait to the lock request", async () => {
