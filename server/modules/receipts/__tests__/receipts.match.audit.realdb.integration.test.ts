@@ -8,6 +8,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { merchants, outboxEvents, pendingReceipts, transactions } from "@shared/schema";
 import { db, pool } from "../../../db";
+import { receiptService } from "../../../services/ReceiptService";
 import { a, actors, app, ids, reset, start, stop } from "../../tags/__tests__/completion-r04.tags.fixture";
 
 const MERCHANT_NAME = "Receipt Audit Merchant";
@@ -23,7 +24,9 @@ async function clean() {
   await db.delete(pendingReceipts).where(eq(pendingReceipts.householdId, a));
   await db.delete(transactions).where(eq(transactions.householdId, a));
   await db.delete(merchants).where(eq(merchants.householdId, a));
-  await pool.query("delete from audit_logs where household_id=$1", [a]);
+  // A private system audit names neither a household nor a user.
+  await pool.query("delete from audit_logs where household_id=$1 or (entity_type='transaction' and entity_id=$2)",
+    [a, transactionId ?? null]);
   await db.delete(outboxEvents).where(eq(outboxEvents.householdId, a));
 }
 
@@ -83,6 +86,48 @@ describe("FIN-16 receipt match audit (real HTTP/DB)", () => {
     expect(links[0].details.transactionId).toBe(transactionId);
     // Nothing about the transaction changed, so no transaction UPDATE row.
     expect(await auditRows("transaction", transactionId)).toHaveLength(0);
+  });
+
+  it("writes one LINK and one OCR UPDATE when OCR results automatically match a posting", async () => {
+    await seed(undefined);
+    const response = await signed(request(app).post(`/api/receipts/${receiptId}/ocr-results`))
+      .send({ amount: "25.00", date: "2026-11-10", confidence: 0.9 }).expect(200);
+    expect(response.body.data).toMatchObject({ autoMatched: true, matchedTransactionId: transactionId });
+    const audits = await auditRows("receipt", receiptId);
+    expect(audits.map(row => row.action).sort()).toEqual(["LINK", "UPDATE"]);
+    expect(audits.find(row => row.action === "LINK")?.details).toMatchObject({ transactionId, method: "auto" });
+  });
+
+  it("attributes the matching queue's LINK to the scheduler, with no human actor", async () => {
+    await seed(undefined);
+    await db.update(pendingReceipts).set({ nextMatchAt: new Date(0) }).where(eq(pendingReceipts.id, receiptId));
+    await receiptService.processMatchingQueue();
+    const audits = await auditRows("receipt", receiptId);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      action: "LINK",
+      user_id: null,
+      household_id: a,
+      details: { transactionId, source: "receipts.match" },
+    });
+  });
+
+  it.each([false, true])("attributes a queued merchant correction to the scheduler (private: %s)", async isPrivate => {
+    await seed(MERCHANT_NAME);
+    await db.update(transactions).set({ name: `${MERCHANT_NAME} bank entry`, isPrivate }).where(eq(transactions.id, transactionId));
+    await db.update(pendingReceipts).set({
+      ocrData: { merchantName: MERCHANT_NAME, amount: "25.00", date: "2026-11-10" },
+      nextMatchAt: new Date(0),
+    }).where(eq(pendingReceipts.id, receiptId));
+    await receiptService.processMatchingQueue();
+    const audits = await auditRows("transaction", transactionId);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      action: "UPDATE",
+      user_id: null,
+      household_id: isPrivate ? null : a,
+      details: { receiptId, source: "receipts.match" },
+    });
   });
 
   it("rolls the match back when the audit insert fails", async () => {

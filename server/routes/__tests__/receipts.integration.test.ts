@@ -408,6 +408,9 @@ describe("Receipts Integration", () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.data.matched).toBe(false);
+      expect(mockReceiptService.attemptMatch).toHaveBeenCalledWith(
+        receiptId, householdId, "user-123", "request", "127.0.0.1",
+      );
     });
 
     it("returns 404 when receipt is missing", async () => {

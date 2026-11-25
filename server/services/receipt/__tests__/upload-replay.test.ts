@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   legacyReplay: vi.fn(), replay: vi.fn(), visibleByHash: vi.fn(), create: vi.fn(),
   validate: vi.fn(), put: vi.fn(), discard: vi.fn(), discardUnlessCommitted: vi.fn(),
   isDefiniteRollback: vi.fn(), rowCommitted: vi.fn(), findById: vi.fn(),
+  auditCreate: vi.fn(), transaction: {},
 }));
 vi.mock("../../../repositories/ReceiptRepository", () => ({ receiptRepository: {
   // The legacy lookup supplies a synthetic household-only hit if that path regresses.
@@ -17,6 +18,10 @@ vi.mock("../image", () => ({
   optimizeImage: (buffer: Buffer) => buffer, generateThumbnail: () => Buffer.from("thumbnail"),
 }));
 vi.mock("../matching", () => ({}));
+vi.mock("../../../utils/withTransaction", () => ({
+  withTransaction: (operation: (tx: object) => Promise<unknown>) => operation(mocks.transaction),
+}));
+vi.mock("../../BusinessAuditService", () => ({ businessAuditService: { logCreate: mocks.auditCreate } }));
 vi.mock("../../../core/storage/upload-objects", () => ({
   putUploadObject: mocks.put, discardUploadObject: mocks.discard,
   discardUnlessCommitted: mocks.discardUnlessCommitted,
@@ -42,6 +47,7 @@ it("refuses an earlier receipt that the current actor cannot read, before valida
   expect(mocks.validate).not.toHaveBeenCalled();
   expect(mocks.visibleByHash).not.toHaveBeenCalled();
   expect(mocks.put).not.toHaveBeenCalled();
+  expect(mocks.auditCreate).not.toHaveBeenCalled();
 });
 
 it("returns a visible keyed retry before checking the image hash", async () => {
@@ -51,6 +57,7 @@ it("returns a visible keyed retry before checking the image hash", async () => {
   await expect(service.uploadReceipt(upload, actor, key)).resolves.toEqual({ receiptId: "visible-receipt", isDuplicate: true });
   expect(mocks.visibleByHash).not.toHaveBeenCalled();
   expect(mocks.put).not.toHaveBeenCalled();
+  expect(mocks.auditCreate).not.toHaveBeenCalled();
 });
 
 it("discards both staged objects and returns a concurrently inserted visible receipt", async () => {

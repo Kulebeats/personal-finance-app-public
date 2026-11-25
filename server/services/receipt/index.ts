@@ -10,7 +10,7 @@
 import type { OcrExtractedData, PendingReceipt } from "@shared/schema";
 import { receiptUploadService } from "./upload.service";
 import { receiptMatchingService, type MatchingQueueTotals, type MatchOrigin } from "./matching.service";
-import { receiptTransactionService } from "./transaction.service";
+import { receiptTransactionService, type ReceiptLinkOptions } from "./transaction.service";
 import { receiptQueryService } from "./query.service";
 import type { ReceiptUpload } from "./image";
 import type { HouseholdContext } from "../../core/authz/implicit-household-context";
@@ -38,13 +38,14 @@ export class ReceiptService {
   async uploadReceipt(
     upload: ReceiptUpload,
     actor: HouseholdContext,
-    idempotencyKey?: string
+    idempotencyKey?: string,
+    ipAddress?: string,
   ): Promise<{
     receiptId: string;
     isDuplicate: boolean;
     duplicateOf?: string;
   }> {
-    return receiptUploadService.uploadReceipt(upload, actor, idempotencyKey);
+    return receiptUploadService.uploadReceipt(upload, actor, idempotencyKey, ipAddress);
   }
 
   async preprocessForOcr(buffer: Buffer): Promise<Buffer> {
@@ -57,6 +58,7 @@ export class ReceiptService {
     ocrData: OcrExtractedData,
     confidence: number,
     rawText?: string,
+    ipAddress?: string,
   ): Promise<{ matched: boolean; transactionId?: string }> {
     return receiptUploadService.storeOcrResults(
       receiptId,
@@ -64,12 +66,13 @@ export class ReceiptService {
       ocrData,
       confidence,
       rawText,
-      (rId, hId) => this.attemptMatch(rId, hId, actor.userId, "after-ocr")
+      (rId, hId) => this.attemptMatch(rId, hId, actor.userId, "after-ocr", ipAddress),
+      ipAddress,
     );
   }
 
-  async deleteReceipt(receiptId: string, actor: HouseholdContext): Promise<void> {
-    return receiptUploadService.deleteReceipt(receiptId, actor);
+  async deleteReceipt(receiptId: string, actor: HouseholdContext, ipAddress?: string): Promise<void> {
+    return receiptUploadService.deleteReceipt(receiptId, actor, ipAddress);
   }
 
   // Matching operations
@@ -78,11 +81,12 @@ export class ReceiptService {
     householdId: string,
     actorUserId?: string,
     origin: MatchOrigin = "request",
+    ipAddress?: string,
   ): Promise<{ matched: boolean; transactionId?: string }> {
     return receiptMatchingService.attemptMatch(
       receiptId,
       householdId,
-      (rId, tId, hId, uId) => this.linkReceiptToTransaction(rId, tId, hId, uId),
+      (rId, tId, hId, uId) => this.linkReceiptToTransaction(rId, tId, hId, uId, { origin, ipAddress }),
       actorUserId,
       origin,
     );
@@ -100,7 +104,7 @@ export class ReceiptService {
     transactionId: string,
     householdId: string,
     userId?: string,
-    options?: { skipAmountValidation?: boolean; ipAddress?: string }
+    options?: ReceiptLinkOptions,
   ): Promise<boolean> {
     return receiptTransactionService.linkReceiptToTransaction(
       receiptId,
