@@ -3918,6 +3918,7 @@ export const jobs = pgTable("jobs", {
   name: varchar("name", { length: 100 }).notNull(), // e.g., "daily_snapshots"
   payload: jsonb("payload").$type<Record<string, unknown>>(),
   status: jobStatusEnum("status").default("pending").notNull(),
+  archivedDuplicateCompletion: boolean("archived_duplicate_completion").default(false).notNull(),
   priority: integer("priority").default(0).notNull(), // Higher = more urgent
   attempts: integer("attempts").default(0).notNull(),
   maxAttempts: integer("max_attempts").default(3).notNull(),
@@ -3937,7 +3938,7 @@ export const jobs = pgTable("jobs", {
     .where(sql`${table.name} LIKE 'scheduled:%' AND ${table.status} = 'running'`),
   scheduledPeriodCompleted: uniqueIndex("idx_jobs_scheduled_period_completed")
     .on(table.name, table.idempotencyKey)
-    .where(sql`${table.name} LIKE 'scheduled:%' AND ${table.status} = 'completed'`),
+    .where(sql`${table.name} LIKE 'scheduled:%' AND ${table.status} = 'completed' AND NOT ${table.archivedDuplicateCompletion}`),
 }));
 
 // ============================================================================
