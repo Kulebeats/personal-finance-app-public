@@ -173,6 +173,15 @@ describe("R10.3 linked transactions restore the exact prior progress", () => {
 });
 
 describe("R10.3 contributions are validated money and reversible", () => {
+  it("reports a malformed contribution ID as a field error before reversing anything", async () => {
+    const goalId = await makeGoal();
+    const response = await api.post(`/api/goals/${goalId}/contributions/not-a-uuid/reverse`, {});
+    expect(response.status).toBe(400);
+    expect(response.body.error).toMatchObject({ code: "VALIDATION_ERROR", fields: [{ field: "contributionId" }] });
+    expect(await progress(goalId)).toBe("5.00");
+    expect(await db.select().from(goalContributions).where(eq(goalContributions.goalId, goalId))).toEqual([]);
+  });
+
   it("rejects 1,000,000 against a small target unless overfunding is confirmed", async () => {
     const goalId = await makeGoal({ current: "5.00", target: "100.00" });
     const body = { amount: zmw("1000000.00") };

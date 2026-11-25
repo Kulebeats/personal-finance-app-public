@@ -1,8 +1,10 @@
 import { and, eq, sql } from "drizzle-orm";
+import { householdCalendarDate, LEGACY_HOUSEHOLD_CALENDAR_ZONE } from "@shared/household-calendar";
 import { householdMembers, households, investmentPlanAuthorizations, recurringInvestments, users,
   type InvestmentTransaction } from "@shared/schema";
 import { can } from "../../core/authz/capabilities";
 import type { TransactionType } from "../../utils/withTransaction";
+import { HouseholdCalendarUnavailable, storedHouseholdCalendarZone } from "../householdCalendarToday";
 import { digestSipAuthorizationTerms, normalizeSipAuthorizationTerms, type SipAuthorizationTerms } from "./sipAuthorizationContract";
 
 type Plan = typeof recurringInvestments.$inferSelect;
@@ -25,21 +27,36 @@ export function sipExecutionPlan(tx: TransactionType, authority: SipExecutionAut
   return authority.plan;
 }
 
+/** Keep pending occurrences available on the legacy UTC calendar when an owner
+ * must repair an unsupported stored zone. Fill confirmation still requires a
+ * valid owner-chosen zone and performs its own cutoff check. */
+export function sipPendingCalendarDate(instant: Date, storedZone: string | null): string {
+  let zone = LEGACY_HOUSEHOLD_CALENDAR_ZONE;
+  try {
+    zone = storedHouseholdCalendarZone(storedZone);
+  } catch (error) {
+    if (!(error instanceof HouseholdCalendarUnavailable)) throw error;
+  }
+  return householdCalendarDate(instant, zone);
+}
+
 /** Household -> actual author membership -> user -> plan/grant. No original
  * SID is needed: ordinary session endings do not cancel a durable mandate. */
 export async function lockSipExecutionAuthorization(tx: TransactionType,
-  candidate: Pick<Plan, "id" | "householdId">, today: string): Promise<SipExecutionAuthority | null> {
-  const [household] = await tx.select({ id: households.id }).from(households)
+  candidate: Pick<Plan, "id" | "householdId">, cutoff: string | Date): Promise<SipExecutionAuthority | null> {
+  const [household] = await tx.select({ id: households.id, timeZone: households.timeZone }).from(households)
     .where(eq(households.id, candidate.householdId)).for("share");
   if (!household) return null;
+  const today = typeof cutoff === "string" ? cutoff : sipPendingCalendarDate(cutoff, household.timeZone);
   // Discovery conveys no authority. Re-read the plan after locking this author;
   // a replacement pointer requires rediscovery in a new transaction.
   const [hint] = await tx.select({ authorizationId: recurringInvestments.currentAuthorizationId,
-    revision: recurringInvestments.authorizationRevision, authorUserId: investmentPlanAuthorizations.authorUserId })
+    revision: recurringInvestments.authorizationRevision, authorUserId: investmentPlanAuthorizations.authorUserId,
+    nextExecutionDate: recurringInvestments.nextExecutionDate })
     .from(recurringInvestments).leftJoin(investmentPlanAuthorizations,
       eq(investmentPlanAuthorizations.id, recurringInvestments.currentAuthorizationId))
     .where(and(eq(recurringInvestments.id, candidate.id), eq(recurringInvestments.householdId, household.id)));
-  if (!hint) return null;
+  if (!hint || hint.nextExecutionDate > today) return null;
   let identity: { erasedAt: Date | null; emailVerified: boolean | null; generation: number } | undefined;
   if (hint.authorUserId) {
     const [member] = await tx.select({ role: householdMembers.role }).from(householdMembers).where(and(

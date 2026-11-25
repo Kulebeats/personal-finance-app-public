@@ -40,6 +40,17 @@ function makeApp(err: Error) {
   return app;
 }
 
+it("returns a generic 400 when PostgreSQL rejects the input syntax", async () => {
+  const cause = Object.assign(new Error("synthetic internal SQL detail"), { code: "22P02" });
+  const res = await request(makeApp(new Error("synthetic query wrapper", { cause }))).get("/boom");
+  expect(res.status).toBe(400);
+  expect(res.body).toMatchObject({
+    success: false,
+    error: { code: "VALIDATION_ERROR", message: "Invalid input" },
+  });
+  expect(res.text).not.toContain("synthetic");
+});
+
 describe("apiErrorMiddleware — central Retry-After on RateLimitError", () => {
   it("emits Retry-After from the error's retryAfter for a non-AI thrower", async () => {
     const res = await request(makeApp(new RateLimitError(42))).get("/boom");

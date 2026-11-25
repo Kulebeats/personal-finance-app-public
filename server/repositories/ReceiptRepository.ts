@@ -21,6 +21,7 @@ import { lockTransactionCreateGrant } from "./TransactionCreateBoundary";
 import type { HouseholdContext } from "../middleware/householdGuard";
 import {
   accounts,
+  households,
   pendingReceipts,
   receiptConversionRecords,
   transactions,
@@ -58,8 +59,16 @@ type UpdatePendingReceiptInput = Partial<{
   nextMatchAt: Date;
 }>;
 
+/** Audit FK order. Ownership transfer locks the household before membership. */
+export async function lockReceiptHousehold(tx: TransactionType, householdId: string): Promise<void> {
+  const [household] = await tx.select({ id: households.id }).from(households)
+    .where(eq(households.id, householdId)).for("share");
+  if (!household) throw new NotFoundError("Receipt not found");
+}
+
 async function lockReceiptWriter(tx: TransactionType, householdId: string, userId: string): Promise<HouseholdContext | undefined> {
   try {
+    await lockReceiptHousehold(tx, householdId);
     return await lockTransactionCreateGrant(tx, householdId, { createActor: { householdId, userId } });
   } catch (error: unknown) {
     if (error instanceof ForbiddenError || error instanceof NotFoundError) return undefined;
@@ -68,8 +77,8 @@ async function lockReceiptWriter(tx: TransactionType, householdId: string, userI
 }
 
 export class ReceiptRepository {
-  async create(data: CreatePendingReceiptInput): Promise<PendingReceipt> {
-    const result = await db
+  async create(data: CreatePendingReceiptInput, executor: Pick<typeof db, "insert"> = db): Promise<PendingReceipt> {
+    const result = await executor
       .insert(pendingReceipts)
       .values({
         ...data,
@@ -126,7 +135,11 @@ export class ReceiptRepository {
    * and conversion refusals, so a hidden receipt reads as missing (undefined)
    * like an unknown id. Returns the deleted row for its file cleanup.
    */
-  async deleteVisible(actor: HouseholdContext, id: string): Promise<PendingReceipt | undefined> {
+  async deleteVisible(
+    actor: HouseholdContext,
+    id: string,
+    onDelete?: (tx: TransactionType, receipt: PendingReceipt) => Promise<void>,
+  ): Promise<PendingReceipt | undefined> {
     return withTransaction(async tx => {
       const current = await lockReceiptWriter(tx, actor.householdId, actor.userId);
       if (!current) return undefined;
@@ -139,6 +152,7 @@ export class ReceiptRepository {
         .from(receiptConversionRecords).where(eq(receiptConversionRecords.receiptId, id));
       if (conversion) throw new ConflictError("Receipt is already linked");
       await tx.delete(pendingReceipts).where(eq(pendingReceipts.id, id));
+      await onDelete?.(tx, receipt);
       return receipt;
     });
   }
@@ -205,12 +219,14 @@ export class ReceiptRepository {
     actor: HouseholdContext,
     id: string,
     data: Pick<UpdatePendingReceiptInput, "ocrStatus" | "ocrData" | "ocrConfidence" | "ocrProcessedAt">,
+    onWrite?: (tx: TransactionType) => Promise<void>,
   ): Promise<boolean> {
     return withTransaction(async (tx) => {
       const current = await lockReceiptWriter(tx, actor.householdId, actor.userId);
       if (!current) return false;
       if (!await this.lockVisibleReceiptForWrite(tx, current, id)) return false;
       await tx.update(pendingReceipts).set({ ...data, updatedAt: new Date() }).where(eq(pendingReceipts.id, id));
+      await onWrite?.(tx);
       return true;
     });
   }

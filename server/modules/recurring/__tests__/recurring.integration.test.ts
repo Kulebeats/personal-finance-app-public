@@ -43,6 +43,11 @@ vi.mock("../../../services/RecurringService", () => ({
   recurringService: mockRecurringService,
 }));
 
+// The service and its data sources are mocked in these controller tests.
+vi.mock("../../../services/householdCalendarToday", () => ({
+  householdToday: async () => new Date().toISOString().slice(0, 10),
+}));
+
 vi.mock("../../../services/BusinessAuditService", () => ({
   businessAuditService: mockBusinessAuditService,
 }));

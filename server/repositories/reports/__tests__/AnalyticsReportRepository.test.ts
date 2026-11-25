@@ -107,8 +107,9 @@ describe("AnalyticsReportRepository", () => {
 
       // Liquid, then liability accounts, each already converted to base (NEW-02)
       const row = (id: string, type: string, baseBalance: string) =>
-        ({ id, name: id, type, currency: "USD", asOf: "2024-01-31", baseBalance });
-      (db.select as any)
+        ({ id, name: id, type, currency: "USD", baseBalance });
+      vi.mocked(db.select)
+        .mockReturnValueOnce(createSelectResult([{ timeZone: "UTC" }]))
         .mockReturnValueOnce(createSelectResult([row("acc-cash", "checking", "20000")]))
         .mockReturnValueOnce(createSelectResult([row("acc-card", "credit", "5000")]));
 
@@ -130,12 +131,12 @@ describe("AnalyticsReportRepository", () => {
         "USD"
       );
 
-      (db.select as any).mockReturnValueOnce(
-        createSelectResult([
-          { id: "acc-1", name: "Credit Card", type: "credit", currency: "USD", asOf: "2024-01-31", baseBalance: "2000" },
-          { id: "acc-2", name: "Car Loan", type: "loan", currency: "USD", asOf: "2024-01-31", baseBalance: "15000" },
-        ])
-      );
+      vi.mocked(db.select)
+        .mockReturnValueOnce(createSelectResult([{ timeZone: "UTC" }]))
+        .mockReturnValueOnce(createSelectResult([
+          { id: "acc-1", name: "Credit Card", type: "credit", currency: "USD", baseBalance: "2000" },
+          { id: "acc-2", name: "Car Loan", type: "loan", currency: "USD", baseBalance: "15000" },
+        ]));
 
       vi.spyOn(mockCashflow, "getCashflow").mockResolvedValue({
         series: [

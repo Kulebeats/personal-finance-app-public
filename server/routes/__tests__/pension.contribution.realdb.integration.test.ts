@@ -18,6 +18,7 @@ import { inArray } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { pensionContributions, pensionHoldings } from "@shared/schema";
 import { db, pool } from "../../db";
+import { pensionService } from "../../services/PensionService";
 import { a, b, actors, app, ids, reset, start, stop, type Role } from "../../modules/tags/__tests__/completion-r04.tags.fixture";
 
 const money = (amount: string, currency = "ZMW") => ({ amount, currency });
@@ -69,6 +70,17 @@ describe("NEW-24 pension contribution (real HTTP/DB)", () => {
     await pool.query("drop function if exists block_pension_audit()");
     await clean();
     await stop();
+  });
+
+  it.each(["holdings", "contributions"] as const)("returns the generic 500 for a failed %s read", async endpoint => {
+    const spy = endpoint === "holdings" ? vi.spyOn(pensionService, "getHoldings") : vi.spyOn(pensionService, "getContributions");
+    spy.mockRejectedValueOnce(new Error("synthetic internal pension query detail"));
+    try {
+      const res = await (endpoint === "holdings" ? list("owner") : contributionsOf(holdingId, "owner")).expect(500);
+      expect(res.body).toEqual({ success: false, error: { code: "INTERNAL_ERROR", message: "An internal error occurred. Please try again." } });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("records a valid contribution: row, balance and one audit row with before and after", async () => {

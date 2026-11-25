@@ -7,6 +7,7 @@ import { AnalyticsCache } from "../AnalyticsCache";
 const liveReads = [
   { endpoint: "netWorth", params: { userId: "member" } },
   { endpoint: "netWorthChanges", params: { userId: "member" } },
+  { endpoint: "financialRatios", params: { userId: "member" } },
   { endpoint: "debtAnalysis", params: { userId: "member" } },
   { endpoint: "budgetComparison", params: { userId: "member" } },
   { endpoint: "cashflow", params: { userId: "member", includeForecast: true } },

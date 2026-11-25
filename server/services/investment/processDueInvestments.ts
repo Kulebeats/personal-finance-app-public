@@ -1,11 +1,13 @@
 import { db } from "../../db";
 import { recurringInvestments, households, recurringExecutionLog } from "@shared/schema";
 import { eq, and, lte } from "drizzle-orm";
+import { shiftCalendarDate } from "@shared/household-calendar";
 import { calculateNextDate as advanceRecurringDate } from "../../core/calculations/recurring/dates";
 import { logger } from "../../utils/logger";
 import { withTransaction } from "../../utils/withTransaction";
+import { calendarClock } from "../householdCalendarToday";
 import { materializeSipOccurrence } from "./sipOccurrenceMaterialization";
-import { lockSipExecutionAuthorization, SIP_EXECUTION_REFUSAL } from "./sipExecutionAuthorization";
+import { lockSipExecutionAuthorization, sipPendingCalendarDate, SIP_EXECUTION_REFUSAL } from "./sipExecutionAuthorization";
 
 export interface SipExecutionResults {
   success: number;
@@ -21,19 +23,22 @@ type ExecutionOutcome = { status: "held" } | { status: "skipped" };
  * for the next run (FIN-12 bounded catch-up). */
 export const SIP_CATCH_UP_LIMIT = 12;
 
-const utcToday = (): string => new Date().toISOString().split("T")[0];
-
 /** Find recurring investment plans due today or overdue (unlocked candidate scan). */
-export async function getDuePlans(asOf: string = utcToday()) {
-  return await db
-    .select()
+export async function getDuePlans(instant = calendarClock.now()) {
+  // UTC+1 is the latest calendar date any named zone can be on at this instant.
+  const latest = shiftCalendarDate(instant.toISOString().slice(0, 10), 1);
+  const candidates = await db
+    .select({ plan: recurringInvestments, timeZone: households.timeZone })
     .from(recurringInvestments)
+    .innerJoin(households, eq(households.id, recurringInvestments.householdId))
     .where(
       and(
         eq(recurringInvestments.isActive, true),
-        lte(recurringInvestments.nextExecutionDate, asOf),
+        lte(recurringInvestments.nextExecutionDate, latest),
       ),
     );
+  return candidates.filter(({ plan, timeZone }) => plan.nextExecutionDate <= sipPendingCalendarDate(instant, timeZone))
+    .map(({ plan }) => plan);
 }
 
 export function calculateNextDate(currentDate: Date, frequency: string, initialDate: string): Date {
@@ -66,9 +71,9 @@ export function calculateNextDate(currentDate: Date, frequency: string, initialD
  * fence makes a re-run book nothing twice. The next date uses the grant's
  * anchor day and advances from the stored cursor.
  */
-async function bookNextOccurrence(plan: { id: string; householdId: string }, today: string): Promise<ExecutionOutcome> {
+async function bookNextOccurrence(plan: { id: string; householdId: string }, instant: Date): Promise<ExecutionOutcome> {
   return withTransaction<ExecutionOutcome>(async tx => {
-    const authority = await lockSipExecutionAuthorization(tx, plan, today);
+    const authority = await lockSipExecutionAuthorization(tx, plan, instant);
     if (!authority) return { status: "skipped" };
     const scheduledDate = authority.plan.nextExecutionDate;
     const nextDate = calculateNextDate(
@@ -82,14 +87,14 @@ async function bookNextOccurrence(plan: { id: string; householdId: string }, tod
 }
 
 export async function processDueInvestments(): Promise<SipExecutionResults> {
-  const today = utcToday();
-  const duePlans = await getDuePlans(today);
+  const instant = calendarClock.now();
+  const duePlans = await getDuePlans(instant);
   const results: SipExecutionResults = { success: 0, skipped: 0, held: 0, failed: 0, errors: [] };
 
   for (const plan of duePlans) {
     try {
       for (let booked = 0; booked < SIP_CATCH_UP_LIMIT; booked++) {
-        const outcome = await bookNextOccurrence(plan, today);
+        const outcome = await bookNextOccurrence(plan, instant);
         if (outcome.status === "held") {
           results.held++;
           continue;
