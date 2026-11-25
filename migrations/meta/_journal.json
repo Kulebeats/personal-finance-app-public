@@ -414,6 +414,13 @@
       "when": 1795478607450,
       "tag": "0061_users_email_lower_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1795530683790,
+      "tag": "0062_fx_rate_positive",
+      "breakpoints": true
     }
   ]
 }
