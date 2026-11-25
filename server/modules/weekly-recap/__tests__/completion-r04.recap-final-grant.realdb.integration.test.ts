@@ -7,6 +7,7 @@ import { db } from "../../../db";
 import { recurringService } from "../../../services/RecurringService";
 import { businessAuditService } from "../../../services/BusinessAuditService";
 import { sendEmail } from "../../../services/emailService";
+import { insertLegacySharedFxRates } from "../../../testing/fixtures/legacy-shared-fx";
 import { Client } from "pg";
 
 import { weeklyRecapService } from "../weekly-recap.service";
@@ -162,7 +163,7 @@ describe("R04 recap final recipient grant and protected recurring query failures
     await enableRecipients(["member"]);
     await db.insert(userNotificationPreferences).values({ userId: actors.get("member")!.id, notificationType: "weekly_recap", emailEnabled: enabled });
     const result = await processWeeklyRecapEmails(mondayRun());
-    expect(result).toEqual({ sent: enabled ? 1 : 0, skipped: enabled ? 0 : 1, failed: 0 });
+    expect(result).toEqual({ sent: enabled ? 1 : 0, skipped: enabled ? 0 : 1, failed: 0, unknown: 0 });
     expect(smtp).toHaveBeenCalledTimes(enabled ? 1 : 0);
   });
 
@@ -189,7 +190,7 @@ describe("R04 recap final recipient grant and protected recurring query failures
       eq(userNotificationPreferences.notificationType, "weekly_recap")));
     expect(rows.map(row => row.emailEnabled)).toEqual([true, true]);
     expect(rows.filter(row => row.pushEnabled)).toHaveLength(1);
-    expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 1, failed: 0, skipped: 0 });
+    expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 1, failed: 0, skipped: 0, unknown: 0 });
     expect(smtp).toHaveBeenCalledOnce();
   });
 
@@ -231,7 +232,7 @@ describe("R04 recap final recipient grant and protected recurring query failures
     });
     await db.update(households).set({ currency: "USD" }).where(eq(households.id, a));
     try {
-      expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 1, failed: 0, skipped: 0 });
+      expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 1, failed: 0, skipped: 0, unknown: 0 });
       const html = smtp.mock.calls[0][0].html;
       expect(html).toContain("Upcoming Bills (2)");
       expect(html).toMatch(/ZMW\s*11\.11 .*?Due/);
@@ -263,7 +264,7 @@ describe("R04 recap final recipient grant and protected recurring query failures
       await db.update(recurringTransactions).set({ isActive: false }).where(inArray(recurringTransactions.id, Object.values(ruleIds)));
       await add("MONTHLY_SALARY", "income", "1000.00", "fixed");
       if (mode !== "income only") await add("POWER_BILL", "expense", "100.00", mode === "estimated expense" ? "variable" : "fixed");
-      expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 1, failed: 0, skipped: 0 });
+      expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 1, failed: 0, skipped: 0, unknown: 0 });
       const html = smtp.mock.calls[0][0].html;
       expect(html).not.toContain("MONTHLY_SALARY");
       if (mode === "income only") expect(html).not.toContain("Upcoming Bills");
@@ -292,7 +293,7 @@ describe("R04 recap final recipient grant and protected recurring query failures
     const result = await processWeeklyRecapEmails(mondayRun());
     expect(handoff).toHaveBeenCalledOnce();
     expect(smtp).not.toHaveBeenCalled();
-    expect(result).toEqual({ sent: 0, failed: 0, skipped: 1 });
+    expect(result).toEqual({ sent: 0, failed: 0, skipped: 1, unknown: 0 });
   });
 
   it("removes a bill whose account became private after digest assembly", async () => {
@@ -304,7 +305,7 @@ describe("R04 recap final recipient grant and protected recurring query failures
         .where(eq(accounts.id, ids.sharedAccount));
       return text;
     });
-    expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 1, failed: 0, skipped: 0 });
+    expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 1, failed: 0, skipped: 0, unknown: 0 });
     expect(handoff).toHaveBeenCalledOnce();
     const html = smtp.mock.calls[0][0].html;
     expect(html).toContain("MEMBER_PRIVATE_BILL");
@@ -335,7 +336,7 @@ describe("R04 recap final recipient grant and protected recurring query failures
       else await db.update(accounts).set({ isPrivate: true }).where(eq(accounts.id, ids.privateAccount));
       return text;
     });
-    expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 1, failed: 0, skipped: 0 });
+    expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 1, failed: 0, skipped: 0, unknown: 0 });
     expect(handoff).toHaveBeenCalledOnce();
     const html = smtp.mock.calls[0][0].html;
     expect(html).toContain("Public groceries");
@@ -347,7 +348,7 @@ describe("R04 recap final recipient grant and protected recurring query failures
   it("never sends a fabricated zero or records delivery when the last spending read aborts", async () => {
     await enableRecipients(["member"]);
     const failure = onRelease(async text => text.replace("SELECT outcome,", "SELECT (1 / 0) AS forced_failure, outcome,"));
-    expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 0, failed: 1, skipped: 0 });
+    expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 0, failed: 1, skipped: 0, unknown: 0 });
     expect(failure).toHaveBeenCalledOnce();
     expect(smtp).not.toHaveBeenCalled();
     const logs = await db.select().from(auditLogs).where(eq(auditLogs.householdId, a));
@@ -357,7 +358,7 @@ describe("R04 recap final recipient grant and protected recurring query failures
   it("renders a visible bill name as text in the financial email", async () => {
     await enableRecipients(["member"]);
     await db.update(recurringTransactions).set({ name: "<b>Tea & coffee</b>" }).where(eq(recurringTransactions.id, ruleIds.shared));
-    expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 1, failed: 0, skipped: 0 });
+    expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 1, failed: 0, skipped: 0, unknown: 0 });
     const html = smtp.mock.calls[0][0].html;
     expect(html).toContain("&lt;b&gt;Tea &amp; coffee&lt;/b&gt;");
     expect(html).not.toContain("<b>Tea & coffee</b>");
@@ -377,17 +378,18 @@ describe("R04 recap final recipient grant and protected recurring query failures
     })));
     try {
       const valid = mode === "round" || mode === "decline";
-      await db.insert(fxRates).values([
-        { id: rateIds[0], date: priorDate, rate: mode === "decline" ? "2" : "0.6" },
-        { id: rateIds[1], date: from, rate: mode === "decline" ? "1" : mode === "round" ? "1.4" : mode },
-      ].map(row => ({ ...row, fromCurrency: "XTS", toCurrency: "ZMW", source: "manual" })));
+      const pair = { fromCurrency: "XTS", toCurrency: "ZMW", source: "manual" };
+      await db.insert(fxRates).values({ ...pair, id: rateIds[0], date: priorDate, rate: mode === "decline" ? "2" : "0.6" });
+      const current = { ...pair, id: rateIds[1], date: from, rate: mode === "decline" ? "1" : mode === "round" ? "1.4" : mode };
+      if (valid) await db.insert(fxRates).values(current);
+      else await insertLegacySharedFxRates([current]);
       if (valid) await db.insert(providerFxQuotes).values([
         { id: rateIds[0], date: priorDate, rate: mode === "decline" ? "2" : "0.6" },
         { id: rateIds[1], date: from, rate: mode === "decline" ? "1" : "1.4" },
       ].map(row => ({ id: row.id, rate: row.rate, fromCurrency: "XTS", toCurrency: "ZMW",
         provider: "yahoo_finance", effectiveDate: row.date, validThrough: row.date, quotedAt: new Date(row.date) })));
       const result = await processWeeklyRecapEmails(mondayRun());
-      expect(result).toEqual({ sent: valid ? 1 : 0, failed: valid ? 0 : 1, skipped: 0 });
+      expect(result).toEqual({ sent: valid ? 1 : 0, failed: valid ? 0 : 1, skipped: 0, unknown: 0 });
       expect(smtp).toHaveBeenCalledTimes(valid ? 1 : 0);
       if (valid) {
         const html = smtp.mock.calls[0][0].html;
@@ -419,7 +421,7 @@ describe("R04 recap final recipient grant and protected recurring query failures
           id, fromCurrency: "XTS", toCurrency: "ZMW", provider: "yahoo_finance", rate: "20",
           effectiveDate: "2020-01-01", validThrough: "2020-01-04", quotedAt: new Date("2020-01-01"),
         });
-        expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 0, failed: 1, skipped: 0 });
+        expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 0, failed: 1, skipped: 0, unknown: 0 });
         expect(smtp).not.toHaveBeenCalled();
       } finally {
         await db.delete(providerFxQuotes).where(eq(providerFxQuotes.id, id));
@@ -448,7 +450,8 @@ describe("R04 recap final recipient grant and protected recurring query failures
         expect(smtp).toHaveBeenCalledOnce();
         expect(smtp.mock.calls[0][0].html).toMatch(/Spending<\/div>\s*<div class="metric-value">ZMW\s*200\.00<\/div>/);
       } else {
-        expect(outcome).toBe("failed");
+        // OPS-007 P2: a missing rate is the digest's own data, settled rather than retried every tick.
+        expect(outcome).toBe("unbuildable");
         expect(smtp).not.toHaveBeenCalled();
       }
     } finally {
@@ -463,7 +466,7 @@ describe("R04 recap final recipient grant and protected recurring query failures
       await revokeMember();
       return text;
     }, recipient);
-    expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 1, failed: 1, skipped: 0 });
+    expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 1, failed: 1, skipped: 0, unknown: 0 });
     expect(handoff).toHaveBeenCalledOnce();
     expect(smtp).toHaveBeenCalledTimes(1);
     const message = smtp.mock.calls[0][0];
@@ -499,7 +502,7 @@ describe("R04 recap final recipient grant and protected recurring query failures
   it("the real digest job records a failed recurring read without sending a fake empty recap", async () => {
     await enableRecipients(["member"]);
     const failure = onRelease(async text => text.replace("END AS bills", "END AS bills, (1 / 0) AS forced_recurring_failure"));
-    expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 0, failed: 1, skipped: 0 });
+    expect(await processWeeklyRecapEmails(mondayRun())).toEqual({ sent: 0, failed: 1, skipped: 0, unknown: 0 });
     expect(failure).toHaveBeenCalledOnce();
     expect(smtp).not.toHaveBeenCalled();
   });

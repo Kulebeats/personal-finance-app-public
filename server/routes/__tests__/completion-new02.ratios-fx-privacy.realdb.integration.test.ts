@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import request from "supertest";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, inArray } from "drizzle-orm";
 import { accounts, fxRates, householdMembers, households, users } from "@shared/schema";
 import { hashPassword } from "../../auth";
 import { db, pool } from "../../db";
 import { getTestApp } from "../../__tests__/fixtures";
 import { analyticsCache } from "../../services/AnalyticsCache";
+import { calendarClock } from "../../services/householdCalendarToday";
 
 // NEW-02: financial ratios and debt analysis convert every account balance to
 // the household base currency through the household-aware FX path, exclude
@@ -116,6 +117,38 @@ describe("NEW-02 ratios and debt analysis convert visible balances only", () => 
       expect(ratios.burnRate.liquidAssets).toEqual(zmw("2987.50"));
       expect(ratios.liquidityRatio.value).toBe(3.91);
     });
+
+  it("values both ratios and debt on the household's new day before UTC midnight", async () => {
+    const clock = vi.spyOn(calendarClock, "now").mockReturnValue(new Date(`${utcDay(0)}T22:15:00Z`));
+    try {
+      await db.update(households).set({ timeZone: "Africa/Lusaka" }).where(eq(households.id, householdId));
+      await db.insert(fxRates).values({
+        fromCurrency: FOREIGN, toCurrency: BASE, rate: "30.0000", date: utcDay(1), source: "synthetic_new02",
+      });
+
+      const { ratios } = (await as("owner", "/api/reports/ratios").expect(200)).body.data;
+      expect.soft(ratios.liquidityRatio.liquidAssets).toEqual(zmw("3250.00"));
+      expect.soft(ratios.liquidityRatio.currentLiabilities).toEqual(zmw("800.00"));
+      const debt = (await as("owner", "/api/reports/debt").expect(200)).body.data;
+      expect.soft(debt.totalDebt).toEqual(zmw("800.00"));
+    } finally {
+      clock.mockRestore();
+      await db.update(households).set({ timeZone: null }).where(eq(households.id, householdId));
+    }
+  });
+
+  it("returns the recoverable calendar error on both ratios and debt", async () => {
+    await db.update(households).set({ timeZone: "Invalid/Stored_Policy" }).where(eq(households.id, householdId));
+    try {
+      for (const path of ["/api/reports/ratios", "/api/reports/debt"]) {
+        const result = await as("owner", path);
+        expect.soft(result.status).toBe(422);
+        expect.soft(result.body.error?.code).toBe("HOUSEHOLD_CALENDAR_UNAVAILABLE");
+      }
+    } finally {
+      await db.update(households).set({ timeZone: null }).where(eq(households.id, householdId));
+    }
+  });
 
   it("converts debt analysis and orders the largest converted debt first", async () => {
     const debt = (await as("owner", "/api/reports/debt").expect(200)).body.data;

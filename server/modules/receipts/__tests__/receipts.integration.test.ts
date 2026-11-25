@@ -407,12 +407,6 @@ describe("Receipts API Integration Tests", () => {
   // =========================================================================
   describe("DELETE /api/receipts/:id", () => {
     it("deletes pending receipt successfully", async () => {
-      // Controller calls getReceipt before deleting for audit purposes
-      mockReceiptService.getReceipt.mockResolvedValue({
-        id: TEST_RECEIPT_ID,
-        householdId: TEST_HOUSEHOLD_ID,
-        originalFilename: "test-receipt.jpg",
-      });
       mockReceiptService.deleteReceipt.mockResolvedValue(undefined);
 
       const response = await request(app)
@@ -422,14 +416,14 @@ describe("Receipts API Integration Tests", () => {
       expect(response.body.success).toBe(true);
       expect(mockReceiptService.deleteReceipt).toHaveBeenCalledWith(
         TEST_RECEIPT_ID,
-        expect.objectContaining({ householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID })
+        expect.objectContaining({ householdId: TEST_HOUSEHOLD_ID, userId: TEST_USER_ID }),
+        "127.0.0.1",
       );
-      expect(mockBusinessAuditService.logDelete).toHaveBeenCalled();
+      expect(mockReceiptService.getReceipt).not.toHaveBeenCalled();
     });
 
     it("returns 404 when receipt not found", async () => {
-      // getReceipt is called first and throws 404
-      mockReceiptService.getReceipt.mockRejectedValue(
+      mockReceiptService.deleteReceipt.mockRejectedValue(
         Object.assign(new Error("Receipt not found"), { statusCode: 404 })
       );
 
@@ -441,12 +435,6 @@ describe("Receipts API Integration Tests", () => {
     });
 
     it("returns 409 when trying to delete matched receipt", async () => {
-      // getReceipt succeeds but deleteReceipt fails with 409
-      mockReceiptService.getReceipt.mockResolvedValue({
-        id: TEST_RECEIPT_ID,
-        householdId: TEST_HOUSEHOLD_ID,
-        matchStatus: "matched",
-      });
       mockReceiptService.deleteReceipt.mockRejectedValue(
         Object.assign(new Error("Cannot delete matched receipt"), {
           statusCode: 409,
@@ -487,26 +475,14 @@ describe("Receipts API Integration Tests", () => {
       expect(mockBusinessAuditService.logCreate).not.toHaveBeenCalled();
     });
 
-    it("logs delete action when receipt deleted", async () => {
-      // Need to mock getReceipt first (controller fetches it before deleting)
-      mockReceiptService.getReceipt.mockResolvedValue({
-        id: TEST_RECEIPT_ID,
-        householdId: TEST_HOUSEHOLD_ID,
-        originalFilename: "test-receipt.jpg",
-      });
+    it("leaves the delete audit with the service that owns the write", async () => {
       mockReceiptService.deleteReceipt.mockResolvedValue(undefined);
 
       await request(app)
         .delete(`/api/receipts/${TEST_RECEIPT_ID}`)
         .expect(200);
 
-      expect(mockBusinessAuditService.logDelete).toHaveBeenCalledWith(
-        expect.objectContaining({
-          householdId: TEST_HOUSEHOLD_ID,
-          entityType: "receipt",
-          entityId: TEST_RECEIPT_ID,
-        })
-      );
+      expect(mockBusinessAuditService.logDelete).not.toHaveBeenCalled();
     });
   });
 });

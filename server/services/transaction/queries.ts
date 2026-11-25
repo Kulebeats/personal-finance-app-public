@@ -188,8 +188,11 @@ export async function getTransactionSummary(
     if (!native.isFinite() || native.lt(0)) throw new SummaryDataUnavailable(`Invalid amount on ${row.date}.`);
     if (native.isZero()) continue;
     if (!isCurrencyCode(row.currency)) throw new SummaryDataUnavailable(`Unknown transaction currency for conversion to ${baseCurrency} on ${row.date}.`);
-    const rate = row.currency === baseCurrency ? "1" : row.summaryRate;
-    if (!rate) throw new SummaryDataUnavailable(`No trusted ${row.currency} to ${baseCurrency} exchange rate is available for ${row.date}.`);
+    const value = row.currency === baseCurrency ? "1" : row.summaryRate;
+    const rate = value ? new FlowDecimal(value) : null;
+    if (!rate?.isFinite() || !rate.gt(0)) {
+      throw new SummaryDataUnavailable(`No trusted ${row.currency} to ${baseCurrency} exchange rate is available for ${row.date}.`);
+    }
     const converted = native.times(rate);
     if (row.type === "income") {
       income = income.plus(converted);

@@ -12,6 +12,7 @@ import { logger } from "../../utils/logger";
 import { householdRepository } from "../../repositories/HouseholdRepository";
 import { BudgetDenominationUnavailable } from "../../core/money/budget-denomination";
 import { ForbiddenError } from "../../core/errors";
+import { HouseholdCalendarUnavailable } from "../../services/householdCalendarToday";
 import type { ReportScope } from "./reports.types";
 import { MISSING_FX_RATE_STATUS, missingFxRateBody } from "../../core/errors/missingFxRate";
 
@@ -107,6 +108,7 @@ export function handleReportError(
 ): Response {
   if (error instanceof ForbiddenError) return res.status(error.statusCode).json(error.toJSON());
   if (error instanceof BudgetDenominationUnavailable) return res.status(error.statusCode).json(error.toJSON());
+  if (error instanceof HouseholdCalendarUnavailable) return res.status(error.statusCode).json(error.toJSON());
   const missingRate = missingFxRateBody(error);
   if (missingRate) return res.status(MISSING_FX_RATE_STATUS).json(missingRate);
   if (error instanceof z.ZodError) {

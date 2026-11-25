@@ -1,9 +1,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, DrizzleQueryError, eq, inArray } from "drizzle-orm";
 import { auditLogs, householdMembers, households, notificationDeliveries, userDisplaySettings, userNotificationPreferences, users } from "@shared/schema";
-import { db } from "../../../db";
+import { db, pool } from "../../../db";
 import { sendEmail } from "../../../services/emailService";
 import { businessAuditService } from "../../../services/BusinessAuditService";
+import { householdRepository } from "../../../repositories/HouseholdRepository";
 import { runWeeklyRecap } from "../../../core/scheduling/jobRunners";
 import { SCHEDULED_JOBS } from "../../../core/scheduling/jobRegistry";
 import { runScheduledJob, type JobRunDependencies, type JobSummary } from "../../../core/scheduling/scheduledJob";
@@ -56,6 +57,15 @@ async function runAt(instant: Date): Promise<JobSummary> {
   vi.setSystemTime(instant);
   return runWeeklyRecap({ identity: `recap.weekly@${instant.toISOString()}`, scheduledFor: instant });
 }
+async function ledgerRow(recipient: Recipient): Promise<{ status: string; reason: string | null } | undefined> {
+  const [row] = await db.select({ status: notificationDeliveries.status, reason: notificationDeliveries.reason })
+    .from(notificationDeliveries).where(eq(notificationDeliveries.userId, actors.get(recipient)!.id));
+  return row;
+}
+/** A connection fault as Drizzle reports it: the query error wraps the driver's own. */
+function wrappedConnectionError(cause: Error): DrizzleQueryError {
+  return new DrizzleQueryError('select "role" from "household_members"', [], cause);
+}
 async function ledgerStatus(recipient: Recipient): Promise<string | undefined> {
   const [row] = await db.select({ status: notificationDeliveries.status }).from(notificationDeliveries)
     .where(eq(notificationDeliveries.userId, actors.get(recipient)!.id));
@@ -84,7 +94,7 @@ describe("OPS-007: each user's recap goes out on their chosen day, in household 
     await reset();
     smtp.mockReset();
     smtp.mockResolvedValue(true);
-    await db.update(households).set({ aiConsentGiven: true, timeZone: LUSAKA }).where(eq(households.id, a));
+    await db.update(households).set({ aiConsentGiven: true, timeZone: LUSAKA, currency: "ZMW" }).where(eq(households.id, a));
     await db.update(households).set({ aiConsentGiven: true, timeZone: LUSAKA }).where(eq(households.id, b));
     await db.update(users).set({ emailVerified: true }).where(inArray(users.id, allActorIds()));
     vi.useFakeTimers({ toFake: ["Date"], now: MONDAY_RUN });
@@ -182,6 +192,75 @@ describe("OPS-007: each user's recap goes out on their chosen day, in household 
 
     expect(await sendsTo("owner")).toBe(1);
     expect(await ledgerStatus("owner")).toBe("unknown");
+  });
+
+  it("counts an ambiguous SMTP reply as unknown, not as a failed run", async () => {
+    await enableRecap("owner", WEDNESDAY);
+    smtp.mockImplementationOnce(async (message) => {
+      if (message.throwOnUnknownDelivery) throw new Error("SMTP acceptance could not be determined");
+      return false;
+    });
+
+    const summary = await runAt(WEDNESDAY_RUN);
+
+    expect(summary).toMatchObject({ sent: 0, failed: 0, unknown: 1 });
+  });
+
+  it("reports the run failed when Postgres refuses the egress audit row after SMTP accepted", async () => {
+    await enableRecap("owner", WEDNESDAY);
+    const ownerId = actors.get("owner")!.id;
+    expect(ownerId).toMatch(/^[0-9a-f-]{36}$/);
+    // A real insert failure, not a mocked service: the audit row is refused by the database itself.
+    await pool.query(`CREATE OR REPLACE FUNCTION r17_refuse_recap_audit() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.user_id = '${ownerId}' AND NEW.details->>'exportType' = 'weekly_recap_email' THEN
+          RAISE EXCEPTION 'synthetic audit outage';
+        END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql`);
+    await pool.query("CREATE TRIGGER r17_refuse_recap_audit BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION r17_refuse_recap_audit()");
+    try {
+      expect(await runAt(WEDNESDAY_RUN)).toMatchObject({ sent: 1, failed: 1 });
+      await runAt(new Date("2026-11-25T09:20:00Z"));
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS r17_refuse_recap_audit ON audit_logs");
+      await pool.query("DROP FUNCTION IF EXISTS r17_refuse_recap_audit()");
+    }
+
+    expect(await sendsTo("owner")).toBe(1);
+    expect(await ledgerStatus("owner")).toBe("sent");
+  });
+
+  it("does not rebuild a digest its data cannot make on every later tick that day", async () => {
+    await enableRecap("owner", WEDNESDAY);
+    await db.update(households).set({ currency: null }).where(eq(households.id, a));
+
+    const first = await runAt(WEDNESDAY_RUN);
+    const later = await runAt(new Date("2026-11-25T09:20:00Z"));
+
+    expect(first.failed).toBe(1);
+    expect(later.failed).toBe(0);
+    expect(smtp).not.toHaveBeenCalled();
+    expect(await ledgerRow("owner")).toEqual({ status: "suppressed", reason: "recap_unbuildable" });
+  });
+
+  it.each([
+    ["a reset socket", () => Object.assign(new Error("read ECONNRESET"), { errno: -104, code: "ECONNRESET", syscall: "read" })],
+    ["a dropped connection with no code", () => new Error("Connection terminated unexpectedly")],
+  ])("retries a digest whose build hit %s on a later tick", async (_label, connectionFault) => {
+    await enableRecap("owner", WEDNESDAY);
+    const findMember = vi.spyOn(householdRepository, "findMember").mockRejectedValueOnce(wrappedConnectionError(connectionFault()));
+    try {
+      const first = await runAt(WEDNESDAY_RUN);
+      expect(first.failed).toBe(1);
+      expect(await ledgerRow("owner")).toMatchObject({ status: "failed" });
+      expect(smtp).not.toHaveBeenCalled();
+
+      await runAt(new Date("2026-11-25T09:20:00Z"));
+      expect(findMember).toHaveBeenCalledTimes(2);
+    } finally { findMember.mockRestore(); }
+
+    expect(await sendsTo("owner")).toBe(1);
   });
 
   it("never resends after SMTP accepted it but the egress audit failed, and reports the run failed", async () => {

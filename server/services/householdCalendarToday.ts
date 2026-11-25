@@ -18,9 +18,13 @@ type CalendarReader = Pick<typeof db, "select">;
 /** The household's calendar zone: its owner-chosen zone, else UTC for a legacy household. */
 export async function householdCalendarZone(reader: CalendarReader, householdId: string): Promise<string> {
   const [row] = await reader.select({ timeZone: households.timeZone }).from(households).where(eq(households.id, householdId));
-  if (!row?.timeZone) return LEGACY_HOUSEHOLD_CALENDAR_ZONE;
+  return storedHouseholdCalendarZone(row?.timeZone);
+}
+
+export function storedHouseholdCalendarZone(timeZone: string | null | undefined): string {
+  if (!timeZone) return LEGACY_HOUSEHOLD_CALENDAR_ZONE;
   try {
-    return normalizeHouseholdTimeZone(row.timeZone);
+    return normalizeHouseholdTimeZone(timeZone);
   } catch {
     throw new HouseholdCalendarUnavailable();
   }

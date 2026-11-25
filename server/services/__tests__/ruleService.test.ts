@@ -510,6 +510,15 @@ describe("RuleService", () => {
   });
 
   describe("testRule", () => {
+    it("reports a missing rule as not found", async () => {
+      const { ruleService } = await import("../RuleService");
+      const { ruleRepository } = await import("../../repositories/RuleRepository");
+      vi.mocked(ruleRepository.findByIdAndHousehold).mockResolvedValue(undefined);
+
+      await expect(ruleService.testRule("missing-rule", testHouseholdId, "user-a"))
+        .rejects.toMatchObject({ statusCode: 404, code: "NOT_FOUND" });
+    });
+
     it("returns correct count of matching transactions visible to the user", async () => {
       const { ruleService } = await import("../RuleService");
       const { ruleRepository } = await import(

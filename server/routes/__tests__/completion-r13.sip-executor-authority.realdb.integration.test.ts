@@ -13,6 +13,7 @@ import { sipExecutionKey } from "../../services/investment/investmentCronKeys";
 import { lockSipExecutionAuthorization, SIP_EXECUTION_REFUSAL } from "../../services/investment/sipExecutionAuthorization";
 import { recordSipPurchase } from "../../services/investment/recordSipPurchase";
 import { withTransaction } from "../../utils/withTransaction";
+import { calendarClock } from "../../services/householdCalendarToday";
 
 // TEST-ONLY / UNEXECUTED. Corrected0029, Main's retention contract and protected
 // serial composition remain prerequisites; no RED/GREEN or runtime claim.
@@ -702,6 +703,35 @@ describe("UNVERIFIED R13 actual signed SIP executor authority and completed proo
     const before = await snapshot();
     expect(await atSipTick(tick, processDueInvestments)).toEqual({ success: 0, held: 0, skipped: 0, failed: 0, errors: [] });
     expect(await snapshot()).toEqual(before);
+  });
+
+  it.each([
+    { zone: "Africa/Lusaka", instant: "2027-01-30T22:15:00Z", held: 1 },
+    { zone: "America/New_York", instant: "2027-01-31T00:15:00Z", held: 0 },
+  ])("uses $zone's due date on the opposite side of UTC midnight", async ({ zone, instant, held }) => {
+    const scheduledDate = "2027-01-31";
+    await signed("owner", "put", "/api/investments/calendar").send({ timeZone: zone }).expect(200);
+    const created = await createPlan("owner", sharedAccountId, "monthly", scheduledDate);
+    const before = await snapshot();
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(instant));
+    const clock = vi.spyOn(calendarClock, "now").mockReturnValue(new Date(instant));
+    try {
+      const result = await processDueInvestments();
+      expect.soft(result).toEqual({ success: 0, held, skipped: 0, failed: 0, errors: [] });
+      const after = await snapshot();
+      expect.soft(after.occurrences).toEqual(held ? [
+        expect.objectContaining({ planId: created.plan.id, originalDueDate: scheduledDate, state: "pending" }),
+      ] : []);
+      expect.soft(after.plans[0].nextExecutionDate).toBe(held ? "2027-02-28" : scheduledDate);
+      expect.soft(after.accounts).toEqual(before.accounts);
+      expect.soft(after.cash).toEqual(before.cash);
+      expect.soft(after.purchases).toEqual(before.purchases);
+    } finally {
+      clock.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   // FIN-12 catch-up. The per-plan cap is SIP_CATCH_UP_LIMIT (12) occurrences a run.

@@ -12,12 +12,13 @@ import { randomUUID } from "node:crypto";
 import request from "supertest";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { auditLogs, householdMembers, pendingReceipts, storageObjects, transactions, users } from "@shared/schema";
 import { db, pool } from "../../../db";
 import { hashPassword } from "../../../auth";
 import { readUploadObject, removeUploadObject, uploadNameOf } from "../../../core/storage/upload-objects";
 import { createSignedHousehold, insertAccount, type SignedHousehold } from "../../../__tests__/signed-household-fixture";
+import { holdHouseholdLocks } from "../../household/__tests__/householdLockBarrier";
 
 const PASSWORD = "SyntheticReceiptDeleteBinding123!";
 
@@ -58,6 +59,28 @@ async function insertReceipt(matchedTransactionId: string | null, storagePath?: 
 async function receiptExists(id: string): Promise<boolean> {
   const [row] = await db.select({ id: pendingReceipts.id }).from(pendingReceipts).where(eq(pendingReceipts.id, id));
   return Boolean(row);
+}
+
+async function receiptAudits(id: string) {
+  return db.select().from(auditLogs).where(and(eq(auditLogs.entityType, "receipt"), eq(auditLogs.entityId, id)));
+}
+
+async function refuseReceiptAudit<T>(action: "CREATE" | "DELETE" | "UPDATE", run: () => Promise<T>): Promise<T> {
+  await pool.query(`create or replace function refuse_receipt_audit_for_test() returns trigger language plpgsql as $$
+    begin
+      if new.entity_type = 'receipt' and new.action = TG_ARGV[0] then
+        raise exception 'synthetic audit rejection' using errcode = '23514';
+      end if;
+      return new;
+    end $$`);
+  try {
+    await pool.query(`create trigger refuse_receipt_audit_for_test before insert on audit_logs
+      for each row execute function refuse_receipt_audit_for_test('${action}')`);
+    return await run();
+  } finally {
+    await pool.query("drop trigger if exists refuse_receipt_audit_for_test on audit_logs");
+    await pool.query("drop function refuse_receipt_audit_for_test()");
+  }
 }
 
 beforeAll(async () => {
@@ -127,12 +150,14 @@ describe("A-28 receipt delete removes only the receipt's own stored files", () =
       .attach("file", image, { filename: "owner-upload.png", contentType: "image/png" }).expect(201);
     const [source] = await db.select({ storagePath: pendingReceipts.storagePath, thumbnailPath: pendingReceipts.thumbnailPath })
       .from(pendingReceipts).where(eq(pendingReceipts.id, uploaded.body.data.receiptId));
+    expect(await receiptAudits(uploaded.body.data.receiptId)).toMatchObject([{ action: "CREATE", userId: owner.userId }]);
     uploadedPaths.push(source.storagePath, ...(source.thumbnailPath ? [source.thumbnailPath] : []));
     const mismatched = await insertReceipt(null, source.storagePath);
 
     await request(owner.app).delete(`/api/receipts/${mismatched}`).set(owner.headers).expect(200);
 
     expect(await receiptExists(mismatched)).toBe(false);
+    expect(await receiptAudits(mismatched)).toMatchObject([{ action: "DELETE", userId: owner.userId }]);
     const [manifest] = await db.select({ key: storageObjects.key }).from(storageObjects)
       .where(eq(storageObjects.uploadName, uploadNameOf(source.storagePath) ?? ""));
     expect(manifest, "the other receipt's manifest row was deleted").toBeDefined();
@@ -140,3 +165,76 @@ describe("A-28 receipt delete removes only the receipt's own stored files", () =
     expect(stillStored?.bytes.length, "the other receipt's object was deleted").toBeGreaterThan(0);
   });
 });
+
+describe("NEW-32 receipt writes roll back on audit failure", () => {
+  it("keeps the receipt when its DELETE audit is refused", async () => {
+    const id = await insertReceipt(null);
+    const response = await refuseReceiptAudit("DELETE", () =>
+      request(owner.app).delete(`/api/receipts/${id}`).set(owner.headers));
+    expect.soft(response.status).toBeGreaterThanOrEqual(500);
+    expect(await receiptExists(id)).toBe(true);
+    expect(await receiptAudits(id)).toEqual([]);
+  });
+
+  it("keeps the original OCR data when the UPDATE audit is refused", async () => {
+    const id = await insertReceipt(null);
+    const response = await refuseReceiptAudit("UPDATE", () =>
+      request(owner.app).post(`/api/receipts/${id}/ocr-results`).set(owner.headers)
+        .send({ amount: "13.27", date: "2026-11-20", confidence: 0.9 }));
+    expect.soft(response.status).toBeGreaterThanOrEqual(500);
+    const [row] = await db.select().from(pendingReceipts).where(eq(pendingReceipts.id, id));
+    expect(row.ocrData).toBeNull();
+    expect(row.ocrProcessedAt).toBeNull();
+    expect(await receiptAudits(id)).toEqual([]);
+  });
+
+  it("leaves no receipt or stored objects when the upload's CREATE audit is refused", async () => {
+    const image = await sharp({ create: { width: 5, height: 4, channels: 3, background: "#116622" } }).png().toBuffer();
+    const filename = "synthetic-refused-audit.png";
+    const manifestCount = async () =>
+      (await db.select({ id: storageObjects.key }).from(storageObjects).where(eq(storageObjects.householdId, owner.householdId))).length;
+    const priorCount = await manifestCount();
+    const response = await refuseReceiptAudit("CREATE", () =>
+      request(owner.app).post("/api/receipts/upload").set(owner.headers)
+        .attach("file", image, { filename, contentType: "image/png" }));
+    const rows = await db.select().from(pendingReceipts).where(and(
+      eq(pendingReceipts.householdId, owner.householdId),
+      eq(pendingReceipts.originalFilename, filename),
+    ));
+    // The baseline can leave a committed row and files. Keep them in teardown.
+    for (const row of rows) uploadedPaths.push(row.storagePath, ...(row.thumbnailPath ? [row.thumbnailPath] : []));
+    expect.soft(response.status).toBeGreaterThanOrEqual(500);
+    expect.soft(rows).toHaveLength(0);
+    expect(await manifestCount()).toBe(priorCount);
+  });
+});
+
+it("serializes a receipt DELETE with an ownership transfer on the same household", async () => {
+  const id = await insertReceipt(null);
+  const barrier = await holdHouseholdLocks([owner.householdId]);
+  const transfer = request(owner.app).post("/api/household/transfer-ownership")
+    .set(owner.headers).send({ newOwnerId: member.userId }).timeout(20_000).then(response => response);
+  const pending = [transfer];
+  void transfer.catch(() => undefined);
+  try {
+    // The transfer must get the household first. Before the fix the DELETE
+    // holds its membership row while its audit insert queues on the household.
+    await barrier.waitForWaiters(1);
+    const deletion = request(owner.app).delete(`/api/receipts/${id}`)
+      .set(owner.headers).timeout(20_000).then(response => response);
+    pending.push(deletion);
+    void deletion.catch(() => undefined);
+    await barrier.waitForWaiters(2);
+  } finally {
+    await barrier.release();
+    await Promise.allSettled(pending);
+  }
+  const [ownership, deletion] = await Promise.all(pending);
+  expect(ownership.status, JSON.stringify(ownership.body)).toBe(200);
+  expect(deletion.status, JSON.stringify(deletion.body)).toBe(200);
+  const roles = await db.select({ userId: householdMembers.userId, role: householdMembers.role })
+    .from(householdMembers).where(eq(householdMembers.householdId, owner.householdId));
+  expect(roles.filter(row => row.role === "owner")).toEqual([{ userId: member.userId, role: "owner" }]);
+  expect(await receiptExists(id)).toBe(false);
+  expect(await receiptAudits(id)).toMatchObject([{ action: "DELETE", userId: owner.userId }]);
+}, 25_000);
