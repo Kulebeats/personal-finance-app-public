@@ -34,8 +34,8 @@ export { resolvedFxRate };
  * @param baseCurrency - Household base currency code
  * @param dateExpr - Optional SQL expression bounding the rate lookup
  * @param options - `householdId`: the household whose manual rates apply;
- *                  `nullOnMissing`: yield NULL (not an error) when no rate
- *                  matches, so row-by-row JS callers can fail closed per row
+ *                  `nullOnMissing`: yield NULL when no usable rate matches,
+ *                  so row-by-row JS callers can fail closed per row
  */
 export function buildFxRateExpr(
   currencyExpr: SQL,
