@@ -3198,7 +3198,9 @@ export const fxRates = pgTable("fx_rates", {
   source: varchar("source", { length: 50 }).notNull(), // 'boz', 'xe.com', 'manual'
 
   createdAt: timestamp("created_at").defaultNow(),
-});
+}, (table) => ({
+  positiveRate: check("chk_fx_rates_positive", sql`${table.rate} > 0 AND ${table.rate} < 'Infinity'::numeric`),
+}));
 
 // R12 (NEW-13): a manual exchange rate belongs to the household whose owner or
 // admin recorded it, for an inclusive validity window. It never enters fx_rates,

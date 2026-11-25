@@ -10,6 +10,7 @@ import {
   RateLimitError,
 } from "../core/errors";
 import { MISSING_FX_RATE_STATUS, logMissingFxRate, missingFxRateBody } from "../core/errors/missingFxRate";
+import { getPostgresError } from "./postgresError";
 
 export {
   ValidationError,
@@ -154,6 +155,12 @@ export function apiErrorMiddleware(
   if (missingRate) {
     logMissingFxRate(req, missingRate);
     res.status(MISSING_FX_RATE_STATUS).json(missingRate);
+    return;
+  }
+
+  if (getPostgresError(err)?.code === "22P02") {
+    const invalidInput = new ValidationError("Invalid input");
+    res.status(invalidInput.statusCode).json(invalidInput.toJSON());
     return;
   }
 

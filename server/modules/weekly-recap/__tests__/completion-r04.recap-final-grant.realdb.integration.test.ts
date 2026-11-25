@@ -7,6 +7,7 @@ import { db } from "../../../db";
 import { recurringService } from "../../../services/RecurringService";
 import { businessAuditService } from "../../../services/BusinessAuditService";
 import { sendEmail } from "../../../services/emailService";
+import { insertLegacySharedFxRates } from "../../../testing/fixtures/legacy-shared-fx";
 import { Client } from "pg";
 
 import { weeklyRecapService } from "../weekly-recap.service";
@@ -377,10 +378,11 @@ describe("R04 recap final recipient grant and protected recurring query failures
     })));
     try {
       const valid = mode === "round" || mode === "decline";
-      await db.insert(fxRates).values([
-        { id: rateIds[0], date: priorDate, rate: mode === "decline" ? "2" : "0.6" },
-        { id: rateIds[1], date: from, rate: mode === "decline" ? "1" : mode === "round" ? "1.4" : mode },
-      ].map(row => ({ ...row, fromCurrency: "XTS", toCurrency: "ZMW", source: "manual" })));
+      const pair = { fromCurrency: "XTS", toCurrency: "ZMW", source: "manual" };
+      await db.insert(fxRates).values({ ...pair, id: rateIds[0], date: priorDate, rate: mode === "decline" ? "2" : "0.6" });
+      const current = { ...pair, id: rateIds[1], date: from, rate: mode === "decline" ? "1" : mode === "round" ? "1.4" : mode };
+      if (valid) await db.insert(fxRates).values(current);
+      else await insertLegacySharedFxRates([current]);
       if (valid) await db.insert(providerFxQuotes).values([
         { id: rateIds[0], date: priorDate, rate: mode === "decline" ? "2" : "0.6" },
         { id: rateIds[1], date: from, rate: mode === "decline" ? "1" : "1.4" },

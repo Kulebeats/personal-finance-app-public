@@ -116,7 +116,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     { router: transactionsRoutes, params: ["id", "attachmentId"] },
     { router: accountsRoutes, params: ["id"] },
     { router: modularBudgetsRoutes, params: ["id"] },
-    { router: goalsRoutes, params: ["id", "accountId", "txId"] },
+    { router: goalsRoutes, params: ["id", "accountId", "txId", "contributionId"] },
     { router: modularRecurringRoutes, params: ["id", "linkId", "transactionId"] },
     { router: modularRulesRoutes, params: ["id"] },
     { router: modularReceiptsRoutes, params: ["id"] },

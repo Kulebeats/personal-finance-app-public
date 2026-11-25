@@ -79,6 +79,14 @@ describe("C3-09 rule dry run writes nothing", () => {
   beforeEach(async () => { await clean(); await reset(); });
   afterAll(async () => { await clean(); await stop(); });
 
+  it.each(["rule", "transaction"] as const)("returns 404 when the %s needed for a dry run is missing", async missing => {
+    const ruleId = missing === "rule" ? randomUUID() : await authorRule(false);
+    const transactionId = randomUUID();
+    const response = await signed(request(app).post(`/api/rules/${ruleId}/dry-run`)).send({ transactionId });
+    expect(response.status).toBe(404);
+    expect(response.body.error).toMatchObject({ code: "NOT_FOUND" });
+  });
+
   it("leaves tag links, usage counts, aliases, splits, audit and outbox unchanged and describes the proposal", async () => {
     const { merchantId, transactionId } = await seedTransactionWithManualSplits();
     const ruleId = await authorRule(false);

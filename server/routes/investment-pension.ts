@@ -28,25 +28,22 @@ function pensionWriter(req: Request) {
 router.use(requireAuth);
 router.use(householdGuard);
 
-router.get("/", async (req, res) => {
+router.get("/", async (req, res, next) => {
   try {
     const holdings = await pensionService.getHoldings(req.householdContext!);
     res.json({ success: true, data: holdings });
   } catch (error: unknown) {
-    res.status(500).json({ success: false, message: getErrorMessage(error) });
+    next(error);
   }
 });
 
 // FIX AUTH-PENSION-001 + A-56: only a holding the actor can see (else 404)
-router.get("/:id/contributions", async (req, res) => {
+router.get("/:id/contributions", async (req, res, next) => {
   try {
     const contributions = await pensionService.getContributions(req.params.id, req.householdContext!);
     res.json({ success: true, data: contributions });
   } catch (error: unknown) {
-    if (error instanceof HttpError) {
-      return res.status(error.statusCode).json({ success: false, error: { code: error.code, message: error.message } });
-    }
-    res.status(500).json({ success: false, message: getErrorMessage(error) });
+    next(error);
   }
 });
 

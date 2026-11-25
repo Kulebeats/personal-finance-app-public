@@ -91,9 +91,6 @@ export const receiptsController = {
    */
   async upload(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
-      const userId = req.session.userId!;
-
       if (!req.file) {
         throw new ValidationError("No file uploaded");
       }
@@ -111,24 +108,9 @@ export const receiptsController = {
           size: req.file.size,
         },
         req.householdContext!,
-        idempotencyKey
+        idempotencyKey,
+        businessAuditService.getIpAddress(req),
       );
-
-      // Audit log for receipt upload
-      if (!result.isDuplicate) {
-        await businessAuditService.logCreate({
-          userId,
-          householdId,
-          entityType: "receipt",
-          entityId: result.receiptId,
-          newValue: {
-            filename: req.file.originalname,
-            size: req.file.size,
-            mimeType: req.file.mimetype,
-          },
-          ipAddress: businessAuditService.getIpAddress(req),
-        });
-      }
 
       return success(
         res,
@@ -194,24 +176,9 @@ export const receiptsController = {
    */
   async delete(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
-      const userId = req.session.userId!;
       const { id } = req.params;
 
-      // Get receipt before deletion for audit
-      const receipt = await receiptService.getReceipt(id, householdId);
-
-      await receiptService.deleteReceipt(id, req.householdContext!);
-
-      // Audit log for receipt deletion
-      await businessAuditService.logDelete({
-        userId,
-        householdId,
-        entityType: "receipt",
-        entityId: id,
-        oldValue: receipt ? { filename: receipt.originalFilename } : undefined,
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
+      await receiptService.deleteReceipt(id, req.householdContext!, businessAuditService.getIpAddress(req));
 
       return success(res, { deleted: true, id });
     } catch (error) {
@@ -229,8 +196,6 @@ export const receiptsController = {
    */
   async storeOcrResults(req: Request, res: Response, next: NextFunction) {
     try {
-      const { householdId } = req.householdContext!;
-      const userId = req.session.userId!;
       const { id } = req.params;
 
       const parseResult = ocrResultsSchema.safeParse(req.body);
@@ -248,41 +213,8 @@ export const receiptsController = {
         ocrData,
         confidence,
         rawText,
+        businessAuditService.getIpAddress(req),
       );
-
-      await businessAuditService.logUpdate({
-        userId,
-        householdId,
-        entityType: "receipt",
-        entityId: id,
-        newValue: {
-          ocrStatus: "completed",
-          ocrConfidence: confidence.toString(),
-        },
-        metadata: {
-          hasAmount: Boolean(ocrData.amount),
-          hasDate: Boolean(ocrData.date),
-          hasMerchant: Boolean(ocrData.merchantName),
-          itemsCount: ocrData.lineItems?.length ?? 0,
-          hasRawText: Boolean(rawText),
-        },
-        ipAddress: businessAuditService.getIpAddress(req),
-      });
-
-      if (matchResult.matched && matchResult.transactionId) {
-        await businessAuditService.log({
-          userId,
-          householdId,
-          action: "LINK",
-          entityType: "receipt",
-          entityId: id,
-          details: {
-            transactionId: matchResult.transactionId,
-            method: "auto",
-          },
-          ipAddress: businessAuditService.getIpAddress(req),
-        });
-      }
 
       return success(res, {
         id,
@@ -400,7 +332,9 @@ export const receiptsController = {
       const { householdId } = req.householdContext!;
       const { id } = req.params;
 
-      const result = await receiptService.attemptMatch(id, householdId, req.session.userId!);
+      const result = await receiptService.attemptMatch(
+        id, householdId, req.session.userId!, "request", businessAuditService.getIpAddress(req),
+      );
       return success(res, {
         matched: result.matched,
         transactionId: result.transactionId ?? null,
