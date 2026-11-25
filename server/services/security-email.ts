@@ -6,8 +6,9 @@ import { passwordResetTokens, securityAuditLogs, users } from "@shared/schema";
 import { db } from "../db";
 import { sameEmail, userRepository } from "../repositories/UserRepository";
 import { verifyPassword } from "../auth";
-import { UnauthorizedError, ValidationError, InvalidCredentialsError, RateLimitError } from "../core/errors";
+import { ConflictError, UnauthorizedError, ValidationError, InvalidCredentialsError, RateLimitError } from "../core/errors";
 import { sha256Hex } from "../core/tokenHash";
+import { isUserEmailUniqueViolation } from "../utils/postgresError";
 import { withTransaction } from "../utils/withTransaction";
 import { lockCurrentSessionCredential } from "./session-identity";
 import { enqueueSecurityNotice } from "./security-notice";
@@ -36,7 +37,9 @@ export async function consumeEmailVerificationToken(token: string, options: { in
     if (!live(current) || current.emailVerificationToken !== tokenHash || !current.emailVerificationExpiry || current.emailVerificationExpiry.getTime() <= Date.now()) throw invalidToken();
     const changing = current.pendingEmail !== null;
     if (changing && (options.initialOnly || !options.request)) throw invalidToken();
-    const next = changing ? z.string().email().max(255).parse(current.pendingEmail) : current.email;
+    const next = changing
+      ? z.string().trim().email().max(255).parse(current.pendingEmail)
+      : current.email.trim();
     await tx.update(users).set({ email: next, emailVerified: true, pendingEmail: null, emailVerificationToken: null,
       emailVerificationExpiry: null, ...(changing ? { mfaCode: null, mfaCodeExpiry: null } : {}), updatedAt: new Date() }).where(eq(users.id, current.id));
     if (changing) {
@@ -49,6 +52,12 @@ export async function consumeEmailVerificationToken(token: string, options: { in
         details: { action: "email_verified" }, ipAddress: options.request?.ip || null, userAgent: options.request?.headers["user-agent"] || null });
     }
     return changing;
+  }).catch((error: unknown) => {
+    // The transaction has rolled back before the uniqueness error is translated.
+    if (isUserEmailUniqueViolation(error)) {
+      throw new ConflictError("Unable to update email address. Please try a different email.");
+    }
+    throw error;
   });
 }
 
@@ -56,14 +65,15 @@ export async function requestEmailChange(req: Request, newEmail: string, passwor
   const snapshot = await userRepository.findById(req.session.userId!);
   if (!snapshot) throw new UnauthorizedError("Authentication changed; sign in again");
   if (!await verifyPassword(password, snapshot.passwordHash)) throw new InvalidCredentialsError("Invalid password");
+  const email = newEmail.trim();
   return withTransaction(async (tx) => {
     const current = await lockCurrentSessionCredential(tx, snapshot, req.sessionID, req.session.securityGeneration);
-    const [existing] = await tx.select({ id: users.id }).from(users).where(sameEmail(newEmail)).limit(1);
+    const [existing] = await tx.select({ id: users.id }).from(users).where(sameEmail(email)).limit(1);
     if (existing) throw new ValidationError("This email is already in use");
     const issued = challenge();
-    await tx.update(users).set({ pendingEmail: newEmail, emailVerificationToken: sha256Hex(issued.token),
+    await tx.update(users).set({ pendingEmail: email, emailVerificationToken: sha256Hex(issued.token),
       emailVerificationExpiry: issued.expiry, updatedAt: new Date() }).where(eq(users.id, current.id));
-    return { email: newEmail, token: issued.token, isEmailChange: true };
+    return { email, token: issued.token, isEmailChange: true };
   });
 }
 export async function resendOwnEmailVerification(req: Request) {

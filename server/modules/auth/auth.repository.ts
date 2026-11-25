@@ -24,7 +24,7 @@
 import { db } from "../../db";
 import { users } from "@shared/schema";
 import { eq, sql } from "drizzle-orm";
-import { sameEmail } from "../../repositories/UserRepository";
+import { sameEmail, userRepository } from "../../repositories/UserRepository";
 
 /**
  * User data for creation
@@ -82,16 +82,12 @@ export const authRepository = {
    * Create new user
    */
   async createUser(data: CreateUserData) {
-    const [user] = await db
-      .insert(users)
-      .values({
-        email: data.email,
-        username: data.username,
-        passwordHash: data.passwordHash,
-        fullName: data.fullName,
-      })
-      .returning();
-    return user;
+    return userRepository.create({
+      email: data.email,
+      username: data.username,
+      passwordHash: data.passwordHash,
+      fullName: data.fullName,
+    });
   },
 
   /**

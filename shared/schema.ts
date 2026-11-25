@@ -1143,7 +1143,7 @@ export type HouseholdSavedView = typeof householdSavedViews.$inferSelect;
 
 // User schemas
 export const insertUserSchema = createInsertSchema(users, {
-  email: z.string().email(),
+  email: z.string().trim().email(),
   username: z.string().min(3).max(255),
   fullName: z.string().min(1).max(100).optional(),
 }).pick({
