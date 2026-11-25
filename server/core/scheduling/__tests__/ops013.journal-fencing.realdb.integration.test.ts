@@ -7,10 +7,11 @@
  * running or two completed rows for one period.
  */
 import { randomUUID } from "node:crypto";
-import { and, eq, like } from "drizzle-orm";
+import { setTimeout as pause } from "node:timers/promises";
+import { and, eq, like, sql } from "drizzle-orm";
 import { afterAll, expect, it } from "vitest";
 import { jobs } from "@shared/schema";
-import { db } from "../../../db";
+import { db, pool } from "../../../db";
 import { getPostgresError } from "../../../utils/postgresError";
 import { finishJobRun, SCHEDULED_RUN_PREFIX, startJobRun, type ScheduledPeriod } from "../jobJournal";
 
@@ -48,6 +49,67 @@ it("does not start a run of a period that has already completed", async () => {
 
   expect(await startJobRun(jobName("done"), period("done"))).toBeNull();
   expect(await rows("done")).toEqual([{ id: first, status: "completed", lastError: null }]);
+});
+
+it("closes an old running row as superseded when its period already completed", async () => {
+  const label = "already-done";
+  const name = `${SCHEDULED_RUN_PREFIX}${jobName(label)}`;
+  const { identity, scheduledFor } = period(label);
+  const stale = await startJobRun(jobName(label), period(label));
+  expect(stale).toBeTruthy();
+  const [winner] = await db.insert(jobs).values({
+    name, status: "completed", idempotencyKey: identity, runAt: scheduledFor,
+    completedAt: scheduledFor, result: { processed: 7 },
+  }).returning();
+
+  await expect.soft(finishJobRun(stale!, OK)).rejects.toMatchObject({ code: "RUN_SUPERSEDED" });
+  expect.soft(await rows(label)).toEqual(expect.arrayContaining([
+    { id: stale, status: "failed", lastError: "RUN_SUPERSEDED" },
+    { id: winner.id, status: "completed", lastError: null },
+  ]));
+  const [persisted] = await db.select().from(jobs).where(eq(jobs.id, winner.id));
+  expect(persisted).toEqual(winner);
+});
+
+it("settles a stale close racing a real completion at the unique period fence", async () => {
+  const label = "close-race";
+  const name = `${SCHEDULED_RUN_PREFIX}${jobName(label)}`;
+  const { identity, scheduledFor } = period(label);
+  const stale = await startJobRun(jobName(label), period(label));
+  expect(stale).toBeTruthy();
+  let closeAttempt: Promise<unknown> | undefined;
+
+  try {
+    await db.transaction(async tx => {
+      // Model a legacy runner's completed row becoming visible while the
+      // original runner is already trying to close beside it.
+      const { rows: [backend] } = await tx.execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`);
+      await tx.insert(jobs).values({
+        name, status: "completed", idempotencyKey: identity, runAt: scheduledFor,
+        completedAt: scheduledFor, result: { processed: 8 },
+      });
+      closeAttempt = finishJobRun(stale!, OK).then(() => null, (error: unknown) => error);
+      const deadline = Date.now() + 5000;
+      let observed = false;
+      while (!observed && Date.now() < deadline) {
+        const { rows: [witness] } = await pool.query<{ blocked: boolean }>(`
+          SELECT EXISTS (
+            SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+              AND $1::int = ANY(pg_blocking_pids(pid))
+          ) AS blocked`, [backend.pid]);
+        observed = witness.blocked;
+        if (!observed) await pause(20);
+      }
+      expect(observed, "stale close waited on the winner's uncommitted completion").toBe(true);
+    });
+  } finally {
+    // Resolve after transaction commit or rollback, never while it holds the fence.
+    await closeAttempt;
+  }
+  expect.soft(await closeAttempt).toMatchObject({ code: "RUN_SUPERSEDED" });
+  const journal = await rows(label);
+  expect(journal.filter(row => row.status === "completed")).toHaveLength(1);
+  expect(journal.find(row => row.id === stale)).toMatchObject({ status: "failed", lastError: "RUN_SUPERSEDED" });
 });
 
 it("holds at most one running and one completed row per period, and leaves other jobs' rows alone", async () => {

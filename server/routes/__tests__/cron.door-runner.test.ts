@@ -190,6 +190,17 @@ describe("the cron door runs catalogued jobs through the scheduler's runner", ()
     expect(JSON.stringify(response.body)).not.toContain("could not be started");
   });
 
+  it("distinguishes a wrapped pre-run uniqueness violation from runner unavailability", async () => {
+    runner.run.mockRejectedValueOnce(new Error("PRIVATE_SENTINEL", {
+      cause: Object.assign(new Error("unique write refused"), { code: "23505", constraint: "synthetic_other_index" }),
+    }));
+
+    const response = await post("budget-rollover").expect(500);
+    expect(response.body).toMatchObject({ success: false,
+      jobs: [{ name: "budget.rollover", status: "failed", errorCode: "PG_23505", summary: null }] });
+    expect(JSON.stringify(response.body)).not.toContain("PRIVATE_SENTINEL");
+  });
+
   it("never waits for another period's job lock: the runner is asked for no wait, so a busy job answers 409 at once", async () => {
     await post("recurring").expect(200);
 

@@ -26,6 +26,7 @@ import {
 } from "../core/scheduling/scheduledJob";
 import { isWithinScheduledWindow, scheduledSlotAtOrBefore } from "../core/scheduling/schedulePeriod";
 import { logger } from "../utils/logger";
+import { isPostgresError } from "../utils/postgresError";
 import { strictLimiter } from "../middleware/rateLimit";
 
 const router = Router();
@@ -100,7 +101,9 @@ async function runDoorJob(job: ScheduledJobDefinition): Promise<DoorJobResult> {
     return { name: job.name, ...await runScheduledJob(job, undefined, now, DOOR_RUN_OPTIONS) };
   } catch (error) {
     // Unknown: the work ran and its journal row may still read "running".
-    const errorCode = error instanceof JobOutcomeUnknownError ? JOB_OUTCOME_UNKNOWN : RUNNER_UNAVAILABLE;
+    const errorCode = error instanceof JobOutcomeUnknownError
+      ? JOB_OUTCOME_UNKNOWN
+      : isPostgresError(error, "23505") ? "PG_23505" : RUNNER_UNAVAILABLE;
     logger.error("Cron: scheduled job runner failed", { jobName: job.name, errorCode, error });
     return { name: job.name, status: "failed", errorCode, summary: null };
   }

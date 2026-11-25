@@ -137,6 +137,56 @@ describe("scheduled-job health reads the runner's journal (real Postgres)", () =
     expect(await cataloguedRows("security.mfa-reminders")).toHaveLength(1);
   });
 
+  it("does not restart the health grace when a never-successful job is catalogued after its first run", async () => {
+    const now = new Date();
+    const oldAttempt = new Date(now.getTime() - 3 * DAY_MS);
+    const recentAttempt = new Date(now.getTime() - 60_000);
+    await recordSchedulerStart(oldAttempt);
+    await db.insert(jobs).values([oldAttempt, recentAttempt].map(startedAt => ({
+      name: `${SCHEDULED_RUN_PREFIX}${daily.name}`, status: "failed" as const, lastError: "JOB_FAILED",
+      runAt: startedAt, startedAt, completedAt: startedAt,
+    })));
+    await recordCataloguedJobs([daily.name], recentAttempt);
+
+    const health = await readScheduledJobsHealth({ specs, env: ENABLED, now });
+    expect(health.jobs[0]).toEqual({ jobName: daily.name, lastSuccessAt: null, stale: true });
+
+    await jobService.cleanup(1);
+    const attempts = await db.select({ startedAt: jobs.startedAt }).from(jobs)
+      .where(eq(jobs.name, `${SCHEDULED_RUN_PREFIX}${daily.name}`));
+    expect(attempts).toEqual([{ startedAt: recentAttempt }]);
+    const afterPrune = await readScheduledJobsHealth({ specs, env: ENABLED, now });
+    expect(afterPrune.jobs[0]).toEqual({ jobName: daily.name, lastSuccessAt: null, stale: true });
+  });
+
+  it("does not give a pre-catalogue job with no attempt rows a new grace period on upgrade", async () => {
+    const jobName = "security.daily-report";
+    const now = new Date();
+    const beforeUpgrade = new Date(now.getTime() - 3 * DAY_MS);
+    const newMarker = new Date(now.getTime() - 60_000);
+    const health = await readScheduledJobsHealth({
+      specs: [{ name: jobName, intervalMs: DAY_MS }], env: ENABLED, now,
+      readEpoch: async () => beforeUpgrade,
+      readStatus: async () => [],
+      readCatalogued: async () => new Map([[jobName, newMarker]]),
+    });
+
+    expect(health.jobs).toEqual([{ jobName, lastSuccessAt: null, stale: true }]);
+  });
+
+  it("keeps a dated success visible when another legacy completion has no timestamp", async () => {
+    const now = new Date();
+    const completion = new Date(now.getTime() - 60_000);
+    const name = `${SCHEDULED_RUN_PREFIX}${daily.name}`;
+    await db.insert(jobs).values([
+      { name, status: "completed", startedAt: completion, completedAt: completion },
+      { name, status: "completed", startedAt: now, completedAt: null },
+    ]);
+
+    const health = await readScheduledJobsHealth({ specs, env: ENABLED, now });
+    expect(health.jobs[0]).toEqual({ jobName: daily.name, lastSuccessAt: completion.toISOString(), stale: false });
+  });
+
   it("falls back to process start only in a non-production process that runs the scheduler", async () => {
     const devRunning = await readScheduledJobsHealth({ specs, env: DEV_ENABLED, processStartedAt: new Date() });
     expect(devRunning.jobs.every((job) => !job.stale)).toBe(true);

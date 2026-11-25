@@ -1,7 +1,9 @@
 import { logger } from "../../utils/logger";
+import { getPostgresError, isPostgresError } from "../../utils/postgresError";
 import { withJobAdvisoryLock, type JobLease, type JobLockRequest, type LockOutcome, type LockSkipReason } from "./advisoryLock";
 import {
   finishJobRun, hasCompletedPeriod, renewJobRun, RUN_SUPERSEDED, startJobRun, type JobRunFinish, type JobSummary, type ScheduledPeriod,
+  SCHEDULED_RUNNING_INDEX,
 } from "./jobJournal";
 import { periodIdentity, scheduledSlotAtOrBefore } from "./schedulePeriod";
 
@@ -36,7 +38,6 @@ export interface ScheduledRunOptions {
 }
 const GENERIC_FAILURE = "JOB_FAILED";
 const APP_ERROR_CODE = /^[A-Z][A-Z0-9_]{1,63}$/;
-const POSTGRES_ERROR_CODE = /^[0-9A-Z]{5}$/;
 
 export interface ScheduledJobDefinition {
   readonly name: string;
@@ -74,12 +75,10 @@ export const defaultJobRunDependencies: JobRunDependencies = Object.freeze({
 
 /** A bounded code only: raw messages can carry SQL or financial detail. */
 export function jobErrorCode(error: unknown): string {
-  if (!error || typeof error !== "object" || !("code" in error)) return GENERIC_FAILURE;
-  const { code } = error as { code: unknown };
-  if (typeof code !== "string") return GENERIC_FAILURE;
-  if (APP_ERROR_CODE.test(code)) return code;
-  if (POSTGRES_ERROR_CODE.test(code)) return `PG_${code}`;
-  return GENERIC_FAILURE;
+  if (error && typeof error === "object" && "code" in error
+      && typeof error.code === "string" && APP_ERROR_CODE.test(error.code)) return error.code;
+  const pgError = getPostgresError(error);
+  return pgError ? `PG_${pgError.code.toUpperCase()}` : GENERIC_FAILURE;
 }
 
 type Attempt = { readonly outcome: Exclude<JobRunOutcome, { status: "skipped" }>; readonly error?: unknown };
@@ -108,7 +107,13 @@ async function runJournaled(
   // Read under both locks: no other runner of this job can be between this check and the insert.
   if (await deps.hasCompletedPeriod(job.name, period.identity)) return { status: "skipped", reason: "PERIOD_DONE" };
   const startedAt = Date.now();
-  const runId = await deps.startRun(job.name, period);
+  let runId: string | null;
+  try {
+    runId = await deps.startRun(job.name, period);
+  } catch (error) {
+    if (isPostgresError(error, "23505", SCHEDULED_RUNNING_INDEX)) return { status: "skipped", reason: "JOB_BUSY" };
+    throw error;
+  }
   if (runId === null) return { status: "skipped", reason: "PERIOD_DONE" };
   lease.onRenewed(() => deps.renewRun(runId));
   const { outcome, error } = closeLost(await attempt(job, period), lease);
