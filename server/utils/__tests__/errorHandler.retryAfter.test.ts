@@ -51,6 +51,26 @@ it("returns a generic 400 when PostgreSQL rejects the input syntax", async () =>
   expect(res.text).not.toContain("synthetic");
 });
 
+it("preserves the CSRF rejection envelope for the library error code", async () => {
+  const error = Object.assign(new Error("synthetic CSRF rejection"), { code: "EBADCSRFTOKEN", status: 403 });
+  const res = await request(makeApp(error)).get("/boom").expect(403);
+
+  expect(res.body).toEqual({
+    success: false,
+    error: { code: "CSRF_INVALID", message: "Invalid or expired security token. Please retry." },
+  });
+});
+
+it("returns a generic 500 for an uncoded internal error mentioning an invalid CSRF token", async () => {
+  const error = new Error("synthetic internal failure: invalid csrf token");
+  const res = await request(makeApp(error)).get("/boom").expect(500);
+
+  expect(res.body).toEqual({
+    success: false,
+    error: { code: "INTERNAL_ERROR", message: "An internal error occurred. Please try again." },
+  });
+});
+
 describe("apiErrorMiddleware — central Retry-After on RateLimitError", () => {
   it("emits Retry-After from the error's retryAfter for a non-AI thrower", async () => {
     const res = await request(makeApp(new RateLimitError(42))).get("/boom");
