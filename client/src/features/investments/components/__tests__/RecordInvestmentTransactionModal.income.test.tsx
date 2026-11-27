@@ -1,8 +1,8 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { Holding } from "@/hooks/useInvestments";
-import { setHouseholdCalendarTimeZone } from "@/lib/calendarZone";
+import { setCalendarTimeZone, setHouseholdCalendarTimeZone } from "@/lib/calendarZone";
 import { RecordInvestmentTransactionModal } from "../RecordInvestmentTransactionModal";
 
 const { submit, display } = vi.hoisted(() => ({ submit: vi.fn(), display: { numberFormat: "US", currency: "ZMW" } }));
@@ -151,12 +151,14 @@ it.each(quoteSources)("requires an explicit Sell execution price when a $label q
   }));
 });
 
-it("NEW-15: defaults the activity date to the household's day just after its midnight, not UTC's", async () => {
-  // 22:30 UTC on 22 November is 00:30 on 23 November in Lusaka (UTC+2).
-  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-11-22T22:30:00Z"));
-  setHouseholdCalendarTimeZone("Africa/Lusaka"); await Promise.resolve();
-  try {
-    const { form } = await openActivity("Buy");
-    expect(form.getByLabelText("Transaction Date")).toHaveValue("2026-11-23");
-  } finally { vi.useRealTimers(); setHouseholdCalendarTimeZone(null); await Promise.resolve(); }
-});
+// NEW-15: 22:30 UTC on 22 November is 00:30 on 23 November in Lusaka (UTC+2). A household with no
+// zone follows the server's UTC day, even when the member's display zone is Lusaka.
+it.each([["Africa/Lusaka", null, "2026-11-23"], [null, "Africa/Lusaka", "2026-11-22"]] as const)(
+  "NEW-15: defaults the activity date to the server's household day (household zone %s, display zone %s)", async (household, display, expected) => {
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-11-22T22:30:00Z"));
+    setHouseholdCalendarTimeZone(household); setCalendarTimeZone(display); await Promise.resolve();
+    try {
+      const { form } = await openActivity("Buy");
+      expect(form.getByLabelText("Transaction Date")).toHaveValue(expected);
+    } finally { cleanup(); vi.useRealTimers(); setHouseholdCalendarTimeZone(null); setCalendarTimeZone(null); await Promise.resolve(); }
+  });

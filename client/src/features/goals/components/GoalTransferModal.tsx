@@ -1,7 +1,7 @@
 import { userErrorMessage } from "@/lib/errorCopy";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { format } from "date-fns";
-import { calendarTodayAsLocalDate } from "@/lib/calendarZone";
+import { calendarDateAsLocalDate, useHouseholdCalendarToday } from "@/lib/calendarZone";
 import {
   Dialog,
   DialogContent,
@@ -48,7 +48,9 @@ export function GoalTransferModal({
   const [fromId, setFromId] = useState(""); // Goal ID or Account ID
   const [toGoalId, setToGoalId] = useState("");
   const [amount, setAmount] = useState("");
-  const [date, setDate] = useState<Date>(calendarTodayAsLocalDate);
+  // NEW-15: the server's day, UTC for a legacy household; reset each time the dialog opens.
+  const today = useHouseholdCalendarToday();
+  const [date, setDate] = useState<Date>(() => calendarDateAsLocalDate(today));
   const [isBudget, setIsBudget] = useState(false);
   const [reason, setReason] = useState("");
   const [confirmOverfund, setConfirmOverfund] = useState(false);
@@ -75,13 +77,13 @@ export function GoalTransferModal({
       setToGoalId("");
       setAmount("");
       setReason("");
-      setDate(calendarTodayAsLocalDate());
       setIsBudget(false);
       setConfirmOverfund(false);
       setMode("goal-to-goal");
       return;
     }
 
+    setDate(calendarDateAsLocalDate(today));
     if (sourceGoal) {
       setFromId(sourceGoal.id);
       setMode("goal-to-goal");

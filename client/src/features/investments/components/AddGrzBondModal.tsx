@@ -1,5 +1,5 @@
 import Decimal from "decimal.js";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
@@ -31,7 +31,7 @@ import {
 } from "@/components/ui/select";
 import { useCreateGrzBond } from "@/hooks/useGrzSecurities";
 import { useAccounts } from "@/hooks/useAccounts";
-import { calendarToday } from "@/lib/calendarZone";
+import { useHouseholdCalendarToday } from "@/lib/calendarZone";
 import {
   grzBondFormSchema,
 } from "./AddGrzBondModalData";
@@ -60,6 +60,7 @@ export function AddGrzBondModal({
   const { data: accounts = [] } = useAccounts(undefined, open);
   const custodyAccounts = accounts.filter(account => account.currency === "ZMW" && account.isAsset && !account.isArchived);
 
+  const today = useHouseholdCalendarToday(); // NEW-15: the server's day, UTC for a legacy household
   const form = useForm<z.infer<typeof grzBondFormSchema>>({
     resolver: zodResolver(grzBondFormSchema),
     defaultValues: {
@@ -69,11 +70,15 @@ export function AddGrzBondModal({
       tenorYears: 5,
       faceValue: 0,
       purchasePrice: 0,
-      purchaseDate: calendarToday(),
+      purchaseDate: today,
       firstCouponDate: "",
       maturityDate: "",
     },
   });
+  useEffect(() => { // On open an untouched purchase date (and its default) moves to today, for a zone that arrived late.
+    const defaults = form.formState.defaultValues;
+    if (open && form.getValues("purchaseDate") === defaults?.purchaseDate) { form.reset({ ...defaults, purchaseDate: today }, { keepValues: true }); form.setValue("purchaseDate", today); }
+  }, [open, today]);
 
   async function onSubmit(values: z.infer<typeof grzBondFormSchema>) {
     try {

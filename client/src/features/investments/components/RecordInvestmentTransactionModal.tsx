@@ -21,7 +21,7 @@ import {
   parseMoneyString,
 } from "@/lib/money";
 import { cn } from "@/lib/utils";
-import { calendarToday } from "@/lib/calendarZone";
+import { useHouseholdCalendarToday } from "@/lib/calendarZone";
 
 import { calculateTradeSettlement, InvestmentBuySellForm } from "./InvestmentBuySellForm";
 import { InvestmentHoldingSummary } from "./InvestmentHoldingSummary";
@@ -47,7 +47,8 @@ export function RecordInvestmentTransactionModal({
   const [quantity, setQuantity] = useState("");
   const [price, setPrice] = useState("");
   const [fee, setFee] = useState("");
-  const [transactionDate, setTransactionDate] = useState(calendarToday);
+  const today = useHouseholdCalendarToday(); // NEW-15: the server's day, UTC for a legacy household
+  const [transactionDate, setTransactionDate] = useState(today);
 
   const [grossAmount, setGrossAmount] = useState("");
   const [whtRate, setWhtRate] = useState("");
@@ -69,7 +70,7 @@ export function RecordInvestmentTransactionModal({
       setQuantity("");
       setFee("");
       setPrice("");
-      setTransactionDate(calendarToday());
+      setTransactionDate(today);
       setGrossAmount("");
       setWhtRate("");
       setCustomWht(false);

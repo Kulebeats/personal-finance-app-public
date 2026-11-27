@@ -2,7 +2,7 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
-import { setHouseholdCalendarTimeZone } from "@/lib/calendarZone";
+import { setCalendarTimeZone, setHouseholdCalendarTimeZone } from "@/lib/calendarZone";
 import { GoalTransferModal } from "../components/GoalTransferModal";
 
 const mocks = vi.hoisted(() => ({ contribute: vi.fn() }));
@@ -32,20 +32,25 @@ vi.mock("../components/GoalTransferForm", () => ({
   ),
 }));
 
-afterEach(async () => { cleanup(); vi.useRealTimers(); setHouseholdCalendarTimeZone(null); await Promise.resolve(); });
-
-it("NEW-15: a contribution from an account is dated the household's day just after its midnight, not UTC's", async () => {
-  // 22:30 UTC on 22 November is 00:30 on 23 November in Lusaka (UTC+2).
-  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-11-22T22:30:00Z"));
-  setHouseholdCalendarTimeZone("Africa/Lusaka"); await Promise.resolve();
-  mocks.contribute.mockResolvedValue({});
-  const user = userEvent.setup();
-  // The existing dialog has no description; keep that unrelated warning explicit.
-  globalThis.expectConsoleMessage?.("warn", /Missing `Description` or `aria-describedby/);
-  render(<GoalTransferModal open onClose={vi.fn()} />);
-  for (const name of ["From account", "Choose cash", "Choose holiday", "Enter ten", "Transfer"]) {
-    await user.click(screen.getByRole("button", { name }));
-  }
-  await waitFor(() => expect(mocks.contribute).toHaveBeenCalledOnce());
-  expect(mocks.contribute).toHaveBeenCalledWith(expect.objectContaining({ accountId: "cash", date: "2026-11-23" }));
+afterEach(async () => {
+  cleanup(); vi.useRealTimers(); setHouseholdCalendarTimeZone(null); setCalendarTimeZone(null); await Promise.resolve();
 });
+
+// NEW-15: 22:30 UTC on 22 November is 00:30 on 23 November in Lusaka (UTC+2). A household with no zone
+// follows the server's UTC day, even when the member's display zone is Lusaka. This spec also runs with
+// TZ=Africa/Lusaka (client/vitest.config.ts), where a toISOString() of the picked local day would be a day early.
+it.each([["Africa/Lusaka", null, "2026-11-23"], [null, "Africa/Lusaka", "2026-11-22"]] as const)(
+  "NEW-15: an account contribution is dated the server's household day (household %s, display %s)", async (household, display, expected) => {
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-11-22T22:30:00Z"));
+    setHouseholdCalendarTimeZone(household); setCalendarTimeZone(display); await Promise.resolve();
+    mocks.contribute.mockReset().mockResolvedValue({});
+    const user = userEvent.setup();
+    // The existing dialog has no description; keep that unrelated warning explicit.
+    globalThis.expectConsoleMessage?.("warn", /Missing `Description` or `aria-describedby/);
+    render(<GoalTransferModal open onClose={vi.fn()} />);
+    for (const name of ["From account", "Choose cash", "Choose holiday", "Enter ten", "Transfer"]) {
+      await user.click(screen.getByRole("button", { name }));
+    }
+    await waitFor(() => expect(mocks.contribute).toHaveBeenCalledOnce());
+    expect(mocks.contribute).toHaveBeenCalledWith(expect.objectContaining({ accountId: "cash", date: expected }));
+  });

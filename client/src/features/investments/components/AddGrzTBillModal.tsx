@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import * as z from "zod";
+import type * as z from "zod";
 import {
   Dialog,
   DialogContent,
@@ -34,19 +34,11 @@ import { useAccounts } from "@/hooks/useAccounts";
 import { TBillSettlementAccountField } from "./TBillSettlementAccountField";
 import { Loader2 } from "lucide-react";
 import { addDays } from "date-fns";
-import { calendarDaysAgo, calendarToday } from "@/lib/calendarZone";
+import { useHouseholdCalendarToday } from "@/lib/calendarZone";
+import { shiftCalendarDate } from "@shared/household-calendar";
+import { tbillFormSchema } from "./AddGrzTBillModalData";
 
-const formSchema = z.object({
-  tbillName: z.string().min(1, "T-Bill Name is required"),
-  isin: z.string().optional(),
-  // A-42: the maturity run pays into this account, so it is required.
-  accountId: z.string().min(1, "Choose the account this T-bill matures into"),
-  tenorDays: z.coerce.number().min(1, "Tenor is required"),
-  faceValue: z.coerce.number().min(0.01, "Face Value must be positive"),
-  purchasePrice: z.coerce.number().min(0.01, "Purchase Price must be positive"),
-  purchaseDate: z.string().min(1, "Purchase Date is required"),
-  maturityDate: z.string().min(1, "Maturity Date is required"),
-});
+const formSchema = tbillFormSchema;
 
 interface AddGrzTBillModalProps {
   children?: React.ReactNode;
@@ -70,6 +62,7 @@ export function AddGrzTBillModal({
   const { data: accounts = [] } = useAccounts(undefined, open);
   const settlementAccounts = accounts.filter(account => account.currency === "ZMW" && account.isAsset && !account.isArchived);
 
+  const today = useHouseholdCalendarToday(); // NEW-15: the server's day, UTC for a legacy household
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
     defaultValues: {
@@ -78,10 +71,17 @@ export function AddGrzTBillModal({
       accountId: "",
       tenorDays: 91,
       faceValue: 0, purchasePrice: 0,
-      purchaseDate: calendarToday(), // NEW-15: the household's day, not UTC's
-      maturityDate: calendarDaysAgo(-91), // 91 calendar days after it
+      purchaseDate: today,
+      maturityDate: shiftCalendarDate(today, 91),
     },
   });
+  useEffect(() => { // On open untouched dates (and their defaults) move to today, for a zone that arrived late.
+    const defaults = form.formState.defaultValues, purchase = form.getValues("purchaseDate"), tenor = Number(form.getValues("tenorDays"));
+    if (!open || purchase !== defaults?.purchaseDate) return;
+    form.reset({ ...defaults, purchaseDate: today, maturityDate: shiftCalendarDate(today, 91) }, { keepValues: true });
+    form.setValue("purchaseDate", today); // maturity follows only while it is still auto-calculated
+    if (form.getValues("maturityDate") === shiftCalendarDate(purchase, tenor)) form.setValue("maturityDate", shiftCalendarDate(today, tenor));
+  }, [open, today]);
 
   async function onSubmit(values: z.infer<typeof formSchema>) {
     try {

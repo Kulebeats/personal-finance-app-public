@@ -174,6 +174,21 @@ export function calendarMonthRange(offsetMonths = 0, now: Date = new Date()): Ca
  * date-fns arithmetic, which work in the browser's local calendar.
  */
 export function calendarTodayAsLocalDate(now: Date = new Date()): Date {
-  const [year, month, day] = calendarToday(now).split("-").map((part) => Number.parseInt(part, 10));
+  return calendarDateAsLocalDate(calendarToday(now));
+}
+
+/** Local-midnight Date for a "YYYY-MM-DD" calendar date, for date pickers. */
+export function calendarDateAsLocalDate(date: string): Date {
+  const [year, month, day] = date.split("-").map((part) => Number.parseInt(part, 10));
   return new Date(year, month - 1, day);
+}
+
+/**
+ * Today in the household's zone, or UTC for a legacy household with none:
+ * the day the server defaults and bounds financial writes by (NEW-15). Form
+ * defaults use this, not `calendarToday`, whose display-zone fallback can run
+ * a day ahead of the server.
+ */
+export function useHouseholdCalendarToday(): string {
+  return householdCalendarDate(new Date(), useHouseholdCalendarTimeZone());
 }
