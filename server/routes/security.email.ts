@@ -9,7 +9,7 @@ import { logger } from "../utils/logger";
 
 const router = Router();
 const verifySchema = z.object({ token: z.string().min(1).max(256) });
-const changeSchema = z.object({ newEmail: z.string().email().max(255), password: z.string().min(1) });
+const changeSchema = z.object({ newEmail: z.string().trim().email().max(255), password: z.string().min(1) });
 async function sendChallenge(issued: { email: string; token: string; isEmailChange: boolean }, req: Request) {
   const configured = isEmailServiceConfigured();
   try {

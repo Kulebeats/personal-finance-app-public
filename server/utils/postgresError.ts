@@ -48,6 +48,12 @@ export function getPostgresError(
   return undefined;
 }
 
+export function isUserEmailUniqueViolation(error: unknown): boolean {
+  const pgError = getPostgresError(error);
+  return pgError?.code === "23505" &&
+    (pgError.constraint === "users_email_lower_unique" || pgError.constraint === "users_email_unique");
+}
+
 export function isPostgresError(
   error: unknown,
   code: string,

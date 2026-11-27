@@ -7,6 +7,9 @@
 import { z } from "zod";
 import { passwordPolicySchema } from "./auth.password-policy";
 
+const emailAddressSchema = z.string().trim().email("Invalid email address");
+const credentialEmailSchema = emailAddressSchema.max(254, "Email too long");
+
 /**
  * Login validation schema
  *
@@ -15,7 +18,7 @@ import { passwordPolicySchema } from "./auth.password-policy";
  * - Password: max 128 chars (bcrypt has O(n) complexity)
  */
 export const loginSchema = z.object({
-  email: z.string().email("Invalid email address").max(254, "Email too long"),
+  email: credentialEmailSchema,
   password: z
     .string()
     .min(1, "Password is required")
@@ -38,7 +41,7 @@ export const registrationPasswordSchema = passwordPolicySchema;
  */
 export const registerSchema = z
   .object({
-    email: z.string().email("Invalid email address").max(254, "Email too long"),
+    email: credentialEmailSchema,
     username: z
       .string()
       .min(3, "Username must be at least 3 characters")
@@ -59,7 +62,7 @@ export const registerSchema = z
  * Forgot-password request schema (R1)
  */
 export const forgotPasswordSchema = z.object({
-  email: z.string().email("Invalid email address").max(254, "Email too long"),
+  email: credentialEmailSchema,
 });
 
 /**
@@ -80,7 +83,7 @@ export const resetPasswordSchema = z.object({
  * MFA code verification schema
  */
 export const mfaVerifySchema = z.object({
-  email: z.string().email("Invalid email address"),
+  email: emailAddressSchema,
   code: z.string().length(6, "Code must be exactly 6 digits"),
 });
 
@@ -101,7 +104,7 @@ export const mfaLoginVerifySchema = z.object({
  * Backup code verification schema
  */
 export const backupCodeSchema = z.object({
-  email: z.string().email("Invalid email address"),
+  email: emailAddressSchema,
   backupCode: z.string().min(8, "Invalid backup code"),
 });
 
@@ -130,7 +133,7 @@ export const verifyEmailSchema = z.object({
  * Resend verification email schema
  */
 export const resendVerificationSchema = z.object({
-  email: z.string().email("Invalid email address"),
+  email: emailAddressSchema,
 });
 
 // Type exports
