@@ -3,18 +3,19 @@ import { useWeeklyRecap } from "../WeeklyRecapContext";
 import { useFormatters } from "@/contexts/SettingsContext";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import RecapWithheld from "../components/RecapWithheld";
 import { useState } from "react";
 
 export default function RecurringStep() {
-  const { data, nextStep, prevStep, submitStepFeedback } = useWeeklyRecap();
+  const { data, isChecking, nextStep, prevStep, submitStepFeedback } = useWeeklyRecap();
   const { formatCurrency } = useFormatters();
   const [feedbackGiven, setFeedbackGiven] = useState<
     "positive" | "negative" | null
   >(null);
 
-  if (!data) return null;
-
-  const { recurring } = data;
+  // C3-30: keep the step (and its feedback draft and controls) mounted while
+  // access is re-checked; only the figures are withheld.
+  const recurring = isChecking ? undefined : data?.recurring;
 
   const handleFeedback = (type: "positive" | "negative") => {
     setFeedbackGiven(type);
@@ -42,6 +43,7 @@ export default function RecurringStep() {
         </p>
       </div>
 
+      {recurring ? <>
       <div className="bg-primary/5 rounded-xl p-6 flex items-center justify-between border border-primary/15">
         <div className="space-y-1">
           <p className="text-sm text-primary font-medium">
@@ -87,6 +89,8 @@ export default function RecurringStep() {
         )}
       </div>
 
+      </> : <RecapWithheld />}
+
       <div className="flex flex-col items-center gap-4">
         <div className="flex gap-4">
           <Button
@@ -98,6 +102,7 @@ export default function RecurringStep() {
                 "bg-emerald-100 border-emerald-500 text-emerald-600 dark:bg-emerald-900/30"
             )}
             onClick={() => handleFeedback("positive")}
+            aria-pressed={feedbackGiven === "positive"}
             aria-label="Positive feedback"
           >
             <ThumbsUp className="w-4 h-4" />
@@ -111,6 +116,7 @@ export default function RecurringStep() {
                 "bg-rose-100 border-rose-500 text-rose-600 dark:bg-rose-900/30"
             )}
             onClick={() => handleFeedback("negative")}
+            aria-pressed={feedbackGiven === "negative"}
             aria-label="Negative feedback"
           >
             <ThumbsDown className="w-4 h-4" />

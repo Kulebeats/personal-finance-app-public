@@ -7,7 +7,7 @@ import {
   useAccountsData,
   NetWorthChart,
   AccountFilters,
-  AccountList,
+  AccountListRegion,
   AddAccountModal,
   NetWorthSummary,
   ASSET_GROUPS,
@@ -125,9 +125,8 @@ export default function Accounts() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           {/* Left Column: Account Groups */}
           <div className="lg:col-span-2 space-y-6">
-            {historyState !== "ready" ? <p role={historyState === "error" ? "alert" : "status"}>
-              {historyState === "error" ? "Unable to refresh account history. Refresh to try again." : "Checking current access…"}
-            </p> : <AccountList
+            <AccountListRegion
+              historyState={historyState}
               groupedAccounts={groupedAccounts}
               accounts={accounts}
               getGroupTotal={getGroupTotal}
@@ -135,7 +134,7 @@ export default function Accounts() {
               hasAccessibleAccounts={hasAccessibleAccounts}
               onResetFilter={resetOwnerFilter}
               onAddAccount={openAddAccount}
-            />}
+            />
           </div>
 
           {/* Right Column: Summary Sidebar */}

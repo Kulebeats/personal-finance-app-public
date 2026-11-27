@@ -49,18 +49,23 @@ export function WeeklyRecapProvider({
   const { data, isLoading, isChecking, error, refetch } = useWeeklyRecapData();
   const { mutate: submitFeedback } = useWeeklyRecapFeedback();
 
-  const [currentStep, setCurrentStep] = useState<RecapStep>("welcome");
+  const [selectedStep, setSelectedStep] = useState<RecapStep>("welcome");
 
   // OPS-007: a section the user excluded in recap settings is not shown.
   const steps = STEPS.filter(step =>
     (step !== "goals" || data?.sections?.goals !== false) &&
     (step !== "recurring" || data?.sections?.recurring !== false));
+  // C3-30: a fresh opt-out of the step being viewed moves on to the next
+  // allowed step instead of rendering the excluded section.
+  const currentStep = steps.includes(selectedStep) ? selectedStep
+    : STEPS.slice(STEPS.indexOf(selectedStep) + 1).find(step => steps.includes(step)) ?? "wrap-up";
+  if (currentStep !== selectedStep) setSelectedStep(currentStep);
   const stepIndex = Math.max(0, steps.indexOf(currentStep));
   const totalSteps = steps.length;
 
   const nextStep = () => {
     if (stepIndex < totalSteps - 1) {
-      setCurrentStep(steps[stepIndex + 1]);
+      setSelectedStep(steps[stepIndex + 1]);
     } else {
       onClose();
     }
@@ -68,7 +73,7 @@ export function WeeklyRecapProvider({
 
   const prevStep = () => {
     if (stepIndex > 0) {
-      setCurrentStep(steps[stepIndex - 1]);
+      setSelectedStep(steps[stepIndex - 1]);
     }
   };
 
