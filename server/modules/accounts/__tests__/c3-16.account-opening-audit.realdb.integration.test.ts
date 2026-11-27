@@ -9,6 +9,7 @@ import { a, actors, app, reset, start, stop, type Role } from "../../tags/__test
 // initialBalance and balance. Its one audit row must carry the old and new
 // opening balance next to the balances, for shared and private custody.
 const trigger = `c3_16_opening_${randomUUID().replaceAll("-", "")}`;
+const password = "SyntheticR04Tags123!";
 type Custody = "shared" | "private";
 type Edit = { custody: Custody; from: string; to: string };
 const edits: Edit[] = (["shared", "private"] as const).flatMap(custody => [
@@ -110,6 +111,18 @@ describe("C3-16 opening-balance edits are kept in the account audit", () => {
     expect.soft(result.status).toBe(500);
     expect(await accountRow(id)).toEqual(before);
     expect(await auditsFor(id)).toHaveLength(0);
+  });
+
+  it.each(["shared", "private"] as const)("deleting a %s account audits its opening balance", async custody => {
+    const id = await seedAccount(custody, "100.00");
+    await signed(request(app).post("/api/settings/security/step-up")).send({ password }).expect(200);
+    await signed(request(app).delete(`/api/accounts/${id}`)).expect(200);
+    const rows = await auditsFor(id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ household_id: custody === "private" ? null : a,
+      user_id: actors.get("owner")!.id, action: "DELETE", entity_type: "account" });
+    expect({ opening: openingOf(rows[0].details.oldValue), balance: rows[0].details.oldValue.balance })
+      .toEqual({ opening: "100.00", balance: "100.00" });
   });
 
   it("a historical audit row without opening fields stays unknown and is not rewritten", async () => {
