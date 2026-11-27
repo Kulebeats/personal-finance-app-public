@@ -40,7 +40,7 @@ const APP_URL = (process.env.APP_URL || "http://localhost:5173").replace(
 
 // Schemas
 const inviteMemberSchema = z.object({
-  email: z.string().email(),
+  email: z.string().trim().email(),
   role: z.enum(INVITABLE_ROLES).default("member"),
 });
 
