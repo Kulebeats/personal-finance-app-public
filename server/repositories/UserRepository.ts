@@ -20,6 +20,8 @@ import {
   type UserPreferences,
 } from "@shared/schema";
 
+export type UserCreateInput = InsertUser & { pendingEmail?: User["pendingEmail"] };
+
 type CreateLoginHistoryInput = {
   userId: string;
   deviceName?: string;
@@ -42,7 +44,7 @@ type CreateUserSessionInput = {
 };
 
 /** One address is one identity whatever its case (unique index on lower(email)). */
-export const sameEmail = (email: string): SQL => sql`lower(${users.email}) = lower(${email})`;
+export const sameEmail = (email: string): SQL => sql`lower(${users.email}) = lower(${email.trim()})`;
 
 export class UserRepository {
   async findById(id: string): Promise<User | undefined> {
@@ -56,11 +58,12 @@ export class UserRepository {
 
   /** Case-insensitive. While legacy case-variant rows exist, an exact match wins, then the oldest. */
   async findByEmail(email: string): Promise<User | undefined> {
+    const address = email.trim();
     const result = await db
       .select()
       .from(users)
-      .where(sameEmail(email))
-      .orderBy(sql`${users.email} = ${email} desc`, users.createdAt)
+      .where(sameEmail(address))
+      .orderBy(sql`${users.email} = ${address} desc`, users.createdAt)
       .limit(1);
     return result[0];
   }
@@ -88,15 +91,24 @@ export class UserRepository {
     return result[0];
   }
 
-  async create(data: InsertUser): Promise<User> {
-    const result = await db.insert(users).values(data).returning();
+  async create(data: UserCreateInput): Promise<User> {
+    const result = await db.insert(users).values({
+      ...data,
+      email: data.email.trim(),
+      pendingEmail: data.pendingEmail?.trim() ?? data.pendingEmail,
+    }).returning();
     return result[0];
   }
 
   async update(id: string, data: Partial<User>): Promise<User | undefined> {
     const result = await db
       .update(users)
-      .set({ ...data, updatedAt: new Date() })
+      .set({
+        ...data,
+        email: data.email?.trim() ?? data.email,
+        pendingEmail: data.pendingEmail?.trim() ?? data.pendingEmail,
+        updatedAt: new Date(),
+      })
       .where(eq(users.id, id))
       .returning();
     return result[0];
