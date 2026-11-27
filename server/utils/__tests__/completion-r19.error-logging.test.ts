@@ -42,3 +42,24 @@ it("logs the controlled matched route template and safe error identity rather th
   // req.route.path remains the source-declared template, without the supplied ID.
   expect(entry.route).toBe("/:id");
 });
+
+it("warns with the route template and requestId, never the SQL or params, before mapping 22P02 to 400", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const app = express(); const router = express.Router();
+  router.get("/:id", (req, _res, next) => {
+    req.requestId = "synthetic-request";
+    const cause = Object.assign(new Error("invalid input syntax for type uuid: \"PARAM_SENTINEL\""), { code: "22P02" });
+    next(new Error("Failed query: SELECT SQL_SENTINEL\nparams: PARAM_SENTINEL", { cause }));
+  });
+  app.use("/api/receipts", router);
+  app.use(apiErrorMiddleware);
+  const response = await request(app).get("/api/receipts/PARAM_SENTINEL");
+  expect(response.status).toBe(400);
+  expect(response.body).toMatchObject({ success: false, error: { code: "VALIDATION_ERROR", message: "Invalid input" } });
+  expect(warn).toHaveBeenCalledTimes(1);
+  const serialized = String(warn.mock.calls[0][0]);
+  expect(serialized).not.toMatch(/PARAM_SENTINEL|SQL_SENTINEL|Failed query/);
+  expect(JSON.parse(serialized)).toMatchObject({
+    level: "warn", method: "GET", route: "/:id", requestId: "synthetic-request", error: { code: "22P02" },
+  });
+});

@@ -132,18 +132,14 @@ export function handleReportError(
     });
   }
 
+  // The detail stays in the server log. No raw error text in the body on any
+  // NODE_ENV: a DrizzleQueryError message carries the SQL and its params.
   logger.error(`${context} error`, { context }, error as Error);
   return res.status(500).json({
     success: false,
     error: {
       code: "INTERNAL_ERROR",
       message: "Unexpected error",
-      debug:
-        process.env.NODE_ENV !== "production"
-          ? error instanceof Error
-            ? error.message
-            : String(error)
-          : undefined,
     },
   });
 }
