@@ -17,7 +17,7 @@
  * @module modules/household/invitations.accept
  */
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   householdInvitations,
   householdMembers,
@@ -29,6 +29,7 @@ import {
 import { withTransaction, type TransactionType } from "../../utils/withTransaction";
 import { lockUserMembership } from "../../repositories/householdMembershipLock";
 import { householdRepository } from "../../repositories/HouseholdRepository";
+import { sameEmail } from "../../repositories/UserRepository";
 import { businessAuditService } from "../../services/BusinessAuditService";
 import { ConflictError, HttpError, NotFoundError } from "../../core/errors";
 
@@ -47,9 +48,12 @@ export class InviteRecipientMismatchError extends HttpError {
   constructor() { super(EMAIL_MISMATCH_MESSAGE); }
 }
 
-/** Invitation emails are stored lowercased; compare every address the same way. */
+/**
+ * Invitation emails are stored trimmed and lowercased. Accept matches them to
+ * the signed-in account with `sameEmail`, the sign-in identity rule (#29).
+ */
 export function normalizeInviteEmail(email: string): string {
-  return email.toLowerCase();
+  return email.trim().toLowerCase();
 }
 
 export interface AcceptingUser {
@@ -105,12 +109,16 @@ async function assertAddressedToUser(
   if (new Date() > invitation.expiresAt) {
     throw new ConflictError("This invitation has expired");
   }
-  const [user] = await tx.select({ email: users.email, erasedAt: users.erasedAt }).from(users).where(eq(users.id, userId)).limit(1);
+  const [user] = await tx
+    .select({ erasedAt: users.erasedAt, isRecipient: sql<boolean>`${sameEmail(invitation.email)}` })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
   // A-20: an erased account joins nothing, whatever address its row carries.
   if (!user || user.erasedAt) {
     throw new NotFoundError("User not found");
   }
-  if (!user.email || normalizeInviteEmail(user.email) !== normalizeInviteEmail(invitation.email)) {
+  if (!user.isRecipient) {
     throw new InviteRecipientMismatchError();
   }
 }

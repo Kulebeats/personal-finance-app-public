@@ -36,7 +36,7 @@ export const updateHouseholdSchema = createHouseholdSchema.partial();
 // ============================================================================
 
 export const inviteMemberSchema = z.object({
-  email: z.string().email(),
+  email: z.string().trim().email(),
   role: householdRoleSchema.default("member"),
   message: z.string().max(500).optional(),
 });
