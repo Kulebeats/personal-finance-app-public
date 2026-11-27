@@ -11,8 +11,10 @@ import { NOTIFICATION_TYPES } from "@shared/notificationTypes";
 import { db } from "../db";
 import { NotFoundError } from "../core/errors";
 import { mergeReportWidgetPreferences, resetReportWidgetLayout, type StoredReportWidgetPreferencesPatch } from "./ReportWidgetPreferences";
+import type { TransactionType } from "../utils/withTransaction";
 
-type PreferencesTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+// One type for this file's own transactions and a caller's withTransaction transaction.
+type PreferencesTransaction = TransactionType;
 
 export type WeeklyRecapSettings = {
   enabled: boolean;
@@ -51,24 +53,31 @@ export async function ensureDisplaySettings(settings: InsertDisplaySettings): Pr
 }
 
 export async function patchDisplaySettings(userId: string, data: Partial<DisplaySettings>): Promise<DisplaySettings> {
-  return db.transaction(async tx => {
-    await lockUser(tx, userId);
-    const current = await ensureDisplayRow(tx, { userId });
-    const patch = { ...data };
-    if (data.dashboardWidgets !== undefined) {
-      const supplied = record(data.dashboardWidgets);
-      const dashboard = { ...record(current.dashboardWidgets) };
-      // This endpoint owns the layout fields. Recap and future siblings retain
-      // the values read under the lock, regardless of an older open form.
-      if (supplied.widgets !== undefined) dashboard.widgets = supplied.widgets;
-      if (supplied.version !== undefined) dashboard.version = supplied.version;
-      patch.dashboardWidgets = dashboard;
-    }
-    const [updated] = await tx.update(userDisplaySettings)
-      .set({ ...patch, updatedAt: new Date() })
-      .where(eq(userDisplaySettings.userId, userId)).returning();
-    return updated;
-  });
+  return db.transaction(tx => patchDisplaySettingsInTx(tx, userId, data));
+}
+
+/** The same patch inside the caller's transaction, so the caller can audit it atomically. */
+export async function patchDisplaySettingsInTx(
+  tx: PreferencesTransaction,
+  userId: string,
+  data: Partial<DisplaySettings>,
+): Promise<DisplaySettings> {
+  await lockUser(tx, userId);
+  const current = await ensureDisplayRow(tx, { userId });
+  const patch = { ...data };
+  if (data.dashboardWidgets !== undefined) {
+    const supplied = record(data.dashboardWidgets);
+    const dashboard = { ...record(current.dashboardWidgets) };
+    // This endpoint owns the layout fields. Recap and future siblings retain
+    // the values read under the lock, regardless of an older open form.
+    if (supplied.widgets !== undefined) dashboard.widgets = supplied.widgets;
+    if (supplied.version !== undefined) dashboard.version = supplied.version;
+    patch.dashboardWidgets = dashboard;
+  }
+  const [updated] = await tx.update(userDisplaySettings)
+    .set({ ...patch, updatedAt: new Date() })
+    .where(eq(userDisplaySettings.userId, userId)).returning();
+  return updated;
 }
 
 export async function patchReportWidgetPreferences(userId: string, data: StoredReportWidgetPreferencesPatch) {
