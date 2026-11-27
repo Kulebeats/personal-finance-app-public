@@ -354,7 +354,7 @@ export function calculateTBillYield(params: {
   const purchasePrice = faceMoney.multiply(new Decimal(1).minus(discountFactor));
 
   if (purchasePrice.isNegativeOrZero()) {
-    throw new Error("Discount rate results in a non-positive price");
+    throw new ValidationError("Discount rate results in a non-positive price");
   }
 
   const grossReturn = faceMoney.subtract(purchasePrice);

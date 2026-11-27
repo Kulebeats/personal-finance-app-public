@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
-import { logger } from "./logger";
+import { logger, safeRouteTemplate } from "./logger";
 import {
   HttpError,
   ValidationError,
@@ -155,7 +155,16 @@ export function apiErrorMiddleware(
     return;
   }
 
-  if (getPostgresError(err)?.code === "22P02") {
+  const pgError = getPostgresError(err);
+  if (pgError?.code === "22P02") {
+    // Only the route template, requestId and the SQLSTATE identity: the
+    // wrapper's message carries the SQL text and params, so it is not passed.
+    logger.warn("Database rejected request input", {
+      requestId: req.requestId,
+      route: safeRouteTemplate(req),
+      method: req.method,
+      error: pgError,
+    });
     const invalidInput = new ValidationError("Invalid input");
     res.status(invalidInput.statusCode).json(invalidInput.toJSON());
     return;
