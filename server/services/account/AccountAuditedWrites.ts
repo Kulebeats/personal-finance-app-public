@@ -80,8 +80,8 @@ export class AccountAuditedWriteService extends AccountImportService {
       await this.deleteAccount(id, householdId, userId, tx);
       await businessAuditService.logDelete({
         tx, userId, householdId: auditHousehold(householdId, before), entityId: id, entityType: "account",
-        oldValue: { name: before.name, type: before.type, balance: before.balance, currency: before.currency,
-          isArchived: before.isArchived },
+        oldValue: { name: before.name, type: before.type, initialBalance: before.initialBalance, balance: before.balance,
+          currency: before.currency, isArchived: before.isArchived },
         ipAddress,
       });
     });
