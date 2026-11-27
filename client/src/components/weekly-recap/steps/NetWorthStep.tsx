@@ -6,24 +6,19 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
 import { formatCapturedWorth, formatPreviousWorth } from "../formatCapturedWorth";
+import type { WeeklyRecapData } from "@shared/weekly-recap";
+
+type RecapWorth = WeeklyRecapData["netWorth"];
 
 export default function NetWorthStep() {
   const { data, isChecking, error, retry, nextStep, prevStep, submitStepFeedback } = useWeeklyRecap();
-  const { formatCurrency } = useFormatters();
   const [feedbackGiven, setFeedbackGiven] = useState<
     "positive" | "negative" | null
   >(null);
 
-  if (!data || isChecking || error) return <div role={error ? "alert" : "status"} className="space-y-4">
-    <p>{error ? "Unable to refresh net worth. Please try again." : "Checking current access to net worth…"}</p>
-    {error && <Button onClick={retry}>Retry</Button>}
-  </div>;
-
-  const { netWorth } = data;
-  const isPositive = netWorth.change !== null && netWorth.change >= 0;
-  const formatWorth = (value: number) => formatCapturedWorth(value, netWorth.currency, formatCurrency);
-  const previousWorth = formatPreviousWorth(netWorth, formatCurrency);
-  const chartPoints = netWorth.series.filter(point => !point.currency || point.currency === netWorth.currency);
+  // C3-30: keep the step (and its feedback draft and controls) mounted while
+  // access is re-checked; only the figures are withheld.
+  const netWorth = !data || isChecking || error ? undefined : data.netWorth;
 
   const handleFeedback = (type: "positive" | "negative") => {
     setFeedbackGiven(type);
@@ -41,6 +36,72 @@ export default function NetWorthStep() {
         </p>
       </div>
 
+      {netWorth ? <NetWorthFigures netWorth={netWorth} /> : <div role={error ? "alert" : "status"} className="space-y-4">
+        <p>{error ? "Unable to refresh net worth. Please try again." : "Checking current access to net worth…"}</p>
+        {error && <Button onClick={retry}>Retry</Button>}
+      </div>}
+
+      <div className="flex flex-col items-center gap-4 pt-4">
+        <p className="text-sm text-foreground/70">
+          How does this look to you?
+        </p>
+        <div className="flex gap-4">
+          <Button
+            variant="outline"
+            size="icon"
+            className={cn(
+              "rounded-full w-12 h-12 transition-colors",
+              feedbackGiven === "positive" &&
+                "bg-emerald-100 border-emerald-500 text-emerald-600 dark:bg-emerald-900/30"
+            )}
+            onClick={() => handleFeedback("positive")}
+            aria-pressed={feedbackGiven === "positive"}
+            aria-label="Positive feedback"
+          >
+            <ThumbsUp className="w-5 h-5" />
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className={cn(
+              "rounded-full w-12 h-12 transition-colors",
+              feedbackGiven === "negative" &&
+                "bg-rose-100 border-rose-500 text-rose-600 dark:bg-rose-900/30"
+            )}
+            onClick={() => handleFeedback("negative")}
+            aria-pressed={feedbackGiven === "negative"}
+            aria-label="Negative feedback"
+          >
+            <ThumbsDown className="w-5 h-5" />
+          </Button>
+        </div>
+      </div>
+
+      <div className="flex gap-3">
+        <Button
+          variant="outline"
+          className="flex-1 rounded-full"
+          onClick={prevStep}
+        >
+          Back
+        </Button>
+        <Button className="flex-1 rounded-full" onClick={nextStep}>
+          Continue
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function NetWorthFigures({ netWorth }: { netWorth: RecapWorth }) {
+  const { formatCurrency } = useFormatters();
+  const isPositive = netWorth.change !== null && netWorth.change >= 0;
+  const formatWorth = (value: number) => formatCapturedWorth(value, netWorth.currency, formatCurrency);
+  const previousWorth = formatPreviousWorth(netWorth, formatCurrency);
+  const chartPoints = netWorth.series.filter(point => !point.currency || point.currency === netWorth.currency);
+
+  return (
+    <>
       <div className="flex flex-col items-center justify-center space-y-2">
         {netWorth.current === null ? <p>Historical net worth is unavailable</p> : <>
           <span className="text-4xl font-bold tracking-tighter">{formatCapturedWorth(netWorth.currentMoney?.amount ?? netWorth.current, netWorth.currentMoney?.currency ?? netWorth.currency, formatCurrency)}</span>
@@ -80,53 +141,6 @@ export default function NetWorthStep() {
           }
         />
       </div>}
-
-      <div className="flex flex-col items-center gap-4 pt-4">
-        <p className="text-sm text-foreground/70">
-          How does this look to you?
-        </p>
-        <div className="flex gap-4">
-          <Button
-            variant="outline"
-            size="icon"
-            className={cn(
-              "rounded-full w-12 h-12 transition-colors",
-              feedbackGiven === "positive" &&
-                "bg-emerald-100 border-emerald-500 text-emerald-600 dark:bg-emerald-900/30"
-            )}
-            onClick={() => handleFeedback("positive")}
-            aria-label="Positive feedback"
-          >
-            <ThumbsUp className="w-5 h-5" />
-          </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            className={cn(
-              "rounded-full w-12 h-12 transition-colors",
-              feedbackGiven === "negative" &&
-                "bg-rose-100 border-rose-500 text-rose-600 dark:bg-rose-900/30"
-            )}
-            onClick={() => handleFeedback("negative")}
-            aria-label="Negative feedback"
-          >
-            <ThumbsDown className="w-5 h-5" />
-          </Button>
-        </div>
-      </div>
-
-      <div className="flex gap-3">
-        <Button
-          variant="outline"
-          className="flex-1 rounded-full"
-          onClick={prevStep}
-        >
-          Back
-        </Button>
-        <Button className="flex-1 rounded-full" onClick={nextStep}>
-          Continue
-        </Button>
-      </div>
-    </div>
+    </>
   );
 }

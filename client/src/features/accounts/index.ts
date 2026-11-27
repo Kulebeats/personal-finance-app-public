@@ -3,6 +3,7 @@ export * from "./constants";
 export * from "./components/AccountCard";
 export * from "./components/AccountGroup";
 export * from "./components/AccountList";
+export * from "./components/AccountListRegion";
 export * from "./components/NetWorthChart";
 export * from "./components/NetWorthSummary";
 export * from "./components/AccountFilters";

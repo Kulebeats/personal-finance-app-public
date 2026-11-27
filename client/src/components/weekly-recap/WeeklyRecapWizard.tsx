@@ -28,17 +28,13 @@ interface WeeklyRecapWizardProps {
 function WizardContent() {
   const { currentStep, isLoading, isChecking, error, retry, close, prevStep, stepIndex } = useWeeklyRecap();
 
-  if (isLoading || isChecking) {
-    return (
-      <div className="h-[400px] flex items-center justify-center" role="status" aria-label="Loading weekly recap">
-        <Loader2 className="w-8 h-8 animate-spin text-primary" aria-hidden="true" />
-        <span>Checking current access to your weekly financial summary…</span>
-      </div>
-    );
-  }
+  const checking = isLoading || isChecking;
 
+  // An actual failure (e.g. revoked access) ends this recap view: the steps and
+  // their feedback drafts unmount. The view stays put while Retry is in flight.
   if (error) return <div role="alert" className="p-6 space-y-4">
     <p>Unable to refresh your weekly recap. Please try again.</p>
+    {checking && <p role="status">Retrying…</p>}
     <Button onClick={retry}>Retry</Button>
     <Button variant="outline" onClick={close}>Close</Button>
   </div>;
@@ -87,6 +83,16 @@ function WizardContent() {
 
       {currentStep !== "welcome" && currentStep !== "wrap-up" && (
         <StepProgress />
+      )}
+
+      {/* C3-30: a same-member re-check keeps the shell, Close and the current
+          step (with its draft and focused control) mounted. Each step
+          withholds its figures until access is confirmed again. */}
+      {checking && (
+        <div className="flex items-center justify-center gap-2 pt-8 text-sm text-muted-foreground" role="status" aria-label="Loading weekly recap">
+          <Loader2 className="w-4 h-4 animate-spin text-primary" aria-hidden="true" />
+          <span>Checking current access to your weekly financial summary…</span>
+        </div>
       )}
 
       <div className="flex-1 min-h-0 overflow-y-auto px-1 py-4 pb-6">
