@@ -13,7 +13,7 @@ import {
   useCreateSecurity,
 } from "@/hooks/useInvestments";
 import { useAccounts } from "@/hooks/useAccounts";
-import { useHouseholdCalendarToday } from "@/lib/calendarZone";
+import { useHouseholdDateDefault } from "@/lib/calendarZone";
 import { useFormat } from "@/hooks/use-format";
 import type { CreateHoldingInput } from "@/hooks/investments/useHoldings";
 import { useSession } from "@/contexts/SessionContext";
@@ -90,8 +90,8 @@ function OpeningHoldingForm({ children, onSuccess, lifetime, open: controlledOpe
   const [accountId, setAccountId] = useState<string>("");
   const [quantity, setQuantity] = useState("");
   const [purchasePrice, setPurchasePrice] = useState("");
-  const today = useHouseholdCalendarToday(); // NEW-15: the server's day, UTC for a legacy household
-  const [purchaseDate, setPurchaseDate] = useState(today);
+  // NEW-15: the server's day, UTC for a legacy household, computed when the form resets.
+  const { date: purchaseDate, choose: setPurchaseDate, hold: holdDate, reset: resetDate } = useHouseholdDateDefault();
 
   const { formatCurrency } = useFormat();
   const { data: securities = [], isLoading: loadingSecurities, isError: securitiesError, refetch: refetchSecurities } = useSecurities(
@@ -119,7 +119,7 @@ function OpeningHoldingForm({ children, onSuccess, lifetime, open: controlledOpe
     setAccountId(investmentAccounts[0]?.id || "");
     setQuantity("");
     setPurchasePrice("");
-    setPurchaseDate(today);
+    resetDate();
   };
   useEffect(() => { if (open && !attempt.current && !validationError) resetForm(); }, [open]);
 
@@ -163,6 +163,7 @@ function OpeningHoldingForm({ children, onSuccess, lifetime, open: controlledOpe
       if (!selectedSecurityId || !accountId || !opening || !securityCurrency || !validDate) return;
       attempt.current = Object.freeze({ operationId: generateIdempotencyKey(), expectedCurrency: securityCurrency,
         securityId: selectedSecurityId, accountId, quantity: opening.quantity, costBasis: opening.amount, acquiredDate: purchaseDate });
+      holdDate(); // the retained attempt carries this date: a late zone must not move it
     }
     const request = attempt.current;
     submitting.current = true; setPending(true); setUncertain(false); setValidationError(null);

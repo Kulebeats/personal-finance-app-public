@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { Holding } from "@/hooks/useInvestments";
@@ -162,3 +162,30 @@ it.each([["Africa/Lusaka", null, "2026-11-23"], [null, "Africa/Lusaka", "2026-11
       expect(form.getByLabelText("Transaction Date")).toHaveValue(expected);
     } finally { cleanup(); vi.useRealTimers(); setHouseholdCalendarTimeZone(null); setCalendarTimeZone(null); await Promise.resolve(); }
   });
+
+it("NEW-15: a zone arriving while the activity form is open moves an untouched date, never a chosen one", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-11-22T22:30:00Z"));
+  try {
+    const { form } = await openActivity("Buy");
+    const date = form.getByLabelText("Transaction Date");
+    expect(date).toHaveValue("2026-11-22");
+    await act(async () => { setHouseholdCalendarTimeZone("Africa/Lusaka"); await Promise.resolve(); });
+    expect(date).toHaveValue("2026-11-23");
+    fireEvent.change(date, { target: { value: "2026-11-20" } });
+    await act(async () => { setHouseholdCalendarTimeZone(null); await Promise.resolve(); });
+    expect(date).toHaveValue("2026-11-20");
+  } finally { cleanup(); vi.useRealTimers(); setHouseholdCalendarTimeZone(null); await Promise.resolve(); }
+});
+
+it("NEW-15: reopening the activity form after midnight shows the new day", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-11-22T23:30:00Z"));
+  try {
+    const { user, form } = await openActivity("Buy");
+    expect(form.getByLabelText("Transaction Date")).toHaveValue("2026-11-22");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    vi.setSystemTime(new Date("2026-11-23T00:30:00Z"));
+    await user.click(screen.getByRole("button", { name: "Record activity" }));
+    expect(within(screen.getByRole("dialog")).getByLabelText("Transaction Date")).toHaveValue("2026-11-23");
+  } finally { cleanup(); vi.useRealTimers(); }
+});

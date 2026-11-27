@@ -1,7 +1,7 @@
 import { userErrorMessage } from "@/lib/errorCopy";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { format } from "date-fns";
-import { calendarDateAsLocalDate, useHouseholdCalendarToday } from "@/lib/calendarZone";
+import { calendarDateAsLocalDate, useHouseholdDateDefault } from "@/lib/calendarZone";
 import {
   Dialog,
   DialogContent,
@@ -49,8 +49,8 @@ export function GoalTransferModal({
   const [toGoalId, setToGoalId] = useState("");
   const [amount, setAmount] = useState("");
   // NEW-15: the server's day, UTC for a legacy household; reset each time the dialog opens.
-  const today = useHouseholdCalendarToday();
-  const [date, setDate] = useState<Date>(() => calendarDateAsLocalDate(today));
+  const dateDefault = useHouseholdDateDefault();
+  const date = useMemo(() => calendarDateAsLocalDate(dateDefault.date), [dateDefault.date]);
   const [isBudget, setIsBudget] = useState(false);
   const [reason, setReason] = useState("");
   const [confirmOverfund, setConfirmOverfund] = useState(false);
@@ -62,7 +62,7 @@ export function GoalTransferModal({
   // double submit records one expense; any edit makes it a new contribution.
   const contributionKey = useMemo(
     () => generateIdempotencyKey(),
-    [open, mode, fromId, toGoalId, amount, date, reason, isBudget]
+    [open, mode, fromId, toGoalId, amount, dateDefault.date, reason, isBudget]
   );
   useEffect(() => setServerAskedOverfund(false), [contributionKey]);
   const sentContribution = useRef<SentContribution | null>(null);
@@ -70,6 +70,13 @@ export function GoalTransferModal({
     () => accounts.find((account) => account.id === fromId),
     [accounts, fromId]
   );
+
+  // Only a closed-to-open change resets the date: a refetch must not move a picked date (and so the key).
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (open && !wasOpen.current) dateDefault.reset();
+    wasOpen.current = open;
+  }, [open, dateDefault.reset]);
 
   useEffect(() => {
     if (!open) {
@@ -83,12 +90,11 @@ export function GoalTransferModal({
       return;
     }
 
-    setDate(calendarDateAsLocalDate(today));
     if (sourceGoal) {
       setFromId(sourceGoal.id);
       setMode("goal-to-goal");
     }
-  }, [open, sourceGoal]);
+  }, [open, sourceGoal?.id]); // the id, not the object: a refetch of the same goal changes nothing
 
   const fromGoal = useMemo(
     () =>
@@ -175,11 +181,11 @@ export function GoalTransferModal({
       } else {
         // The expense and its link are one server write (#245, Astra round 2). A retry
         // under the same key resends the first request; only the confirmation is fresh.
+        dateDefault.hold(); // sent with this key: a late zone must not move it
         const sent = contributionRequestFor(sentContribution.current, contributionKey, () => ({
           accountId: fromId,
           amount: { amount: exactAmount, currency: fromAccount?.currency || "ZMW" },
-          // The picker's Date is a local calendar day; UTC would shift it east of Greenwich.
-          date: format(date, "yyyy-MM-dd"),
+          date: dateDefault.date,
           reason: reason || undefined,
           categoryId: isBudget ? budgetCategory?.id : undefined,
           idempotencyKey: contributionKey,
@@ -234,7 +240,8 @@ export function GoalTransferModal({
           amountError={amountCheck.error}
           onAmountChange={setAmount}
           date={date}
-          onDateChange={setDate}
+          // The picker's Date is a local calendar day; UTC would shift it east of Greenwich.
+          onDateChange={(picked) => dateDefault.choose(format(picked, "yyyy-MM-dd"))}
           reason={reason}
           onReasonChange={setReason}
           isBudget={isBudget}

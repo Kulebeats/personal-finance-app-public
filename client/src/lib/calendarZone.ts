@@ -8,7 +8,7 @@
  * outside React and need no provider. Components that keep state seeded from
  * the zone subscribe with `useCalendarTimeZone` to re-render when it changes.
  */
-import { useMemo, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   householdCalendarDate,
   householdMonthRange,
@@ -191,4 +191,35 @@ export function calendarDateAsLocalDate(date: string): Date {
  */
 export function useHouseholdCalendarToday(): string {
   return householdCalendarDate(new Date(), useHouseholdCalendarTimeZone());
+}
+
+export interface HouseholdDateDefault {
+  /** The form's date ("YYYY-MM-DD"). */
+  date: string;
+  /** The member chose a date: it is never overwritten until the next `reset`. */
+  choose: (date: string) => void;
+  /** The date is now part of a sent request: keep it, as if the member chose it. */
+  hold: () => void;
+  /** Back to today's household date, computed now (not on an earlier render). */
+  reset: () => void;
+}
+
+/**
+ * A form date that defaults to the household's today (NEW-15). The form calls
+ * `reset` when it opens. While the member has not chosen a date, and nothing
+ * has been sent with it, a household zone that arrives late moves it.
+ */
+export function useHouseholdDateDefault(): HouseholdDateDefault {
+  const zone = useHouseholdCalendarTimeZone();
+  const zoneRef = useRef(zone);
+  zoneRef.current = zone;
+  const [state, setState] = useState(() => ({ date: householdCalendarDate(new Date(), zone), touched: false }));
+  useEffect(() => {
+    const next = householdCalendarDate(new Date(), zone);
+    setState(current => (current.touched || current.date === next ? current : { date: next, touched: false }));
+  }, [zone]);
+  const choose = useCallback((date: string) => setState({ date, touched: true }), []);
+  const hold = useCallback(() => setState(current => (current.touched ? current : { ...current, touched: true })), []);
+  const reset = useCallback(() => setState({ date: householdCalendarDate(new Date(), zoneRef.current), touched: false }), []);
+  return useMemo(() => ({ date: state.date, choose, hold, reset }), [state.date, choose, hold, reset]);
 }

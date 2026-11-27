@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { setCalendarTimeZone, setHouseholdCalendarTimeZone } from "@/lib/calendarZone";
 import { AddGrzBondModal } from "../AddGrzBondModal";
@@ -46,4 +46,15 @@ it("NEW-15: a household zone that arrives after the GRZ forms mount is used when
   bill.rerender(<AddGrzTBillModal open onOpenChange={vi.fn()}><button>Record</button></AddGrzTBillModal>);
   expect(screen.getByLabelText("Purchase Date")).toHaveValue("2026-11-23");
   expect(screen.getByLabelText("Maturity Date")).toHaveValue("2027-02-22");
+});
+
+it("NEW-15: a zone arriving while a GRZ form is open moves an untouched purchase date, never a chosen one", async () => {
+  render(<AddGrzBondModal open><button>Record</button></AddGrzBondModal>);
+  const date = screen.getByLabelText("Purchase Date");
+  expect(date).toHaveValue("2026-11-22");
+  await act(() => setZones("Africa/Lusaka", null));
+  expect(date).toHaveValue("2026-11-23");
+  fireEvent.change(date, { target: { value: "2026-11-20" } });
+  await act(() => setZones(null, null));
+  expect(date).toHaveValue("2026-11-20");
 });
