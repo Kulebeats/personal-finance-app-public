@@ -21,6 +21,7 @@ const householdId = randomUUID();
 const userId = randomUUID();
 const existingType = NOTIFICATION_TYPES.LARGE_TRANSACTION;
 const freshType = NOTIFICATION_TYPES.BUDGET_WARNING;
+const createdType = NOTIFICATION_TYPES.GOAL_PROGRESS;
 let app: Awaited<ReturnType<typeof getTestApp>>;
 let cookie: string;
 
@@ -98,16 +99,18 @@ describe("NEW-26 preference and display saves are audited in the same transactio
   });
 
   it("writes a notification_preference audit row for a create and for an update", async () => {
-    await putNotifications([{ notificationType: freshType, emailEnabled: true }]).expect(200);
+    // A type no other case writes, so the CREATE does not depend on test order.
+    await putNotifications([{ notificationType: createdType, emailEnabled: true }]).expect(200);
     await putNotifications([{ notificationType: existingType, emailEnabled: false }]).expect(200);
 
     const rows = await auditRows("notification_preference");
-    const created = rows.find(row => row.action === "CREATE");
-    const updated = rows.find(row => row.action === "UPDATE");
-    expect(created).toMatchObject({ householdId, entityId: userId, details: expect.objectContaining({ notificationType: freshType }) });
-    expect(updated).toMatchObject({
-      householdId, entityId: userId,
-      details: expect.objectContaining({ notificationType: existingType, newValue: { notificationType: existingType, emailEnabled: false } }),
+    const auditFor = (action: string, notificationType: string) => rows.find(row => row.action === action
+      && (row.details as { notificationType?: string }).notificationType === notificationType);
+    // User-level settings: these routes carry no household context, so the audit row has none.
+    expect(auditFor("CREATE", createdType)).toMatchObject({ householdId: null, entityId: userId });
+    expect(auditFor("UPDATE", existingType)).toMatchObject({
+      householdId: null, entityId: userId,
+      details: expect.objectContaining({ newValue: { notificationType: existingType, emailEnabled: false } }),
     });
     expect(await preference(existingType)).toMatchObject({ emailEnabled: false });
   });
@@ -116,7 +119,7 @@ describe("NEW-26 preference and display saves are audited in the same transactio
     await putDisplay({ theme: "dark" }).expect(200);
 
     expect(await auditRows("display_settings")).toEqual(expect.arrayContaining([expect.objectContaining({
-      action: "UPDATE", householdId, entityId: userId, details: expect.objectContaining({ newValue: { theme: "dark" } }),
+      action: "UPDATE", householdId: null, entityId: userId, details: expect.objectContaining({ newValue: { theme: "dark" } }),
     })]));
     expect((await display())?.theme).toBe("dark");
   });
