@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { activateOperationLifetime, createOperationLifetime, retireOperationLifetime, type OperationLifetime } from "@/lib/operation-lifetime";
 import { createDataQueryClient } from "@/lib/queryClient";
 import { useCreateHolding } from "@/hooks/investments/useHoldings";
+import { setHouseholdCalendarTimeZone } from "@/lib/calendarZone";
 import { AddHoldingModal } from "../AddHoldingModal";
 
 const mocks = vi.hoisted(() => ({
@@ -66,6 +67,16 @@ it("submits an exact native decimal for three shares at ten cents through the no
   expect(mocks.submit).toHaveBeenCalledWith({ securityId: "usd-security", accountId: "first-account",
     quantity: "3", costBasis: "0.30", acquiredDate: new Date().toISOString().slice(0, 10),
     operationId: expect.stringMatching(/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i), expectedCurrency: "USD" });
+});
+
+it("NEW-15: defaults the purchase date to the household's day just after its midnight, not UTC's", async () => {
+  // 22:30 UTC on 22 November is 00:30 on 23 November in Lusaka (UTC+2).
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-11-22T22:30:00Z"));
+  setHouseholdCalendarTimeZone("Africa/Lusaka"); await Promise.resolve();
+  try {
+    const { form } = await openDetails();
+    expect(form.getByLabelText("Purchase Date")).toHaveValue("2026-11-23");
+  } finally { vi.useRealTimers(); setHouseholdCalendarTimeZone(null); await Promise.resolve(); }
 });
 
 it("labels the source unit price and total in USD when user settings and custody are ZMW", async () => {

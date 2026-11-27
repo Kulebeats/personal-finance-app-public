@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { Holding } from "@/hooks/useInvestments";
+import { setHouseholdCalendarTimeZone } from "@/lib/calendarZone";
 import { RecordInvestmentTransactionModal } from "../RecordInvestmentTransactionModal";
 
 const { submit, display } = vi.hoisted(() => ({ submit: vi.fn(), display: { numberFormat: "US", currency: "ZMW" } }));
@@ -148,4 +149,14 @@ it.each(quoteSources)("requires an explicit Sell execution price when a $label q
   expect(submit).toHaveBeenCalledWith(expect.objectContaining({
     type: "sell", price: "0.6667", quantity: "1.5", currency: "USD", amount: "1.00",
   }));
+});
+
+it("NEW-15: defaults the activity date to the household's day just after its midnight, not UTC's", async () => {
+  // 22:30 UTC on 22 November is 00:30 on 23 November in Lusaka (UTC+2).
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-11-22T22:30:00Z"));
+  setHouseholdCalendarTimeZone("Africa/Lusaka"); await Promise.resolve();
+  try {
+    const { form } = await openActivity("Buy");
+    expect(form.getByLabelText("Transaction Date")).toHaveValue("2026-11-23");
+  } finally { vi.useRealTimers(); setHouseholdCalendarTimeZone(null); await Promise.resolve(); }
 });
