@@ -4,13 +4,13 @@ info:
   version: 0.1.0
   description: |
     Baseline OpenAPI 3.1 specification for the Personal Finance App.
-    Paths are anchored at `/api/*` and are currently available under both
-    `/api/*` and `/api/v1/*` via server-side routing.
+    Paths are anchored at `/api/*`, which is the only served prefix. There is
+    no `/api/v1/*` alias; versioning has not been introduced.
     Schemas document the core client contract and allow additional fields
     for forward compatibility where appropriate.
 servers:
   - url: http://localhost:5000
-    description: Local development (supports /api/* and /api/v1/* aliases)
+    description: Local development (serves /api/* only; no /api/v1 alias)
 tags:
   - name: Auth
     description: Authentication and sessions
