@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { activateOperationLifetime, createOperationLifetime, retireOperationLifetime, type OperationLifetime } from "@/lib/operation-lifetime";
 import { createDataQueryClient } from "@/lib/queryClient";
 import { useCreateHolding } from "@/hooks/investments/useHoldings";
-import { setHouseholdCalendarTimeZone } from "@/lib/calendarZone";
+import { calendarToday, setHouseholdCalendarTimeZone } from "@/lib/calendarZone";
 import { AddHoldingModal } from "../AddHoldingModal";
 
 const mocks = vi.hoisted(() => ({
@@ -65,7 +65,7 @@ it("submits an exact native decimal for three shares at ten cents through the no
   await user.click(form.getByRole("button", { name: "Add Holding" }));
   await waitFor(() => expect(mocks.submit).toHaveBeenCalledTimes(1));
   expect(mocks.submit).toHaveBeenCalledWith({ securityId: "usd-security", accountId: "first-account",
-    quantity: "3", costBasis: "0.30", acquiredDate: new Date().toISOString().slice(0, 10),
+    quantity: "3", costBasis: "0.30", acquiredDate: calendarToday(),
     operationId: expect.stringMatching(/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i), expectedCurrency: "USD" });
 });
 

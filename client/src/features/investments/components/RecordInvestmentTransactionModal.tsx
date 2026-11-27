@@ -21,6 +21,7 @@ import {
   parseMoneyString,
 } from "@/lib/money";
 import { cn } from "@/lib/utils";
+import { calendarToday } from "@/lib/calendarZone";
 
 import { calculateTradeSettlement, InvestmentBuySellForm } from "./InvestmentBuySellForm";
 import { InvestmentHoldingSummary } from "./InvestmentHoldingSummary";
@@ -46,9 +47,7 @@ export function RecordInvestmentTransactionModal({
   const [quantity, setQuantity] = useState("");
   const [price, setPrice] = useState("");
   const [fee, setFee] = useState("");
-  const [transactionDate, setTransactionDate] = useState(
-    new Date().toISOString().split("T")[0]
-  );
+  const [transactionDate, setTransactionDate] = useState(calendarToday);
 
   const [grossAmount, setGrossAmount] = useState("");
   const [whtRate, setWhtRate] = useState("");
@@ -70,7 +69,7 @@ export function RecordInvestmentTransactionModal({
       setQuantity("");
       setFee("");
       setPrice("");
-      setTransactionDate(new Date().toISOString().split("T")[0]);
+      setTransactionDate(calendarToday());
       setGrossAmount("");
       setWhtRate("");
       setCustomWht(false);

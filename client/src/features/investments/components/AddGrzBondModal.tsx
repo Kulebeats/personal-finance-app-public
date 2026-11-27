@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/select";
 import { useCreateGrzBond } from "@/hooks/useGrzSecurities";
 import { useAccounts } from "@/hooks/useAccounts";
+import { calendarToday } from "@/lib/calendarZone";
 import {
   grzBondFormSchema,
 } from "./AddGrzBondModalData";
@@ -68,7 +69,7 @@ export function AddGrzBondModal({
       tenorYears: 5,
       faceValue: 0,
       purchasePrice: 0,
-      purchaseDate: new Date().toISOString().split("T")[0],
+      purchaseDate: calendarToday(),
       firstCouponDate: "",
       maturityDate: "",
     },

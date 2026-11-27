@@ -1,5 +1,7 @@
 import { userErrorMessage } from "@/lib/errorCopy";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { format } from "date-fns";
+import { calendarTodayAsLocalDate } from "@/lib/calendarZone";
 import {
   Dialog,
   DialogContent,
@@ -46,7 +48,7 @@ export function GoalTransferModal({
   const [fromId, setFromId] = useState(""); // Goal ID or Account ID
   const [toGoalId, setToGoalId] = useState("");
   const [amount, setAmount] = useState("");
-  const [date, setDate] = useState<Date>(new Date());
+  const [date, setDate] = useState<Date>(calendarTodayAsLocalDate);
   const [isBudget, setIsBudget] = useState(false);
   const [reason, setReason] = useState("");
   const [confirmOverfund, setConfirmOverfund] = useState(false);
@@ -73,7 +75,7 @@ export function GoalTransferModal({
       setToGoalId("");
       setAmount("");
       setReason("");
-      setDate(new Date());
+      setDate(calendarTodayAsLocalDate());
       setIsBudget(false);
       setConfirmOverfund(false);
       setMode("goal-to-goal");
@@ -174,7 +176,8 @@ export function GoalTransferModal({
         const sent = contributionRequestFor(sentContribution.current, contributionKey, () => ({
           accountId: fromId,
           amount: { amount: exactAmount, currency: fromAccount?.currency || "ZMW" },
-          date: date.toISOString().split("T")[0],
+          // The picker's Date is a local calendar day; UTC would shift it east of Greenwich.
+          date: format(date, "yyyy-MM-dd"),
           reason: reason || undefined,
           categoryId: isBudget ? budgetCategory?.id : undefined,
           idempotencyKey: contributionKey,

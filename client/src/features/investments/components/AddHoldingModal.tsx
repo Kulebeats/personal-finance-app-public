@@ -13,6 +13,7 @@ import {
   useCreateSecurity,
 } from "@/hooks/useInvestments";
 import { useAccounts } from "@/hooks/useAccounts";
+import { calendarToday } from "@/lib/calendarZone";
 import { useFormat } from "@/hooks/use-format";
 import type { CreateHoldingInput } from "@/hooks/investments/useHoldings";
 import { useSession } from "@/contexts/SessionContext";
@@ -89,9 +90,7 @@ function OpeningHoldingForm({ children, onSuccess, lifetime, open: controlledOpe
   const [accountId, setAccountId] = useState<string>("");
   const [quantity, setQuantity] = useState("");
   const [purchasePrice, setPurchasePrice] = useState("");
-  const [purchaseDate, setPurchaseDate] = useState(
-    new Date().toISOString().split("T")[0]
-  );
+  const [purchaseDate, setPurchaseDate] = useState(calendarToday);
 
   const { formatCurrency } = useFormat();
   const { data: securities = [], isLoading: loadingSecurities, isError: securitiesError, refetch: refetchSecurities } = useSecurities(
@@ -119,7 +118,7 @@ function OpeningHoldingForm({ children, onSuccess, lifetime, open: controlledOpe
     setAccountId(investmentAccounts[0]?.id || "");
     setQuantity("");
     setPurchasePrice("");
-    setPurchaseDate(new Date().toISOString().split("T")[0]);
+    setPurchaseDate(calendarToday());
   };
   useEffect(() => { if (open && !attempt.current && !validationError) resetForm(); }, [open]);
 

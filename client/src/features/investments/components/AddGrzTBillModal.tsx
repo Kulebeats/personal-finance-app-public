@@ -34,6 +34,7 @@ import { useAccounts } from "@/hooks/useAccounts";
 import { TBillSettlementAccountField } from "./TBillSettlementAccountField";
 import { Loader2 } from "lucide-react";
 import { addDays } from "date-fns";
+import { calendarDaysAgo, calendarToday } from "@/lib/calendarZone";
 
 const formSchema = z.object({
   tbillName: z.string().min(1, "T-Bill Name is required"),
@@ -76,10 +77,9 @@ export function AddGrzTBillModal({
       isin: "",
       accountId: "",
       tenorDays: 91,
-      faceValue: 0,
-      purchasePrice: 0,
-      purchaseDate: new Date().toISOString().split("T")[0],
-      maturityDate: addDays(new Date(), 91).toISOString().split("T")[0],
+      faceValue: 0, purchasePrice: 0,
+      purchaseDate: calendarToday(), // NEW-15: the household's day, not UTC's
+      maturityDate: calendarDaysAgo(-91), // 91 calendar days after it
     },
   });
 
