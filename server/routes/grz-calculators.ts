@@ -51,7 +51,7 @@ const tbillYieldSchema = z.object({
 router.use(requireAuth);
 router.use(householdGuard);
 
-router.post("/bond-price", requireCapability("financial.read"), (req, res) => {
+router.post("/bond-price", requireCapability("financial.read"), (req, res, next) => {
   try {
     if (req.body && Object.prototype.hasOwnProperty.call(req.body, "method")) {
       return res.json({ success: true, data: priceGrzBond(req.body) });
@@ -70,11 +70,11 @@ router.post("/bond-price", requireCapability("financial.read"), (req, res) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ success: false, error: error.errors });
     }
-    res.status(500).json({ success: false, error: String(error) });
+    next(error);
   }
 });
 
-router.post("/ytm", requireCapability("financial.read"), (req, res) => {
+router.post("/ytm", requireCapability("financial.read"), (req, res, next) => {
   try {
     const data = ytmSchema.parse(req.body);
     const result = calculateYieldToMaturity({
@@ -89,11 +89,11 @@ router.post("/ytm", requireCapability("financial.read"), (req, res) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ success: false, error: error.errors });
     }
-    res.status(500).json({ success: false, error: String(error) });
+    next(error);
   }
 });
 
-router.post("/accrued", requireCapability("financial.read"), (req, res) => {
+router.post("/accrued", requireCapability("financial.read"), (req, res, next) => {
   try {
     const data = accruedSchema.parse(req.body);
     const result = calculateAccruedInterest({
@@ -108,11 +108,11 @@ router.post("/accrued", requireCapability("financial.read"), (req, res) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ success: false, error: error.errors });
     }
-    res.status(500).json({ success: false, error: String(error) });
+    next(error);
   }
 });
 
-router.post("/tbill-yield", requireCapability("financial.read"), (req, res) => {
+router.post("/tbill-yield", requireCapability("financial.read"), (req, res, next) => {
   try {
     const data = tbillYieldSchema.parse(req.body);
     const result = calculateTBillYield({
@@ -125,7 +125,7 @@ router.post("/tbill-yield", requireCapability("financial.read"), (req, res) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ success: false, error: error.errors });
     }
-    res.status(500).json({ success: false, error: String(error) });
+    next(error);
   }
 });
 

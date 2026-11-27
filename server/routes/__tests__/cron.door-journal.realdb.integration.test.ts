@@ -7,15 +7,17 @@
  *     so the door cannot post recurring transactions alongside the scheduler;
  *   - jobs held back from the scheduler are refused (409 JOB_HELD).
  */
+import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
-import { and, eq } from "drizzle-orm";
-import { jobs } from "@shared/schema";
+import { and, eq, inArray } from "drizzle-orm";
+import { accounts, households, jobs, recurringTransactions, transactions } from "@shared/schema";
 import { db, pool } from "../../db";
 import { SCHEDULER_LOCK_NAMESPACE } from "../../core/scheduling/advisoryLock";
 import { SCHEDULED_JOB_SPECS } from "../../core/scheduling/jobCatalog";
 import { SCHEDULED_RUN_PREFIX } from "../../core/scheduling/jobJournal";
 import { periodIdentity, scheduledSlotAtOrBefore } from "../../core/scheduling/schedulePeriod";
+import { recordRecurringDenomination } from "../../services/recurring/RecurringDenomination";
 import { getTestApp } from "../../__tests__/fixtures";
 
 const CRON_SECRET = "synthetic-cron-door-journal";
@@ -147,6 +149,75 @@ describe("the cron door shares the scheduler's lock and journal", () => {
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({ success: true, jobs: [{ name: "recurring.materialize", status: "skipped", reason: "PERIOD_DONE" }] });
     expect(await journalRows("recurring.materialize", identity)).toHaveLength(1);
+  }, 60_000);
+
+  it("materializes a due rule only in the household whose calendar reached its due date", async () => {
+    vi.stubEnv("CRON_SECRET", CRON_SECRET);
+    // 03:05 on Jan 15 in Lusaka and 17:05 on Jan 14 in Los Angeles.
+    vi.setSystemTime(new Date("2031-01-15T01:05:00.000Z"));
+    const name = "recurring.materialize";
+    const { identity } = periodOf(name);
+    touched.push({ name, identity });
+    await clearPeriod(name, identity);
+
+    const dueDate = "2031-01-15";
+    const lusaka = { id: randomUUID(), accountId: randomUUID(), ruleId: randomUUID(), timeZone: "Africa/Lusaka" };
+    const losAngeles = { id: randomUUID(), accountId: randomUUID(), ruleId: randomUUID(), timeZone: "America/Los_Angeles" };
+    const fixtures = [lusaka, losAngeles];
+    const householdIds = fixtures.map(fixture => fixture.id);
+    const ruleIds = fixtures.map(fixture => fixture.ruleId);
+    const readLedger = () => db.select().from(transactions).where(inArray(transactions.householdId, householdIds));
+    const readBalances = async () => {
+      const rows = await db.select({ id: accounts.id, balance: accounts.balance }).from(accounts)
+        .where(inArray(accounts.householdId, householdIds));
+      return Object.fromEntries(rows.map(({ id, balance }) => [id, balance]));
+    };
+
+    try {
+      const seeded = await db.transaction(async tx => {
+        await tx.insert(households).values(fixtures.map(({ id, timeZone }) => ({
+          id, name: "Synthetic cron calendar household", timeZone, currency: "ZMW",
+        })));
+        await tx.insert(accounts).values(fixtures.map(({ id, accountId }) => ({
+          id: accountId, householdId: id, name: "Synthetic checking account", type: "checking" as const,
+          currency: "ZMW", balance: "100.00", initialBalance: "100.00",
+        })));
+        const rules = await tx.insert(recurringTransactions).values(fixtures.map(({ id, accountId, ruleId }) => ({
+          id: ruleId, householdId: id, accountId, name: "Synthetic calendar expense",
+          type: "expense" as const, amount: "12.35", frequency: "monthly" as const, dayOfMonth: 15,
+          startDate: dueDate, nextDueDate: dueDate,
+        }))).returning();
+        for (const rule of rules) await recordRecurringDenomination(tx, rule, "ZMW", null, "manual_creation");
+        return rules;
+      });
+
+      const first = await post("recurring").expect(200);
+      expect(first.body).toMatchObject({ success: true, jobs: [{ name, status: "completed" }] });
+
+      const ledger = await readLedger();
+      expect(ledger).toEqual([expect.objectContaining({
+        householdId: lusaka.id, accountId: lusaka.accountId, recurringTransactionId: lusaka.ruleId,
+        date: dueDate, type: "expense", amount: "12.35", currency: "ZMW", postedBalanceDelta: "-12.35",
+        source: "recurring",
+      })]);
+      const balances = await readBalances();
+      expect(balances).toEqual({ [lusaka.accountId]: "87.65", [losAngeles.accountId]: "100.00" });
+
+      const rulesAfter = await db.select().from(recurringTransactions).where(inArray(recurringTransactions.id, ruleIds));
+      expect(rulesAfter).toHaveLength(2);
+      expect(rulesAfter.find(rule => rule.id === lusaka.ruleId)).toMatchObject({
+        nextDueDate: "2031-02-15", lastOccurredDate: dueDate, totalOccurrences: 1,
+      });
+      expect(rulesAfter.find(rule => rule.id === losAngeles.ruleId)).toEqual(seeded.find(rule => rule.id === losAngeles.ruleId));
+
+      const replay = await post("recurring").expect(200);
+      expect(replay.body).toMatchObject({ success: true, jobs: [{ name, status: "skipped", reason: "PERIOD_DONE" }] });
+      expect((await journalRows(name, identity)).map(row => row.status)).toEqual(["completed"]);
+      expect(await readLedger()).toEqual(ledger);
+      expect(await readBalances()).toEqual(balances);
+    } finally {
+      await db.delete(households).where(inArray(households.id, householdIds));
+    }
   }, 60_000);
 
   it.each(["goals-status", "market-data"])("refuses the held-back job behind POST /api/cron/%s", async (route) => {
