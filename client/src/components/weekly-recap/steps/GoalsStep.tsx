@@ -6,9 +6,10 @@ import { cn } from "@/lib/utils";
 import { useState } from "react";
 import { useGoalsSummary } from "@/hooks/useGoals";
 import { toMoneyNumber } from "@/lib/money";
+import RecapWithheld from "../components/RecapWithheld";
 
 export default function GoalsStep() {
-  const { nextStep, prevStep, submitStepFeedback } = useWeeklyRecap();
+  const { data, isChecking, nextStep, prevStep, submitStepFeedback } = useWeeklyRecap();
   const { formatCurrency } = useFormatters();
   const { data: summary, isLoading } = useGoalsSummary();
   const [feedbackGiven, setFeedbackGiven] = useState<
@@ -20,13 +21,9 @@ export default function GoalsStep() {
     submitStepFeedback(type);
   };
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-sm text-muted-foreground">Loading goals...</div>
-      </div>
-    );
-  }
+  // C3-30: goal figures are shown only while the recap that includes this
+  // section is confirmed; the step, its draft and its controls stay mounted.
+  const withheld = isChecking || !data;
 
   const hasGoals = summary && (summary.saveUp.total > 0 || summary.payDown.total > 0);
   const totalGoals = (summary?.saveUp.total || 0) + (summary?.payDown.total || 0);
@@ -42,7 +39,11 @@ export default function GoalsStep() {
         <p className="text-foreground/70 text-sm">Your financial goals this week</p>
       </div>
 
-      {!hasGoals ? (
+      {withheld ? <RecapWithheld /> : isLoading ? (
+        <div className="flex items-center justify-center py-12">
+          <div className="text-sm text-muted-foreground">Loading goals...</div>
+        </div>
+      ) : !hasGoals ? (
         <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
           <Target className="w-12 h-12 mb-3 opacity-50" />
           <p className="font-medium">No active goals yet</p>
@@ -126,6 +127,7 @@ export default function GoalsStep() {
                 "bg-emerald-100 border-emerald-500 text-emerald-600 dark:bg-emerald-900/30"
             )}
             onClick={() => handleFeedback("positive")}
+            aria-pressed={feedbackGiven === "positive"}
             aria-label="Positive feedback"
           >
             <ThumbsUp className="w-4 h-4" />
@@ -139,6 +141,7 @@ export default function GoalsStep() {
                 "bg-rose-100 border-rose-500 text-rose-600 dark:bg-rose-900/30"
             )}
             onClick={() => handleFeedback("negative")}
+            aria-pressed={feedbackGiven === "negative"}
             aria-label="Negative feedback"
           >
             <ThumbsDown className="w-4 h-4" />

@@ -24,8 +24,11 @@ function auditHousehold(householdId: string, ...rows: Account[]): string | null 
   return rows.some(row => row.isPrivate) ? null : householdId;
 }
 
+// C3-16: an opening-basis edit moves initialBalance with balance, so both are
+// recorded. Rows written before this carry no initialBalance: read it as unknown.
 const profile = (row: Account) => ({
-  name: row.name, type: row.type, balance: row.balance, currency: row.currency, isArchived: row.isArchived,
+  name: row.name, type: row.type, initialBalance: row.initialBalance, balance: row.balance, currency: row.currency,
+  isArchived: row.isArchived,
   isPrivate: row.isPrivate, ownerUserId: row.ownerUserId, institution: row.institution, notes: row.notes,
 });
 const visibility = (row: Account) => ({
@@ -77,8 +80,8 @@ export class AccountAuditedWriteService extends AccountImportService {
       await this.deleteAccount(id, householdId, userId, tx);
       await businessAuditService.logDelete({
         tx, userId, householdId: auditHousehold(householdId, before), entityId: id, entityType: "account",
-        oldValue: { name: before.name, type: before.type, balance: before.balance, currency: before.currency,
-          isArchived: before.isArchived },
+        oldValue: { name: before.name, type: before.type, initialBalance: before.initialBalance, balance: before.balance,
+          currency: before.currency, isArchived: before.isArchived },
         ipAddress,
       });
     });
