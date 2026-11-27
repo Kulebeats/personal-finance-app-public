@@ -136,10 +136,7 @@ export function apiErrorMiddleware(
   // 500. Surface a clean 403 the client can detect, clear its stale token on,
   // and transparently retry. It's an expected condition, so don't error-log it.
   const csrfErr = err as { code?: string };
-  if (
-    csrfErr.code === "EBADCSRFTOKEN" ||
-    /invalid csrf token/i.test(err.message)
-  ) {
+  if (csrfErr.code === "EBADCSRFTOKEN") {
     res.status(403).json({
       success: false,
       error: {

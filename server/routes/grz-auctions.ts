@@ -66,7 +66,7 @@ function getNextTuesday(from: Date) {
 }
 
 // GET /api/investments/grz/auctions/results
-router.get("/auctions/results", async (req, res) => {
+router.get("/auctions/results", async (req, res, next) => {
   try {
     const parsed = listResultsQuerySchema.parse(req.query);
     const conditions = [];
@@ -90,14 +90,14 @@ router.get("/auctions/results", async (req, res) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ success: false, error: error.errors });
     }
-    res.status(500).json({ success: false, error: String(error) });
+    next(error);
   }
 });
 
 // POST /api/investments/grz/auctions/results
 // FIX DATA-GRZ-001: Auction results are GLOBAL market data - admin-only write access
 // Regular users can read but cannot write (prevents data contamination)
-router.post("/auctions/results", requireRole("admin"), async (req, res) => {
+router.post("/auctions/results", requireRole("admin"), async (req, res, next) => {
   try {
     const data = auctionResultSchema.parse(req.body);
     const [result] = await db
@@ -139,12 +139,12 @@ router.post("/auctions/results", requireRole("admin"), async (req, res) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ success: false, error: error.errors });
     }
-    res.status(500).json({ success: false, error: String(error) });
+    next(error);
   }
 });
 
 // GET /api/investments/grz/auctions/calendar
-router.get("/auctions/calendar", async (req, res) => {
+router.get("/auctions/calendar", async (req, res, next) => {
   try {
     const parsed = calendarQuerySchema.parse(req.query);
     const weeks = parsed.weeks || 12;
@@ -165,12 +165,12 @@ router.get("/auctions/calendar", async (req, res) => {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ success: false, error: error.errors });
     }
-    res.status(500).json({ success: false, error: String(error) });
+    next(error);
   }
 });
 
 // GET /api/investments/grz/yields/current
-router.get("/yields/current", async (_req, res) => {
+router.get("/yields/current", async (_req, res, next) => {
   try {
     const results = await db
       .select()
@@ -190,7 +190,7 @@ router.get("/yields/current", async (_req, res) => {
       data: Array.from(latest.values()),
     });
   } catch (error) {
-    res.status(500).json({ success: false, error: String(error) });
+    next(error);
   }
 });
 
