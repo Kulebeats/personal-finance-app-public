@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { users, userNotificationPreferences, type NotificationPreference } from "@shared/schema";
 import { db } from "../db";
 import { NotFoundError } from "../core/errors";
+import type { TransactionType } from "../utils/withTransaction";
 
 export function effectiveRecapEmail(rows: ReadonlyArray<{ emailEnabled: boolean | null }>): boolean {
   return rows.length > 0 && rows.every(row => row.emailEnabled === true);
@@ -32,49 +33,57 @@ export async function writeNotificationPreferences(
   patches: NotificationPreferencePatch[],
   defaults: NotificationCreationDefaults,
 ): Promise<NotificationPreferenceWrite[]> {
-  return db.transaction(async tx => {
-    const [user] = await tx.select({ id: users.id }).from(users)
-      .where(eq(users.id, userId)).for("update");
-    if (!user) throw new NotFoundError("User not found");
+  return db.transaction(tx => writeNotificationPreferencesInTx(tx, userId, patches, defaults));
+}
 
-    const writes: NotificationPreferenceWrite[] = [];
-    for (const patch of patches) {
-      const condition = and(
-        eq(userNotificationPreferences.userId, userId),
-        eq(userNotificationPreferences.notificationType, patch.notificationType),
-      );
-      const rows = await tx.select().from(userNotificationPreferences).where(condition).orderBy(userNotificationPreferences.id).for("update");
-      const previous = rows[0];
+/** The same write inside the caller's transaction, so the caller can audit it atomically. */
+export async function writeNotificationPreferencesInTx(
+  tx: TransactionType,
+  userId: string,
+  patches: NotificationPreferencePatch[],
+  defaults: NotificationCreationDefaults,
+): Promise<NotificationPreferenceWrite[]> {
+  const [user] = await tx.select({ id: users.id }).from(users)
+    .where(eq(users.id, userId)).for("update");
+  if (!user) throw new NotFoundError("User not found");
 
-      if (previous) {
-        const [updated] = await tx.update(userNotificationPreferences).set({
-          inAppEnabled: patch.inAppEnabled,
-          emailEnabled: patch.emailEnabled,
-          pushEnabled: patch.pushEnabled,
-          thresholdAmount: patch.thresholdAmount,
-          updatedAt: new Date(),
-        }).where(eq(userNotificationPreferences.id, previous.id)).returning();
-        if (patch.notificationType === "weekly_recap" && rows.length > 1) {
-          if (patch.emailEnabled !== undefined) {
-            await tx.update(userNotificationPreferences).set({ emailEnabled: patch.emailEnabled, updatedAt: new Date() }).where(condition);
-          }
-          const emailEnabled = effectiveRecapEmail(rows);
-          writes.push({ previous: { ...previous, emailEnabled }, updated: { ...updated, emailEnabled: patch.emailEnabled ?? emailEnabled } });
-        } else {
-          writes.push({ previous, updated });
+  const writes: NotificationPreferenceWrite[] = [];
+  for (const patch of patches) {
+    const condition = and(
+      eq(userNotificationPreferences.userId, userId),
+      eq(userNotificationPreferences.notificationType, patch.notificationType),
+    );
+    const rows = await tx.select().from(userNotificationPreferences).where(condition).orderBy(userNotificationPreferences.id).for("update");
+    const previous = rows[0];
+
+    if (previous) {
+      const [updated] = await tx.update(userNotificationPreferences).set({
+        inAppEnabled: patch.inAppEnabled,
+        emailEnabled: patch.emailEnabled,
+        pushEnabled: patch.pushEnabled,
+        thresholdAmount: patch.thresholdAmount,
+        updatedAt: new Date(),
+      }).where(eq(userNotificationPreferences.id, previous.id)).returning();
+      if (patch.notificationType === "weekly_recap" && rows.length > 1) {
+        if (patch.emailEnabled !== undefined) {
+          await tx.update(userNotificationPreferences).set({ emailEnabled: patch.emailEnabled, updatedAt: new Date() }).where(condition);
         }
+        const emailEnabled = effectiveRecapEmail(rows);
+        writes.push({ previous: { ...previous, emailEnabled }, updated: { ...updated, emailEnabled: patch.emailEnabled ?? emailEnabled } });
       } else {
-        const [updated] = await tx.insert(userNotificationPreferences).values({
-          userId,
-          notificationType: patch.notificationType,
-          inAppEnabled: patch.inAppEnabled ?? defaults.inAppEnabled,
-          emailEnabled: patch.emailEnabled ?? defaults.emailEnabled,
-          pushEnabled: patch.pushEnabled ?? defaults.pushEnabled,
-          thresholdAmount: patch.thresholdAmount ?? null,
-        }).returning();
-        writes.push({ updated });
+        writes.push({ previous, updated });
       }
+    } else {
+      const [updated] = await tx.insert(userNotificationPreferences).values({
+        userId,
+        notificationType: patch.notificationType,
+        inAppEnabled: patch.inAppEnabled ?? defaults.inAppEnabled,
+        emailEnabled: patch.emailEnabled ?? defaults.emailEnabled,
+        pushEnabled: patch.pushEnabled ?? defaults.pushEnabled,
+        thresholdAmount: patch.thresholdAmount ?? null,
+      }).returning();
+      writes.push({ updated });
     }
-    return writes;
-  });
+  }
+  return writes;
 }

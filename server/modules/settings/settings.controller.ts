@@ -31,7 +31,19 @@ import { profileFieldErrors } from "./settings.profile.helpers";
 import { saveOwnProfile } from "./settings.profile.service";
 import { changeOwnPassword } from "./settings.password.service";
 import { updateHouseholdPolicy } from "../../core/authz/household-policy";
-import { writeNotificationPreferences } from "../../repositories/UserNotificationPreferences";
+import {
+  saveDisplaySettings,
+  saveNotificationPreferences,
+  type PersonalSettingsContext,
+} from "./settings.preferences.service";
+
+function personalSettingsContext(req: Request): PersonalSettingsContext {
+  return {
+    userId: req.session.userId!,
+    householdId: req.householdContext?.householdId ?? null,
+    ipAddress: businessAuditService.getIpAddress(req),
+  };
+}
 
 export const settingsController = {
   // ... (previous methods)
@@ -62,36 +74,10 @@ export const settingsController = {
           } : {}),
         };
       });
-      const writes = await writeNotificationPreferences(req.session.userId!, patches, {
+      // NEW-26: the batch and its audit rows commit together (settings.preferences.service.ts).
+      const writes = await saveNotificationPreferences(personalSettingsContext(req), patches, {
         inAppEnabled: true, emailEnabled: false, pushEnabled: false,
       });
-
-      // Keep the existing non-blocking audit behavior after the database batch commits.
-      for (let index = 0; index < writes.length; index++) {
-        const write = writes[index];
-        const pref = preferences[index];
-        if (!write.previous) {
-          await businessAuditService.logCreate({
-            householdId: req.householdContext?.householdId ?? null,
-            userId: req.session.userId!,
-            entityType: "notification_preference",
-            entityId: req.session.userId!,
-            newValue: write.updated,
-            ipAddress: businessAuditService.getIpAddress(req),
-            metadata: { notificationType: pref.notificationType },
-          });
-        } else {
-          await businessAuditService.logUpdate({
-            householdId: req.householdContext?.householdId ?? null,
-            userId: req.session.userId!,
-            entityType: "notification_preference",
-            entityId: req.session.userId!,
-            newValue: patches[index],
-            ipAddress: businessAuditService.getIpAddress(req),
-            metadata: { notificationType: pref.notificationType },
-          });
-        }
-      }
 
       return success(res, { preferences: writes.map(write => write.updated) }, 200, {
         message: "Notification preferences updated",
@@ -178,22 +164,11 @@ export const settingsController = {
         );
       }
 
-      const updatedSettings = await userRepository.updateDisplaySettings(
-        req.session.userId!,
-        parseResult.data,
-      );
+      // NEW-26: the save and its audit row commit together (settings.preferences.service.ts).
+      const updatedSettings = await saveDisplaySettings(personalSettingsContext(req), parseResult.data);
 
       logger.info("Display settings updated", {
         userId: req.session.userId?.substring(0, 8),
-      });
-
-      await businessAuditService.logUpdate({
-        householdId: req.householdContext?.householdId ?? null,
-        userId: req.session.userId!,
-        entityType: "display_settings",
-        entityId: req.session.userId!,
-        newValue: parseResult.data,
-        ipAddress: businessAuditService.getIpAddress(req),
       });
 
       return success(res, { settings: updatedSettings }, 200, {
