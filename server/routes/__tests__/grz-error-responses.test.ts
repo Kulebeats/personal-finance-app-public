@@ -58,6 +58,18 @@ describe("GRZ route error responses", () => {
     expect(response.body).toEqual(internalError);
   });
 
+  it("returns a 400 when a valid discount rate and tenor give a non-positive T-bill price", async () => {
+    const actual = await vi.importActual<typeof import("../../services/grz-service")>("../../services/grz-service");
+    vi.mocked(calculateTBillYield).mockImplementationOnce(actual.calculateTBillYield);
+
+    const response = await request(app).post(yieldPath)
+      .send({ faceValue: 1000, discountRate: 0.99, tenorDays: 364 }).expect(400);
+    expect(response.body).toMatchObject({
+      success: false,
+      error: { code: "VALIDATION_ERROR", message: "Discount rate results in a non-positive price" },
+    });
+  });
+
   it("preserves the auction query and calculator body validation responses", async () => {
     const auctionsResponse = await request(app).get(resultsPath).query({ limit: 0 }).expect(400);
     expect(auctionsResponse.body).toEqual({
