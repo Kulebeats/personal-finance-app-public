@@ -47,7 +47,7 @@ describe("R00 safe environment and worker boundaries", () => {
     expect(result.stdout).not.toContain("synthetic-poison");
   });
   it.each(["vitest.config.ts", "server/vitest.config.ts", "client/vitest.config.ts", "playwright.config.ts",
-    "playwright.completion.config.ts", "server/testing/browser-guard.config.ts"])("direct %s refuses absent mode before test collection", (config) => {
+    "playwright.completion.config.ts", "playwright.production.config.ts", "server/testing/browser-guard.config.ts"])("direct %s refuses absent mode before test collection", (config) => {
     const env = { ...process.env };
     delete env.PFA_TEST_MODE;
     const isPlaywright = !config.includes("vitest");
