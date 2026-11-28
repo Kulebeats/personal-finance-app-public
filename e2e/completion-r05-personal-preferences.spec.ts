@@ -3,8 +3,16 @@ import type { Request, Response } from "@playwright/test";
 import { test, expect, type Page } from "./protected-test";
 import { createCompletionFixture, type CompletionFixture } from "../server/testing/fixtures/completion-fixtures";
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
+import { readBack, submitStep, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { responseValue, storedValue } from "./utils/observe";
 
 const preferencePath = "/api/settings/user-preferences";
+/**
+ * The nine-field save (QA-01 R20.2, mutation-checked by scripts/e2e-mutation-check.mjs):
+ * its corrupt mutant saves an OCR threshold of 1 instead of 0 (still within 0-100).
+ */
+const SAVE_PREFERENCES: SubmitStep = { name: "preferences", method: "PUT", path: preferencePath, corruptField: "ocrConfidenceThreshold" };
 
 function redactDiagnostic(message: string) {
   return message.replace(/https?:\/\/[^\s)'"`]+/gi, value => {
@@ -80,7 +88,7 @@ async function frameAccounts(response: Response): Promise<unknown[]> {
   return body.data.accounts;
 }
 
-test("personal settings save all nine offered fields and survive a fresh server read", async ({ page }) => {
+testWithMutants("personal settings save all nine offered fields and survive a fresh server read", { corrupt: [SAVE_PREFERENCES] }, async (page) => {
   const fixture = await createCompletionFixture();
   await signIn(page, fixture);
 
@@ -116,11 +124,19 @@ test("personal settings save all nine offered fields and survive a fresh server 
     requireOcrReview: false,
     ocrConfidenceThreshold: 0,
   };
-  const saved = responseFor(page, preferencePath, "PUT");
   await expect(save).toBeEnabled();
-  await save.click();
-  const saveResponse = await saved;
+  const saveResponse = await submitStep(page, SAVE_PREFERENCES, () => save.click());
   expect(saveResponse.status()).toBe(200);
+  // Read back first: everything below assumes the saved threshold is 0.
+  await readBack(SAVE_PREFERENCES, String(expectedPatch.ocrConfidenceThreshold), {
+    saved: async () => responseValue((await saveResponse.json()).data.preferences.ocrConfidenceThreshold, "ocrConfidenceThreshold"),
+    db: () => storedValue("SELECT ocr_confidence_threshold::text AS value FROM user_preferences WHERE user_id=$1", [fixture.userId]),
+    api: async () => {
+      const fresh = await page.request.get(preferencePath, { headers: { "Cache-Control": "no-cache" } });
+      if (fresh.status() !== 200) throw new Error(`GET ${preferencePath} returned ${fresh.status()}`);
+      return responseValue((await fresh.json()).data.preferences.ocrConfidenceThreshold, "ocrConfidenceThreshold");
+    },
+  });
   expect(saveResponse.request().postDataJSON()).toEqual(expectedPatch);
   expect((await saveResponse.json()).data.preferences).toMatchObject({
     userId: fixture.userId, ...expectedPatch, defaultAccountFilter: "all",
