@@ -161,6 +161,15 @@ describe("ORG-003 rule apply re-resolves category and tag ids in the transaction
     expect(audit[0].details.effects).toEqual({ tagIds: [ids.tag] });
   });
 
+  it.each(["not-a-uuid", "00000000-0000-0000-0000-00000000000g", 42])(
+    "dry-run refuses the malformed transactionId %s with 400 VALIDATION_ERROR, not a 500 (NEW-33 R04.3)", async (transactionId) => {
+      const rule = await legacyRule([{ type: "add_tags", value: [ids.tag] }]);
+      const res = await signed(request(app).post(`/api/rules/${rule.id}/dry-run`)).send({ transactionId });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ success: false, error: { code: "VALIDATION_ERROR" } });
+      expect(res.body.error.fields).toEqual([{ field: "transactionId", message: "Must be a valid UUID" }]);
+    });
+
   it("dry-run proposes no foreign effect, reports the blocked ids, and writes nothing", async () => {
     const rule = await legacyRule([
       { type: "categorize", value: foreignCategory },
