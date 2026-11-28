@@ -53,6 +53,8 @@ const SPECS = [
   { spec: 'e2e/completion-r20.spec.ts', config: COMPLETION },
   { spec: 'e2e/completion-r05-report-preferences.spec.ts', config: COMPLETION },
   { spec: 'e2e/completion-imp01-import-wizard.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-ops012-thandi-local.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-ah05-invitations.spec.ts', config: COMPLETION },
 ];
 const INVALID = 'mutation-invalid';
 const KILLED_BY = 'mutation-killed-by';
