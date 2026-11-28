@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { activateOperationLifetime, createOperationLifetime, retireOperationLifetime, type OperationLifetime } from "@/lib/operation-lifetime";
 import { createDataQueryClient } from "@/lib/queryClient";
 import { useCreateHolding } from "@/hooks/investments/useHoldings";
+import { setCalendarTimeZone, setHouseholdCalendarTimeZone } from "@/lib/calendarZone";
 import { AddHoldingModal } from "../AddHoldingModal";
 
 const mocks = vi.hoisted(() => ({
@@ -66,6 +67,32 @@ it("submits an exact native decimal for three shares at ten cents through the no
   expect(mocks.submit).toHaveBeenCalledWith({ securityId: "usd-security", accountId: "first-account",
     quantity: "3", costBasis: "0.30", acquiredDate: new Date().toISOString().slice(0, 10),
     operationId: expect.stringMatching(/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i), expectedCurrency: "USD" });
+});
+
+// NEW-15: 22:30 UTC on 22 November is 00:30 on 23 November in Lusaka (UTC+2). A household with no
+// zone follows the server's UTC day, even when the member's display zone is Lusaka.
+it.each([["Africa/Lusaka", null, "2026-11-23"], [null, "Africa/Lusaka", "2026-11-22"]] as const)(
+  "NEW-15: defaults the purchase date to the server's household day (household zone %s, display zone %s)", async (household, display, expected) => {
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-11-22T22:30:00Z"));
+    setHouseholdCalendarTimeZone(household); setCalendarTimeZone(display); await Promise.resolve();
+    try {
+      const { form } = await openDetails();
+      expect(form.getByLabelText("Purchase Date")).toHaveValue(expected);
+    } finally { cleanup(); vi.useRealTimers(); setHouseholdCalendarTimeZone(null); setCalendarTimeZone(null); await Promise.resolve(); }
+  });
+
+it("NEW-15: a zone arriving while the holding form is open moves an untouched purchase date, never a chosen one", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-11-22T22:30:00Z"));
+  try {
+    const { form } = await openDetails();
+    const date = form.getByLabelText("Purchase Date");
+    expect(date).toHaveValue("2026-11-22");
+    await act(async () => { setHouseholdCalendarTimeZone("Africa/Lusaka"); await Promise.resolve(); });
+    expect(date).toHaveValue("2026-11-23");
+    fireEvent.change(date, { target: { value: "2026-11-20" } });
+    await act(async () => { setHouseholdCalendarTimeZone(null); await Promise.resolve(); });
+    expect(date).toHaveValue("2026-11-20");
+  } finally { cleanup(); vi.useRealTimers(); setHouseholdCalendarTimeZone(null); await Promise.resolve(); }
 });
 
 it("labels the source unit price and total in USD when user settings and custody are ZMW", async () => {
