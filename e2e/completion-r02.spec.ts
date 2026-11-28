@@ -2,6 +2,12 @@ import { randomUUID } from "node:crypto";
 import { test, expect, type Page } from "./protected-test";
 import { createCompletionFixture } from "../server/testing/fixtures/completion-fixtures";
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
+import { readBack, submitForData, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { responseValue, storedValue } from "./utils/observe";
+
+/** Onboarding's household create; its corrupt mutant stores a different name (QA-01, scripts/e2e-mutation-check.mjs). */
+const CREATE_HOUSEHOLD: SubmitStep = { name: "household", method: "POST", path: "/api/household", corruptField: "name" };
 
 function recordApiRequests(page: Page) {
   const paths: string[] = [];
@@ -50,7 +56,7 @@ test("actual registration stays restricted on a direct financial URL", async ({ 
   expect((await (await page.request.get("/api/auth/session")).json()).data).toEqual({ state: "anonymous" });
 });
 
-test("verified household-free entry creates a household before financial mounting", async ({ page }) => {
+testWithMutants("verified household-free entry creates a household before financial mounting", { corrupt: [CREATE_HOUSEHOLD] }, async (page) => {
   const fixture = await createCompletionFixture();
   // This independently verified synthetic control exercises onboarding, not mail verification.
   await withFixtureClient(client => client.query(
@@ -68,17 +74,22 @@ test("verified household-free entry creates a household before financial mountin
   expect(requests.filter(path => !personalEntryPaths.has(path))).toEqual([]);
   const status = await page.request.get("/api/auth/session");
   expect((await status.json()).data.state).toBe("verified_without_household");
-  await page.getByLabel("Household Name", { exact: true }).fill(`Synthetic R02 ${randomUUID().slice(0, 8)}`);
-  const created = page.waitForResponse(response => new URL(response.url()).pathname === "/api/household" && response.request().method() === "POST");
+  const householdName = `Synthetic R02 ${randomUUID().slice(0, 8)}`;
+  await page.getByLabel("Household Name", { exact: true }).fill(householdName);
   const accounts = page.waitForResponse(response => new URL(response.url()).pathname === "/api/accounts" && response.request().method() === "GET");
-  await page.getByRole("button", { name: "Create Household", exact: true }).click();
-  expect((await created).status()).toBe(201);
+  const created = await submitForData<{ household: { id: string; name: unknown } }>(page, CREATE_HOUSEHOLD,
+    () => page.getByRole("button", { name: "Create Household", exact: true }).click());
+  await readBack(CREATE_HOUSEHOLD, householdName, {
+    created: async () => responseValue(created.household.name, "name"),
+    db: () => storedValue("SELECT name AS value FROM households WHERE id=$1", [created.household.id]),
+  });
   await expect(page.getByRole("button", { name: "Add a new account", exact: true })).toBeVisible();
   expect((await accounts).status()).toBe(200);
   const ready = (await (await page.request.get("/api/auth/session")).json()).data;
   expect(ready.state).toBe("ready");
   expect(ready.subject.id).toBe(fixture.userId);
   expect(ready.household.id).not.toBe(fixture.householdId);
+  expect(ready.household.id).toBe(created.household.id);
 });
 
 test("an old account form cannot submit under a replacement login cookie", async ({ page }) => {
