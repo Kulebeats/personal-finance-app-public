@@ -81,6 +81,12 @@ it("keeps the normal failure audit inside the locks for an active member", async
     details: expect.objectContaining({ query: question, error: "UNKNOWN_ERROR", error_class: "Error", success: false }) }));
 });
 
+it("hands the failure itself to the redacting logger (name, code and frames survive; R19 drops the message)", async () => {
+  mocks.run.mockRejectedValue(failure);
+  await expect(processQuery()).rejects.toMatchObject({ statusCode: 500 });
+  expect(mocks.logError).toHaveBeenCalledWith("AI query failed", expect.any(Object), failure);
+});
+
 it("records a failure's code and class, never its raw message, in the audit row", async () => {
   mocks.run.mockRejectedValue(failure);
   await expect(processQuery()).rejects.toMatchObject({ statusCode: 500 });

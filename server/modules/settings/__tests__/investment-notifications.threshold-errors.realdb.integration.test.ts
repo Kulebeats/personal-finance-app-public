@@ -69,7 +69,20 @@ describe("investment notification threshold is exact money and refusals keep the
   ] as const)("refuses %s with 400 and writes nothing", async (_label, thresholdAmount) => {
     const response = await put({ notificationType: type, thresholdAmount });
     expect(response.status).toBe(400);
+    // The V7 envelope, as from every other validated route.
+    expect(response.body).toMatchObject({ success: false, error: { code: "VALIDATION_ERROR" } });
     expect(await rows()).toEqual([]);
+  });
+
+  it("records the threshold in the audit row of a create and of an update", async () => {
+    await put({ notificationType: type, thresholdAmount: "250.50" }).expect(200);
+    await put({ notificationType: type, thresholdAmount: 300 }).expect(200);
+    const audits = await db.select({ action: auditLogs.action, details: auditLogs.details }).from(auditLogs)
+      .where(and(eq(auditLogs.userId, userId), eq(auditLogs.entityType, "user"))).orderBy(auditLogs.createdAt);
+    expect(audits.slice(-2)).toMatchObject([
+      { action: "CREATE", details: { newValue: { thresholdAmount: "250.50" } } },
+      { action: "UPDATE", details: { oldValue: { thresholdAmount: "250.50" }, newValue: { thresholdAmount: "300.00" } } },
+    ]);
   });
 
   it.each([
