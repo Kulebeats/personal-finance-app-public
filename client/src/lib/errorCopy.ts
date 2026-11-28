@@ -9,7 +9,7 @@
 import type { ApiError } from "./api";
 
 const SERVER_TROUBLE = "Something went wrong on our side. Try again in a moment.";
-const INVALID_INPUT = "Some of the details aren't valid. Check them and try again.";
+export const INVALID_INPUT = "Some of the details aren't valid. Check them and try again.";
 const NOT_FOUND = "It may have been deleted. Refresh the page and try again.";
 const CONFLICT = "This was changed elsewhere or already exists. Refresh the page and try again.";
 const FORBIDDEN = "You don't have permission to do this in this household.";
