@@ -35,7 +35,7 @@ export const updatePreferencesSchema = z.object({
  * than rounded. Zero stays valid.
  */
 const NOTIFICATION_THRESHOLD_PATTERN = /^\d{1,13}(\.\d{1,2})?$/;
-const notificationThresholdSchema = z.union([z.string(), z.number()])
+export const notificationThresholdSchema = z.union([z.string(), z.number()])
   .transform(value => String(value))
   .refine(value => NOTIFICATION_THRESHOLD_PATTERN.test(value), {
     message: "Threshold must be a non-negative amount with at most 2 decimal places",

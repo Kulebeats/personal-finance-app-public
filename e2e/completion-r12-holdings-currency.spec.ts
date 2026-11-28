@@ -3,8 +3,19 @@ import { test, expect } from "./protected-test";
 import { createCompletionFixture } from "../server/testing/fixtures/completion-fixtures";
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
 import { loadTestTarget } from "../server/testing/test-target.mjs";
+import { readBack, submitStep, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { responseValue, storedValue } from "./utils/observe";
 
-test("switches actual holding and portfolio values between ZMW and USD without changing financial records", async ({ page }) => {
+/**
+ * The two openings' writes (QA-01: mutation-checked by scripts/e2e-mutation-check.mjs).
+ * The ZMW opening's corrupt mutant saves one share more; no other field is
+ * bound to the quantity, so the server accepts it and only the read-back sees it.
+ */
+const OPEN_ZMW: SubmitStep = { name: "zmw-opening", method: "POST", path: "/api/investments/holdings", corruptField: "quantity" };
+const OPEN_USD: SubmitStep = { name: "usd-opening", method: "POST", path: "/api/investments/holdings" };
+
+testWithMutants("switches actual holding and portfolio values between ZMW and USD without changing financial records", { corrupt: [OPEN_ZMW] }, async (page) => {
   const ownedOrigin = loadTestTarget().server?.origin;
   if (!ownedOrigin) throw new Error("Currency journey requires the marked owned browser origin");
   const fixture = await createCompletionFixture(), date = "2026-01-20";
@@ -45,7 +56,7 @@ test("switches actual holding and portfolio values between ZMW and USD without c
   await page.goto("/investments");
   await expect(page.getByRole("heading", { name: "No Holdings Yet" })).toBeVisible();
 
-  async function opening(security: typeof zmw, currency: "ZMW" | "USD", quantity: string, first: boolean) {
+  async function opening(step: SubmitStep, security: typeof zmw, currency: "ZMW" | "USD", quantity: string, first: boolean) {
     await page.getByRole("button", { name: first ? "Add Your First Holding" : "Add Holding", exact: true }).click();
     const dialog = page.getByRole("dialog");
     await dialog.getByPlaceholder(/Search securities/).fill(security.name);
@@ -53,20 +64,22 @@ test("switches actual holding and portfolio values between ZMW and USD without c
     await dialog.getByLabel("Quantity", { exact: false }).fill(quantity);
     await dialog.getByLabel(`Purchase Price (${currency})`, { exact: false }).fill("8");
     await dialog.getByLabel("Purchase Date", { exact: true }).fill(date);
-    const [response] = await Promise.all([
-      page.waitForResponse(result => result.request().method() === "POST" && new URL(result.url()).origin === ownedOrigin
-        && new URL(result.url()).pathname === "/api/investments/holdings"),
-      dialog.getByRole("button", { name: "Add Holding", exact: true }).click(),
-    ]);
+    const response = await submitStep(page, step, () => dialog.getByRole("button", { name: "Add Holding", exact: true }).click());
+    expect(new URL(response.url()).origin).toBe(ownedOrigin);
     expect(response.status()).toBe(201);
+    const holding = (await response.json()).data as { id: string; quantity: unknown };
+    // Before any value painted from the quantity (row value, header total).
+    await readBack(step, quantity, {
+      created: async () => responseValue(holding.quantity, "quantity"),
+      db: () => storedValue("select quantity::text as value from holdings where id=$1 and household_id=$2", [holding.id, fixture.householdId]),
+    });
     expect(response.request().postDataJSON()).toMatchObject({ accountId, securityId: security.id, expectedCurrency: currency,
       quantity, costBasis: first ? "80.00" : "8.00", acquiredDate: date });
-    const holding = (await response.json()).data as { id: string };
     await expect(dialog).toBeHidden();
     await expect(page.getByRole("row").filter({ hasText: security.name })).toHaveCount(1);
     return holding.id;
   }
-  const zmwHolding = await opening(zmw, "ZMW", "10", true), usdHolding = await opening(usd, "USD", "1", false);
+  const zmwHolding = await opening(OPEN_ZMW, zmw, "ZMW", "10", true), usdHolding = await opening(OPEN_USD, usd, "USD", "1", false);
   const holdingIds = [zmwHolding, usdHolding];
   const header = page.getByRole("heading", { name: "Investments", exact: true }).locator("..");
   const table = page.getByRole("table");

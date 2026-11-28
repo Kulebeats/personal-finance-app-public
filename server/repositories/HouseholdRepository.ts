@@ -1,4 +1,4 @@
-import { and, eq, isNull, gt, sql } from "drizzle-orm";
+import { and, eq, isNull, gt, lte, sql } from "drizzle-orm";
 import { db } from "../db";
 import {
   householdMembers,
@@ -19,6 +19,8 @@ import { lockUserMembership } from "./householdMembershipLock";
 
 type HouseholdRole = typeof householdMembers.$inferInsert["role"];
 type HouseholdPreferences = typeof householdPreferences.$inferSelect;
+
+const PENDING_INVITATION_UNIQUE_INDEX = "household_invitations_pending_email_unique";
 
 export class HouseholdRepository {
   async findById(id: string): Promise<Household | undefined> {
@@ -227,16 +229,55 @@ export class HouseholdRepository {
   // ============================================================================
 
   /**
-   * Create a new household invitation
+   * Create a new household invitation.
+   *
+   * AH-05: one unaccepted invitation per household and lower-cased address is
+   * a database rule (`household_invitations_pending_email_unique`, migration
+   * 0064), so two concurrent invites cannot both land. An expired, never
+   * accepted invitation for the same address still holds that slot, so it is
+   * deleted in the same transaction before the insert. Losing the race is a
+   * 409, the same answer the controller's earlier check gives.
+   *
+   * Lock order: the household row FOR UPDATE first, then the invitation rows,
+   * as resend (invitations.resend.ts) and accept (invitations.accept.ts) do.
+   * Deleting the expired row first would hold its lock while the insert's
+   * foreign-key check waits on the household, and a resend or accept holding
+   * the household while it waits on that row would deadlock with it.
    */
   async createInvitation(
     data: Omit<InsertHouseholdInvitation, "id" | "createdAt">
   ): Promise<HouseholdInvitation> {
-    const result = await db
-      .insert(householdInvitations)
-      .values(data)
-      .returning();
-    return result[0];
+    try {
+      return await withTransaction(async (tx) => {
+        const [household] = await tx
+          .select({ id: households.id })
+          .from(households)
+          .where(eq(households.id, data.householdId))
+          .for("update")
+          .limit(1);
+        if (!household) throw new NotFoundError("Household not found");
+        await tx
+          .delete(householdInvitations)
+          .where(
+            and(
+              eq(householdInvitations.householdId, data.householdId),
+              sql`lower(${householdInvitations.email}) = lower(${data.email})`,
+              isNull(householdInvitations.acceptedAt),
+              lte(householdInvitations.expiresAt, new Date())
+            )
+          );
+        const [invitation] = await tx
+          .insert(householdInvitations)
+          .values(data)
+          .returning();
+        return invitation;
+      });
+    } catch (error) {
+      if (isPostgresError(error, "23505", PENDING_INVITATION_UNIQUE_INDEX)) {
+        throw new ConflictError("An invitation for this email is already pending");
+      }
+      throw error;
+    }
   }
 
   /**

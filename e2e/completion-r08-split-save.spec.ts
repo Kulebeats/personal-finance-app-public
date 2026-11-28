@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { test, expect, type Page } from "./protected-test";
+import { expect, type Page } from "./protected-test";
 import { loadTestTarget } from "../server/testing/test-target.mjs";
 import { createCompletionFixture, type CompletionFixture } from "../server/testing/fixtures/completion-fixtures";
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
+import { readBack, submitStep, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { responseValue, storedMoney } from "./utils/observe";
+import { moneyValue } from "./utils/money-value";
 
 const ownedOrigin = loadTestTarget().server?.origin;
 if (!ownedOrigin) throw new Error("R08 split browser acceptance requires the protected owned server origin");
@@ -31,7 +35,9 @@ for (const scenario of [
   { accountKind: "cash", typeLabel: /^Cash Physical Cash$/, balance: "899.99", delta: "-100.01", isAsset: true },
   { accountKind: "credit", typeLabel: /^Credit Card Visa, Mastercard$/, balance: "1100.01", delta: "100.01", isAsset: false },
 ]) {
-test(`split save retains the recorded ${scenario.accountKind} balance impact after reopen and reload`, async ({ page }) => {
+/** The expense the split is made on; its corrupt mutant saves a different amount (QA-01, scripts/e2e-mutation-check.mjs). */
+const createExpense: SubmitStep = { name: `${scenario.accountKind} expense`, method: "POST", path: "/api/transactions", corruptField: "amount" };
+testWithMutants(`split save retains the recorded ${scenario.accountKind} balance impact after reopen and reload`, { corrupt: [createExpense] }, async (page) => {
   const fixture = await createCompletionFixture();
   const accountName = `R08 Split ${scenario.accountKind} ` + randomUUID().slice(0, 8);
   const merchantName = "Raven Split Market";
@@ -84,12 +90,17 @@ test(`split save retains the recorded ${scenario.accountKind} balance impact aft
     await transactionDialog.getByRole("combobox").filter({ hasText: "Select merchant" }).click();
     await page.getByPlaceholder("Search merchants...", { exact: true }).fill(merchantName);
     await page.getByPlaceholder("Search merchants...", { exact: true }).press("Escape");
-    const transactionCreated = responseFor(page, "/api/transactions", "POST");
-    await transactionDialog.getByRole("button", { name: "Add Transaction", exact: true }).click();
-    const transactionResponse = await transactionCreated;
+    const transactionResponse = await submitStep(page, createExpense,
+      () => transactionDialog.getByRole("button", { name: "Add Transaction", exact: true }).click());
     expect(transactionResponse.status()).toBe(201);
-    const original = (await transactionResponse.json()).data as { id: string; name: string; updatedAt: string };
+    const original = (await transactionResponse.json()).data as { id: string; name: string; updatedAt: string; amount: unknown };
     transactionId = original.id;
+    // The parent amount, before the balance and split checks below, which a wrong amount would also fail.
+    await readBack(createExpense, moneyValue("100.01", "ZMW"), {
+      api: async () => responseValue(original.amount, "amount"),
+      db: () => storedMoney("SELECT amount::text AS amount, currency FROM transactions WHERE id=$1 AND household_id=$2",
+        [transactionId, fixture.householdId]),
+    });
     expect(original.name).toBe(merchantName);
     await expect(transactionDialog).toBeHidden();
     const before = await readState();

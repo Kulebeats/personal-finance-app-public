@@ -4,12 +4,22 @@ import { test, expect, type Page } from "./protected-test";
 import { createCompletionFixture, type CompletionFixture } from "../server/testing/fixtures/completion-fixtures";
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
 import { loadTestTarget } from "../server/testing/test-target.mjs";
+import { readBack, submitStep, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { responseValue, storedMoney } from "./utils/observe";
+import { moneyValue } from "./utils/money-value";
 
 // Run with the completion config and line reporter. Step-retaining reporters can
 // record credential entry even when trace, screenshots and video are disabled.
 test.use({ trace: "off", screenshot: "off", video: "off" });
 
 const recurringPath = "/api/investments/recurring";
+/**
+ * The setup form's create write (QA-01: mutation-checked by
+ * scripts/e2e-mutation-check.mjs). Its corrupt mutant records USD 38.40, still a
+ * plain two-decimal amount; the grant is signed over whatever amount arrives.
+ */
+const CREATE_PLAN: SubmitStep = { name: "sip-plan", method: "POST", path: recurringPath, corruptField: "amount" };
 const initialDate = "2099-03-31";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -65,7 +75,7 @@ async function lifecycleState(fixture: CompletionFixture, planId: string) {
   });
 }
 
-test("records a native USD SIP under ZMW display, confirms its signed terms and reloads it inactive", async ({ page }) => {
+testWithMutants("records a native USD SIP under ZMW display, confirms its signed terms and reloads it inactive", { corrupt: [CREATE_PLAN] }, async (page) => {
   const ownedOrigin = loadTestTarget().server?.origin;
   if (!ownedOrigin) throw new Error("SIP journey requires the marked owned browser origin");
   const fixture = await createCompletionFixture();
@@ -138,14 +148,19 @@ test("records a native USD SIP under ZMW display, confirms its signed terms and 
   await setup.getByLabel("Amount (USD)", { exact: true }).fill("37.4");
   await setup.getByLabel("Initial date", { exact: true }).fill(initialDate);
   const terms = { type: "sip", accountId, securityId, amount: "37.40", currency: "USD", frequency: "monthly" };
-  const [created] = await Promise.all([
-    observe("POST", recurringPath),
-    setup.getByRole("button", { name: "Confirm Setup", exact: true }).click(),
-  ]);
+  const created = await submitStep(page, CREATE_PLAN, () => setup.getByRole("button", { name: "Confirm Setup", exact: true }).click());
+  expect(new URL(created.url()).origin).toBe(ownedOrigin);
+  expect(created.status()).toBe(200);
+  const createEnvelope = await created.json();
+  // Before the details dialog paints the amount and the request is compared with the terms.
+  await readBack(CREATE_PLAN, moneyValue(terms.amount, terms.currency), {
+    created: async () => moneyValue(responseValue(createEnvelope.data?.amount, "amount"), responseValue(createEnvelope.data?.currency, "currency")),
+    db: () => storedMoney("select amount::text as amount, currency from recurring_investments where id=$1 and household_id=$2",
+      [createEnvelope.data?.id, fixture.householdId]),
+  });
   await expectSigned(created, fixture);
   const createBody = created.request().postDataJSON();
   expect(createBody).toEqual({ ...terms, nextExecutionDate: initialDate, operationId: expect.stringMatching(uuid) });
-  const createEnvelope = await created.json();
   const plan = {
     ...terms, id: expect.stringMatching(uuid), householdId: fixture.householdId,
     nextExecutionDate: initialDate, authorizationInitialExecutionDate: initialDate,

@@ -354,6 +354,18 @@ jobs:
       - name: Browser E2E mutation check
         run: npm run test:e2e:mutation
 
+      # QA-01 / R20.3: production-*.spec.ts against the built client with the
+      # app out of test mode, so CSRF and the limiters are live (NEW-07, NEW-08).
+      # Same disposable Postgres target and synthetic data; no other service.
+      # Runs even when an earlier browser step failed, so one run reports all.
+      - name: Build client for the production-mode profile
+        if: ${{ !cancelled() }}
+        run: npx vite build
+
+      - name: Browser E2E production-mode profile (CSRF and limiters live)
+        if: ${{ !cancelled() }}
+        run: npm run test:e2e:production
+
       # PNG failure screenshots only (completion and mutant runs); synthetic data only.
       - name: Upload Playwright failure screenshots
         if: failure()

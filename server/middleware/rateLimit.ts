@@ -25,6 +25,12 @@ import { createProductionRateLimiter, type RateLimitPrefix } from "../config/red
 const GENERAL_LIMIT_PER_MINUTE = 600;
 /** R00.3 proposal (D22): credential POSTs, 10 per minute per IP. */
 const IP_AUTH_LIMIT_PER_MINUTE = 10;
+/**
+ * Owner decision 28 Nov 2026: 120 analytics requests per user per minute. One
+ * dashboard load spends about 7-8 of this shared bucket and Reports a few more,
+ * so the earlier 30 answered ordinary fast navigation with 429 (NEW-08).
+ */
+const ANALYTICS_LIMIT_PER_MINUTE = 120;
 
 // ============================================================================
 // REDIS STORE CONFIGURATION (SCP-307)
@@ -167,12 +173,13 @@ export const generalLimiter = createLimiter("rl:general:", {
 });
 
 /**
- * Analytics rate limiter: 30 requests per minute
+ * Analytics rate limiter: ANALYTICS_LIMIT_PER_MINUTE (120) requests per user per minute,
+ * one bucket shared by every mount.
  * Used for heavy computation endpoints like reports
  */
 export const analyticsLimiter = createLimiter("rl:analytics:", {
   windowMs: 60 * 1000, // 1 minute
-  max: 30,
+  max: ANALYTICS_LIMIT_PER_MINUTE,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: getRateLimitKey,

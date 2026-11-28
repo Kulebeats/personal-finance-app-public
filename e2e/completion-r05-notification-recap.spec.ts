@@ -3,6 +3,9 @@ import { test, expect, type Page } from "./protected-test";
 import { loadTestTarget } from "../server/testing/test-target.mjs";
 import { createCompletionFixture, type CompletionFixture } from "../server/testing/fixtures/completion-fixtures";
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
+import { readBack, submitStep, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { responseValue, storedValue } from "./utils/observe";
 
 const ownedOrigin = loadTestTarget().server?.origin;
 if (!ownedOrigin) throw new Error("R05 browser acceptance requires the protected owned server origin");
@@ -15,6 +18,11 @@ const recapSuccess = "Your submitted weekly recap preferences have been saved.";
 const defaultRecap = {
   enabled: true, emailEnabled: false, dayOfWeek: 1, includeGoals: true, includeRecurring: true,
 };
+/**
+ * The recap day save (QA-01 R20.2, mutation-checked by scripts/e2e-mutation-check.mjs):
+ * its corrupt mutant saves the next weekday (Thursday, 4, still a valid day).
+ */
+const RECAP_DAY_SAVE: SubmitStep = { name: "recap-day", method: "PATCH", path: recapPath, corruptField: "dayOfWeek" };
 
 // As in the existing completion specs, retain synthetic fixtures for the
 // coordinator's independent readback and owned-target cleanup. Never use an
@@ -123,7 +131,7 @@ async function interceptOneSave(page: Page, path: string, method: string, reply:
   };
 }
 
-test("notification threshold, independent recap day and display saves persist through fresh reads and reloads", async ({ page }) => {
+testWithMutants("notification threshold, independent recap day and display saves persist through fresh reads and reloads", { corrupt: [RECAP_DAY_SAVE] }, async (page) => {
   const fixture = await createCompletionFixture();
   await signIn(page, fixture);
   await openSettings(page, "notifications", notificationPath);
@@ -171,7 +179,19 @@ test("notification threshold, independent recap day and display saves persist th
   await page.getByRole("switch", { name: "Include Goals Progress", exact: true }).click();
   await page.getByRole("switch", { name: "Include Upcoming Bills", exact: true }).click();
   const recapPatch = { dayOfWeek: 3, includeGoals: false, includeRecurring: false };
-  await save(page, recapPath, "PATCH", "Save Changes", recapPatch, recapSuccess);
+  const recapResponse = await submitStep(page, RECAP_DAY_SAVE,
+    () => page.getByRole("button", { name: "Save Changes", exact: true }).click());
+  expect(recapResponse.status()).toBe(200);
+  // Read back first: everything below assumes the saved day is Wednesday (3).
+  await readBack(RECAP_DAY_SAVE, String(recapPatch.dayOfWeek), {
+    db: () => storedValue(`SELECT dashboard_widgets->'weeklyRecap'->>'dayOfWeek' AS value
+      FROM user_display_settings WHERE user_id=$1`, [fixture.userId]),
+    api: async () => responseValue((await freshGet(page, recapPath)).dayOfWeek, "dayOfWeek"),
+  });
+  expect(recapResponse.request().postDataJSON()).toEqual(recapPatch);
+  expect(Boolean(recapResponse.request().headers()["x-csrf-token"])).toBe(true);
+  expect((await recapResponse.json()).success).toBe(true);
+  await expect(page.getByText(recapSuccess, { exact: true })).toBeVisible();
   const displayAfterRecap = await readDisplay(fixture);
   expect(displayAfterRecap).toEqual([expect.objectContaining({
     first_day_of_week: "Monday", theme: "dark", dashboard_widgets: { weeklyRecap: recapPatch },

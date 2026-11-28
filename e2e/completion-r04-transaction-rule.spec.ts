@@ -3,6 +3,12 @@ import { test, expect, type Page } from "./protected-test";
 import { loadTestTarget } from "../server/testing/test-target.mjs";
 import { createCompletionFixture, type CompletionFixture } from "../server/testing/fixtures/completion-fixtures";
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
+import { readBack, submitStep, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { responseValue, storedValue } from "./utils/observe";
+
+/** The rule modal's save; its corrupt mutant stores a different rule name (QA-01, scripts/e2e-mutation-check.mjs). */
+const CREATE_RULE: SubmitStep = { name: "rule", method: "POST", path: "/api/rules", corruptField: "name" };
 
 const ownedOrigin = loadTestTarget().server?.origin;
 if (!ownedOrigin) throw new Error("R04 transaction-rule browser acceptance requires the protected owned server origin");
@@ -29,7 +35,7 @@ async function signIn(page: Page, fixture: CompletionFixture) {
   });
 }
 
-test("saved transaction creates a household rule with category and tag IDs", async ({ page }) => {
+testWithMutants("saved transaction creates a household rule with category and tag IDs", { corrupt: [CREATE_RULE] }, async (page) => {
   const fixture = await createCompletionFixture();
   // The transaction form removes numeric reference tokens from merchant names.
   // This household is unique, so the merchant can use a stable display name.
@@ -126,10 +132,17 @@ test("saved transaction creates a household rule with category and tag IDs", asy
     await tagInput.press("Enter");
     await expect(ruleDialog.getByText(tagName, { exact: true })).toBeVisible();
 
-    const ruleCreated = responseFor(page, "/api/rules", "POST");
-    await ruleDialog.getByRole("button", { name: "Save", exact: true }).click();
-    const ruleResponse = await ruleCreated;
+    const ruleResponse = await submitStep(page, CREATE_RULE,
+      () => ruleDialog.getByRole("button", { name: "Save", exact: true }).click());
     expect(ruleResponse.status()).toBe(201);
+    const body = await ruleResponse.json();
+    expect(body.success).toBe(true);
+    ruleId = body.data.rule.id as string;
+    // The stored name, before the request and row checks below, which a wrong name would also fail.
+    await readBack(CREATE_RULE, ruleName, {
+      api: async () => responseValue(body.data.rule.name, "name"),
+      db: () => storedValue("SELECT name AS value FROM rules WHERE id=$1 AND household_id=$2", [ruleId, fixture.householdId]),
+    });
     expect(ruleResponse.request().headers()["x-capital-subject"]).toBe(fixture.userId);
     expect(ruleResponse.request().headers()["x-capital-household"]).toBe(fixture.householdId);
     expect(Boolean(ruleResponse.request().headers()["x-csrf-token"])).toBe(true);
@@ -143,9 +156,6 @@ test("saved transaction creates a household rule with category and tag IDs", asy
       ],
       applyToPast: false,
     });
-    const body = await ruleResponse.json();
-    expect(body.success).toBe(true);
-    ruleId = body.data.rule.id as string;
     expect(body.data.rule).toMatchObject({ id: ruleId, householdId: fixture.householdId, name: ruleName });
     // The author schema adds enabled=true defaults before storing JSONB.
     expect(body.data.rule.conditions).toEqual([{ ...posted.conditions[0], enabled: true }]);
@@ -165,7 +175,7 @@ test("saved transaction creates a household rule with category and tag IDs", asy
     await withFixtureClient(async client => {
       await client.query("BEGIN");
       try {
-        await client.query("DELETE FROM rules WHERE household_id=$1 AND name=$2", [fixture.householdId, ruleName]);
+        await client.query("DELETE FROM rules WHERE household_id=$1 AND (name=$2 OR id=$3::uuid)", [fixture.householdId, ruleName, ruleId]);
         await client.query(`DELETE FROM transactions WHERE household_id=$1 AND
           (id=$2::uuid OR account_id IN (SELECT id FROM accounts WHERE household_id=$1 AND name=$3))`,
         [fixture.householdId, transactionId, accountName]);

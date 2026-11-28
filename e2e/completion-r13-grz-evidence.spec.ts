@@ -2,10 +2,24 @@ import { test, expect, type Page } from "./protected-test";
 import type { Locator } from "@playwright/test";
 import { createCompletionFixture, type CompletionFixture } from "../server/testing/fixtures/completion-fixtures";
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
+import { readBack, submitStep, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { responseValue, storedValue } from "./utils/observe";
 
 const name = "Synthetic acquired evidence issue", custody = "Synthetic evidence custody", isin = "ZM0000000001";
 const acquisitionDate = "2026-03-12", roundingPolicy = "round_total_and_clean_residual_to_accrued";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const BASIS_REFERENCE = "Synthetic acquisition statement 950 = 900 + 25.10 + 24.90";
+
+/**
+ * The journey's writes (QA-01: mutation-checked by scripts/e2e-mutation-check.mjs).
+ * The bond's corrupt mutant buys at 951 (still a positive two-decimal price).
+ * The basis amounts must sum to the purchase cash, so a single changed amount is
+ * refused; its mutant instead changes the free-text source reference (500 chars max).
+ */
+const CREATE_BOND: SubmitStep = { name: "grz-bond", method: "POST", path: "/api/grz/bonds", corruptField: "purchasePrice" };
+const RECORD_BASIS: SubmitStep = { name: "acquisition-evidence", method: "POST", path: /^\/api\/grz\/bonds\/[^/]+\/principal-basis$/, corruptField: "sourceReference" };
+const RECORD_MARK: SubmitStep = { name: "market-evidence", method: "POST", path: /^\/api\/grz\/bonds\/[^/]+\/valuations$/ };
 
 async function choose(page: Page, form: Locator, label: string, option: string) {
   await form.getByRole("combobox", { name: label, exact: true }).click();
@@ -15,16 +29,23 @@ async function investments(page: Page) {
   await page.getByRole("navigation", { name: "Application navigation", exact: true }).getByRole("link", { name: "Investments", exact: true }).click();
   await expect(page).toHaveURL("/investments"); await page.getByRole("tab", { name: "Government (GRZ)" }).click();
 }
-async function saveEvidence(page: Page, fixture: CompletionFixture, bondId: string, kind: "acquisition" | "market") {
-  const endpoint = `/api/grz/bonds/${bondId}/${kind === "acquisition" ? "principal-basis" : "valuations"}`;
+async function saveEvidence(page: Page, fixture: CompletionFixture, bondId: string, kind: "acquisition" | "market", reference: string) {
+  const step = kind === "acquisition" ? RECORD_BASIS : RECORD_MARK;
   const form = page.getByRole("dialog", { name: `Record ${kind} evidence`, exact: true });
-  const response = page.waitForResponse(row => new URL(row.url()).pathname === endpoint && row.request().method() === "POST");
-  await form.getByRole("button", { name: `Record ${kind} evidence`, exact: true }).click();
-  const recorded = await response, submitted = recorded.request().postDataJSON();
+  const recorded = await submitStep(page, step, () => form.getByRole("button", { name: `Record ${kind} evidence`, exact: true }).click());
+  expect(new URL(recorded.url()).pathname).toBe(`/api/grz/bonds/${bondId}/${kind === "acquisition" ? "principal-basis" : "valuations"}`);
   expect(recorded.status()).toBe(201);
+  const envelope = await recorded.json();
+  // Before anything compares the response with the request it answered.
+  await readBack(step, reference, {
+    created: async () => responseValue(envelope.data?.sourceReference, "sourceReference"),
+    db: () => storedValue(`select source_reference as value from ${kind === "acquisition" ? "grz_bond_principal_basis" : "grz_bond_valuations"}
+      where id=$1 and household_id=$2 and bond_id=$3`, [envelope.data?.id, fixture.householdId, bondId]),
+  });
+  const submitted = recorded.request().postDataJSON();
   expect(recorded.request().headers()).toMatchObject({ "x-capital-subject": fixture.userId, "x-capital-household": fixture.householdId });
   expect(submitted.operationId).toMatch(uuid);
-  const envelope = await recorded.json(); expect(envelope.success).toBe(true);
+  expect(envelope.success).toBe(true);
   expect(envelope.data).toMatchObject({ operationId: submitted.operationId, bondId, authority: "member_recorded", isin, currency: "ZMW",
     sourceDate: submitted.sourceDate, sourceKind: submitted.sourceKind, sourceReference: submitted.sourceReference,
     policyVersion: kind === "acquisition" ? "grz_member_recorded_principal_basis_v1" : "grz_member_recorded_market_v1" });
@@ -52,7 +73,7 @@ async function cashState(householdId: string) {
   }));
 }
 
-test("an acquired bond records explicit basis and two same-day market forms, survives reload, and changes wealth without posting cash", async ({ page }) => {
+testWithMutants("an acquired bond records explicit basis and two same-day market forms, survives reload, and changes wealth without posting cash", { corrupt: [CREATE_BOND, RECORD_BASIS] }, async (page) => {
   const fixture = await createCompletionFixture();
   const date = await withFixtureClient(async client => (await client.query<{ date: string }>("select to_char(transaction_timestamp() at time zone 'UTC','YYYY-MM-DD') as date")).rows[0].date);
   await page.goto("/login"); await page.getByLabel(/email/i).fill(fixture.email);
@@ -76,9 +97,12 @@ test("an acquired bond records explicit basis and two same-day market forms, sur
   await bondForm.getByLabel("First coupon date you are entitled to").fill("2026-05-10");
   await bondForm.getByLabel("Maturity Date", { exact: true }).fill("2029-05-10"); await bondForm.getByLabel("Coupon Rate (%)").fill("18.99");
   await choose(page, bondForm, "Custody account (optional)", `${custody} (ZMW)`);
-  const bondSaved = page.waitForResponse(row => new URL(row.url()).pathname === "/api/grz/bonds" && row.request().method() === "POST");
-  await bondForm.getByRole("button", { name: "Add Bond", exact: true }).click();
-  const bondResponse = await bondSaved; expect(bondResponse.status()).toBe(201); const bondId = (await bondResponse.json()).data.id;
+  const bondResponse = await submitStep(page, CREATE_BOND, () => bondForm.getByRole("button", { name: "Add Bond", exact: true }).click());
+  expect(bondResponse.status()).toBe(201); const bondId = (await bondResponse.json()).data.id;
+  // Before the acquisition form, which pre-fills its purchase cash from this price.
+  await readBack(CREATE_BOND, "950", {
+    db: () => storedValue("select purchase_price::text as value from grz_bonds where id=$1 and household_id=$2", [bondId, fixture.householdId]),
+  });
   await expect(bondForm).toBeHidden(); const before = await cashState(fixture.householdId);
   expect(before.accounts).toEqual([{ id: accountId, balance: "125.00", initial_balance: "125.00" }]);
   expect(before.cash).toEqual([]); expect(before.activity).toEqual([]); expect(before.settlements).toEqual([]);
@@ -90,10 +114,10 @@ test("an acquired bond records explicit basis and two same-day market forms, sur
   await expect(basis.getByLabel("Purchase cash (ZMW)")).toHaveValue("950.00");
   for (const field of ["Principal cost (ZMW)", "Purchased interest (ZMW)", "Acquisition fees (ZMW)"]) await expect(basis.getByLabel(field)).toHaveValue("");
   await choose(page, basis, "Source type", "Custodian statement");
-  await basis.getByLabel("Source date", { exact: true }).fill(date); await basis.getByLabel("Source reference").fill("Synthetic acquisition statement 950 = 900 + 25.10 + 24.90");
+  await basis.getByLabel("Source date", { exact: true }).fill(date); await basis.getByLabel("Source reference").fill(BASIS_REFERENCE);
   await basis.getByLabel("Principal cost (ZMW)").fill("900"); await basis.getByLabel("Purchased interest (ZMW)").fill("25.10");
   await basis.getByLabel("Acquisition fees (ZMW)").fill("24.90");
-  const acquisition = await saveEvidence(page, fixture, bondId, "acquisition");
+  const acquisition = await saveEvidence(page, fixture, bondId, "acquisition", BASIS_REFERENCE);
   expect(acquisition.submitted).toMatchObject({ acquisitionDate, purchaseCashAmount: "950.00", principalCost: "900.00", purchasedInterest: "25.10", acquisitionFees: "24.90" });
   expect(acquisition.submitted).not.toHaveProperty("nominalAmount");
   const unvalued = await page.request.get("/api/accounts/summary", { headers: {
@@ -105,10 +129,11 @@ test("an acquired bond records explicit basis and two same-day market forms, sur
   await page.getByRole("button", { name: `Record market evidence for ${name}`, exact: true }).click();
   const clean = page.getByRole("dialog", { name: "Record market evidence", exact: true });
   await choose(page, clean, "Source type", "Same-issue quote"); await clean.getByLabel("Market evidence date").fill(date);
-  await clean.getByLabel("Source reference").fill("Synthetic same-issue clean quote");
+  const cleanReference = "Synthetic same-issue clean quote";
+  await clean.getByLabel("Source reference").fill(cleanReference);
   await choose(page, clean, "Price basis", "Clean price"); await choose(page, clean, "Quote units", "Per ZMW 100 nominal");
   await clean.getByLabel("Quoted amount (ZMW)").fill("97"); await clean.getByLabel("Accrued interest in the same units (ZMW)").fill("2.51");
-  const first = await saveEvidence(page, fixture, bondId, "market");
+  const first = await saveEvidence(page, fixture, bondId, "market", cleanReference);
   expect(first.submitted).toMatchObject({ valuationDate: date, sourceDate: date, nominalAmount: "1000.00", quoteBasis: "clean", quoteUnits: "per_100_nominal", quotedAmount: "97", accruedInterest: "2.51" });
   expect(first.data).toMatchObject({ roundingPolicy, dirtyValue: { amount: "995.10", currency: "ZMW" }, cleanValue: { amount: "970.00", currency: "ZMW" }, accruedInterest: { amount: "25.10", currency: "ZMW" } });
   await wealth(page, fixture, date, 1120.1, /ZMW\s+1,120\.10/);
@@ -117,11 +142,12 @@ test("an acquired bond records explicit basis and two same-day market forms, sur
   await page.getByRole("button", { name: `Record market evidence for ${name}`, exact: true }).click();
   const dirty = page.getByRole("dialog", { name: "Record market evidence", exact: true });
   await choose(page, dirty, "Source type", "Same-issue trade"); await dirty.getByLabel("Market evidence date").fill(date);
-  await dirty.getByLabel("Source reference").fill("Synthetic later same-day dirty trade with explicit accrued");
+  const dirtyReference = "Synthetic later same-day dirty trade with explicit accrued";
+  await dirty.getByLabel("Source reference").fill(dirtyReference);
   await choose(page, dirty, "Price basis", "Dirty price"); await choose(page, dirty, "Quote units", "Whole holding");
   await expect(dirty.getByRole("checkbox", { name: "Accrued breakdown unavailable" })).not.toBeChecked();
   await dirty.getByLabel("Quoted amount (ZMW)").fill("993.8916"); await dirty.getByLabel("Accrued interest in the same units (ZMW)").fill("25.1366");
-  const second = await saveEvidence(page, fixture, bondId, "market");
+  const second = await saveEvidence(page, fixture, bondId, "market", dirtyReference);
   expect(second.submitted.operationId).not.toBe(first.submitted.operationId);
   expect(second.data).toMatchObject({ roundingPolicy, dirtyValue: { amount: "993.89", currency: "ZMW" }, cleanValue: { amount: "968.76", currency: "ZMW" }, accruedInterest: { amount: "25.13", currency: "ZMW" } });
   // Both marks have the same civil date. Only the later admitted mark belongs

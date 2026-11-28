@@ -373,7 +373,7 @@ export class AIService {
     } catch (error) {
       const latencyMs = Date.now() - startTime;
       const errorCode = error instanceof HttpError ? error.code : 'UNKNOWN_ERROR';
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const errorClass = error instanceof Error ? error.name : 'NonError'; // never the raw message (provider or SQL detail)
 
       logger.error('AI query failed', { householdId, userId, errorCode });
 
@@ -390,7 +390,7 @@ export class AIService {
       // before a conversation was persisted names no entity (N6: no invented id).
       const failureDetails = {
         query: hardenedMessage.value.substring(0, 200),
-        error: errorMessage,
+        error: errorCode, error_class: errorClass,
         execution_time_ms: latencyMs,
         success: false,
         ...ledgerAudit

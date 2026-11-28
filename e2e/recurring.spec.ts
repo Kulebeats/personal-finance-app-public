@@ -15,6 +15,7 @@ import { signInAs } from "./utils/fixture-session";
 import { confirmZmwDenomination } from "./utils/recurring-seed";
 import { selectRadixOption } from "./utils/locators";
 import { readBack, submitForData, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
 import { kwacha, responseValue, shownText, storedMoney } from "./utils/observe";
 import { moneyValue, renderedMoney } from "./utils/money-value";
 
@@ -65,7 +66,8 @@ async function openRecurring(page: Page, fixture: CompletionFixture) {
 }
 
 test.describe("Recurring create form", () => {
-  test("Add Recurring submits a weekly rule that the list, the API and the database read back", async ({ page }) => {
+  // QA-01: mutation-checked by scripts/e2e-mutation-check.mjs (a corrupt amount must turn the read-back red).
+  testWithMutants("Add Recurring submits a weekly rule that the list, the API and the database read back", { corrupt: [CREATE_RULE] }, async (page) => {
     const { fixture, accountId } = await householdWithAccount();
     await openRecurring(page, fixture);
     await page.getByRole("button", { name: /add recurring/i }).click();
@@ -91,9 +93,7 @@ test.describe("Recurring create form", () => {
     const row = page.getByTestId("recurring-rule-row").filter({ hasText: CREATED_NAME });
     await expect(row).toHaveCount(1);
     await expect(row.getByText("Weekly", { exact: true })).toBeVisible();
-    // The painted cell in full: an expense sign, then exactly K37.25.
     const cell = row.getByTestId("recurring-rule-amount");
-    await expect(cell).toHaveText(new RegExp(`^-${kwacha("37.25")}$`));
     const readRule = await page.request.get(`/api/recurring/${rule.id}`);
     expect(readRule.status()).toBe(200);
     const readBody = (await readRule.json()) as { data: CreatedRule };
@@ -108,6 +108,9 @@ test.describe("Recurring create form", () => {
       // The painted amount without its expense sign; the sign is checked above.
       cell: async () => renderedMoney((await shownText(cell)).replace(/^-/, "")),
     });
+    // The painted cell in full, after the read-back so a corrupt amount fails there first:
+    // an expense sign, then exactly K37.25.
+    await expect(cell).toHaveText(new RegExp(`^-${kwacha("37.25")}$`));
     const { rows } = await withFixtureClient((client) => client.query(
       `SELECT name, account_id, category_id, frequency::text AS frequency, type FROM recurring_transactions
         WHERE id = $1 AND household_id = $2`, [rule.id, fixture.householdId]));

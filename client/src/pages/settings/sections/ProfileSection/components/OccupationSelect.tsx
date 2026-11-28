@@ -223,12 +223,12 @@ export function OccupationSelect({
               role="combobox"
               aria-expanded={open}
               className={cn(
-                "w-full justify-between input-glass",
+                "w-full min-w-0 justify-between input-glass",
                 !value && "text-muted-foreground"
               )}
               disabled={disabled}
             >
-              {currentLabel}
+              <span className="truncate">{currentLabel}</span>
               <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
             </Button>
           </PopoverTrigger>
