@@ -34,7 +34,8 @@ export function SettingsCard({
 }: Readonly<SettingsCardProps>) {
   return (
     <Card className="w-full">
-      <CardHeader className="flex flex-row items-start justify-between space-y-0">
+      {/* UX-02: wraps, so a wide action moves below the title on a phone instead of past the edge. */}
+      <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3 space-y-0">
         <div className="space-y-1.5">
           {isLoading ? (
             <>
@@ -50,7 +51,7 @@ export function SettingsCard({
             </>
           )}
         </div>
-        {action && !isLoading && <div className="shrink-0">{action}</div>}
+        {action && !isLoading && <div className="max-w-full shrink-0">{action}</div>}
       </CardHeader>
       <CardContent>
         {isLoading ? (
