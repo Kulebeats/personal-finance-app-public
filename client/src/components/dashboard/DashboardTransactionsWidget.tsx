@@ -125,7 +125,8 @@ export default function DashboardTransactionsWidget() {
   return (
     <>
       <Card className="shadow-sm border-border/50 bg-card h-full">
-      <CardHeader className="flex flex-row items-center justify-between pb-4 space-y-0">
+      {/* UX-02: wraps, so "All transactions" drops below the title on a narrow card instead of leaving it. */}
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 pb-4 space-y-0">
         <div className="flex items-baseline gap-2">
           <CardTitle className="text-lg font-bold text-foreground">
             Transactions

@@ -17,6 +17,7 @@ vi.mock("@/hooks/use-settings", () => ({
 }));
 vi.mock("../components/MemberList", () => ({ MemberList: () => <div data-testid="member-list" /> }));
 vi.mock("../components/LeaveHouseholdButton", () => ({ LeaveHouseholdButton: () => null }));
+vi.mock("../components/PendingInvitations", () => ({ PendingInvitations: () => null }));
 vi.mock("../components/AddMemberDialog", () => ({ AddMemberDialog: () => <button type="button">Add Member</button> }));
 vi.mock("@/features/settings/saved-views/SharedViewsCard", () => ({
   SharedViewsCard: ({ canManage }: { canManage: boolean }) => <section aria-label="Shared views" data-can-manage={String(canManage)} />,

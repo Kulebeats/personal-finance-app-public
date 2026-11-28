@@ -2,6 +2,16 @@ import { test, expect, type Page } from "./protected-test";
 import { createCompletionFixture } from "../server/testing/fixtures/completion-fixtures";
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
 import { randomUUID } from "node:crypto";
+import { readBack, submitStep, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { storedValue } from "./utils/observe";
+
+/**
+ * The Add Government Bond form's write (QA-01: mutation-checked by
+ * scripts/e2e-mutation-check.mjs). Its corrupt mutant buys at 951: still a
+ * positive two-decimal price, so the server accepts it.
+ */
+const CREATE_BOND: SubmitStep = { name: "grz-bond", method: "POST", path: "/api/grz/bonds", corruptField: "purchasePrice" };
 
 async function openInvestments(page: Page, fixture: Awaited<ReturnType<typeof createCompletionFixture>>) {
   await page.goto("/login"); await page.getByLabel(/email/i).fill(fixture.email);
@@ -118,7 +128,7 @@ function cashState(householdId: string) {
 
 test.describe("GRZ civil dates and denomination in a western timezone", () => {
 test.use({ timezoneId: "America/Los_Angeles" });
-test("an empty-equity user records an accountless reopened950/face1000 bond through Investments and reloads its real issue schedule", async ({ page }) => {
+testWithMutants("an empty-equity user records an accountless reopened950/face1000 bond through Investments and reloads its real issue schedule", { corrupt: [CREATE_BOND] }, async (page) => {
   const fixture = await createCompletionFixture();
   await withFixtureClient(async client => { await client.query("update user_display_settings set currency='USD' where user_id=$1", [fixture.userId]); });
   await openInvestments(page, fixture);
@@ -136,13 +146,17 @@ test("an empty-equity user records an accountless reopened950/face1000 bond thro
   await dialog.getByLabel("Purchase Date", { exact: true }).fill("2026-03-12");
   await dialog.getByLabel("First coupon date you are entitled to").fill("2026-05-10");
   await dialog.getByLabel("Maturity Date", { exact: true }).fill("2029-05-10"); await dialog.getByLabel("Coupon Rate (%)").fill("18.99");
-  const [created] = await Promise.all([page.waitForResponse(response => new URL(response.url()).pathname === "/api/grz/bonds" && response.request().method() === "POST"),
-    dialog.getByRole("button", { name: "Add Bond", exact: true }).click()]);
-  expect(created.status()).toBe(201); expect(created.request().headers()["x-capital-subject"]).toBe(fixture.userId);
+  const created = await submitStep(page, CREATE_BOND, () => dialog.getByRole("button", { name: "Add Bond", exact: true }).click());
+  expect(created.status()).toBe(201);
+  const result = await created.json(); const bondId = result.data.id;
+  // The coupon schedule is drawn from face value, so a wrong price paints the same rows: read it back.
+  await readBack(CREATE_BOND, "950", {
+    db: () => storedValue("select purchase_price::text as value from grz_bonds where id=$1 and household_id=$2", [bondId, fixture.householdId]),
+  });
+  expect(created.request().headers()["x-capital-subject"]).toBe(fixture.userId);
   expect(created.request().headers()["x-capital-household"]).toBe(fixture.householdId);
   expect(created.request().postDataJSON()).toMatchObject({ purchasePrice: "950", faceValue: "1000", couponRate: "0.1899", firstCouponDate: "2026-05-10" });
   expect(created.request().postDataJSON()).not.toHaveProperty("accountId");
-  const result = await created.json(); const bondId = result.data.id;
   await expect(dialog).toBeHidden(); await expect(page.getByRole("cell", { name: /Synthetic reopened GRZ/ })).toBeVisible();
   await expect(page.getByText("GRZ value held (ZMW)", { exact: true })).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "Face Value (ZMW)" })).toBeVisible();
