@@ -1,5 +1,5 @@
 import nodemailer from "nodemailer";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { startSmtpSink, type SmtpSink } from "../smtp-sink";
 import { extractAuthLink } from "../mail-link";
 
@@ -51,5 +51,29 @@ describe("AH-03 SMTP sink", () => {
     expect(extractAuthLink(reset.raw, ORIGIN, "/reset-password").href).toBe(link);
     expect(() => extractAuthLink(two.raw, ORIGIN, "/reset-password")).toThrow(/exactly one/);
     expect(() => extractAuthLink(reset.raw, ORIGIN, "/verify-email")).toThrow(/found 0/);
+  });
+});
+
+describe("AH-03 the app's own auth mails through the sink", () => {
+  const saved = { ...process.env };
+  afterEach(() => { process.env = { ...saved }; });
+
+  it("yields the one link from the real reset and verification mails", async () => {
+    sink = await startSmtpSink();
+    // As startProfileMailSink sets them; test mode never sends.
+    Object.assign(process.env, { NODE_ENV: "development", APP_URL: ORIGIN, SMTP_HOST: "127.0.0.1",
+      SMTP_PORT: String(sink.port), SMTP_SECURE: "false", SMTP_USER: "sink", SMTP_PASS: "sink", SMTP_FROM: "no-reply@example.test" });
+    vi.resetModules();
+    const { sendPasswordResetEmail } = await import("../../services/emailService");
+    const { authEmailService } = await import("../../modules/auth/auth.email.service");
+
+    expect(await sendPasswordResetEmail("sink-user@example.invalid", TOKEN)).toBe(true);
+    const [mail] = sink.messages();
+    expect(mail.to).toEqual(["sink-user@example.invalid"]);
+    expect(extractAuthLink(mail.raw, ORIGIN, "/reset-password").href).toBe(`${ORIGIN}/reset-password?token=${TOKEN}`);
+
+    await authEmailService.sendVerificationEmail("sink-user@example.invalid", TOKEN);
+    expect(sink.messages()).toHaveLength(2);
+    expect(extractAuthLink(sink.messages()[1].raw, ORIGIN, "/verify-email").href).toBe(`${ORIGIN}/verify-email?token=${TOKEN}`);
   });
 });

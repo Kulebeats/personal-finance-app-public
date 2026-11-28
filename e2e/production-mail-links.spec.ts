@@ -132,7 +132,7 @@ test("the mailed reset link sets a new password from a fresh browser", async ({ 
     new URL(response.url()).pathname === "/api/auth/reset-password" && response.request().method() === "POST");
   await visitor.getByRole("button", { name: "Reset password" }).click();
   expect((await reset).status()).toBe(200);
-  await expect(visitor.getByText("Password reset", { exact: true })).toBeVisible();
+  await expect(visitor.getByText("Password reset", { exact: true }).first()).toBeVisible();
 
   const { rows: [after] } = await withFixtureClient((client) => client.query<{ password_hash: string; used: boolean }>(
     `SELECT u.password_hash, t.used_at IS NOT NULL AS used FROM users u
