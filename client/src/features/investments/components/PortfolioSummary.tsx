@@ -1,5 +1,5 @@
 import { Card } from "@/components/ui/card";
-import { Filter, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface PortfolioSummaryProps {
@@ -57,6 +57,7 @@ export function PortfolioSummary({
         <div className="flex bg-muted/50 rounded-md p-1 border border-border/50">
           <button
             onClick={() => onCurrencyChange("ZMW")}
+            aria-pressed={displayCurrency === "ZMW"}
             className={cn(
               "px-3 py-1 text-xs font-medium rounded transition-colors",
               displayCurrency === "ZMW"
@@ -68,6 +69,7 @@ export function PortfolioSummary({
           </button>
           <button
             onClick={() => onCurrencyChange("USD")}
+            aria-pressed={displayCurrency === "USD"}
             className={cn(
               "px-3 py-1 text-xs font-medium rounded transition-colors",
               displayCurrency === "USD"
@@ -78,9 +80,7 @@ export function PortfolioSummary({
             USD
           </button>
         </div>
-        <button className="flex items-center gap-2 px-3 py-2 bg-orange-500 text-white rounded-md text-sm font-medium hover:bg-orange-600 shadow-sm transition-colors">
-          <Filter className="w-4 h-4" /> Filter
-        </button>
+        {/* NEW-37: a "Filter" button stood here with no handler; removed until holdings filtering exists. */}
           <button onClick={onAddHolding} data-holding-opening-trigger className="flex items-center gap-2 px-3 py-2 bg-orange-500 text-white rounded-md text-sm font-medium hover:bg-orange-600 shadow-sm transition-colors">
             <Plus className="w-4 h-4" /> Add Holding
           </button>
