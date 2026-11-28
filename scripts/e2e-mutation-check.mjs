@@ -34,6 +34,18 @@ const SPECS = [
   { spec: 'e2e/budget.spec.ts', config: SMOKE },
   { spec: 'e2e/organization.spec.ts', config: SMOKE },
   { spec: 'e2e/goals.spec.ts', config: SMOKE },
+  { spec: 'e2e/recurring.spec.ts', config: SMOKE },
+  { spec: 'e2e/completion-ah13-shared-views.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-fin17-summary-refresh.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-r02.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-r02-defaults.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-r04-shared-owner.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-r04-transaction-rule.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-r05-notification-recap.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-r05-personal-preferences.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-r08-reconcile-balance.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-r08-split-save.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-r20.spec.ts', config: COMPLETION },
 ];
 const INVALID = 'mutation-invalid';
 const KILLED_BY = 'mutation-killed-by';
