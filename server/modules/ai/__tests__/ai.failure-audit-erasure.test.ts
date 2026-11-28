@@ -78,7 +78,14 @@ it("keeps the normal failure audit inside the locks for an active member", async
   mocks.run.mockRejectedValue(failure);
   await expect(processQuery()).rejects.toMatchObject({ statusCode: 500 });
   expect(mocks.logAudit).toHaveBeenCalledWith(expect.objectContaining({ tx,
-    details: expect.objectContaining({ query: question, error: failure.message, success: false }) }));
+    details: expect.objectContaining({ query: question, error: "UNKNOWN_ERROR", error_class: "Error", success: false }) }));
+});
+
+it("records a failure's code and class, never its raw message, in the audit row", async () => {
+  mocks.run.mockRejectedValue(failure);
+  await expect(processQuery()).rejects.toMatchObject({ statusCode: 500 });
+  const [audit] = mocks.logAudit.mock.calls[0];
+  expect(JSON.stringify(audit.details)).not.toContain("SYNTHETIC_ERROR");
 });
 
 it("retains the original consent refusal and audits the outcome without content", async () => {

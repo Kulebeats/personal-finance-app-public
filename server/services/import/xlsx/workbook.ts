@@ -20,6 +20,7 @@
  */
 import * as XLSX from "xlsx";
 import { ValidationError } from "../../../core/errors";
+import { logger } from "../../../utils/logger";
 import { MAX_IMPORT_CELL_ISSUES } from "../types";
 import { isoCellToCalendarDate, isSameStoredNumber, numberCellText, serialToCalendarDate } from "./cells";
 import { mergedCellIssues, toMergedRange, type NumberedRow, type SheetCellIssue, type ZeroBasedRange } from "./merges";
@@ -125,7 +126,9 @@ function readWithSheetJs(buffer: Buffer, extra: XLSX.ParsingOptions): XLSX.WorkB
     return XLSX.read(buffer, { ...SHEETJS_OPTIONS, ...extra });
   } catch (error) {
     // Everything SheetJS reads has passed the strict checks; any failure left is still the file's, so a 400.
-    return refuse(`it could not be read (${String(error instanceof Error ? error.message : error).slice(0, 80)})`);
+    // The parser's own text stays on the server: the client gets a plain reason.
+    logger.warn("SheetJS could not read an import workbook", { phase: "xlsx_read" }, error instanceof Error ? error : undefined);
+    return refuse("it could not be read; open the file in Excel and save it again");
   }
 }
 
