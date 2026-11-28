@@ -10,7 +10,7 @@ import { businessAuditService } from "../services/BusinessAuditService";
 import { resolveRequestHousehold } from "../core/authz/session-preconditions";
 import { requireAuth } from "../auth";
 import { INVESTMENT_NOTIFICATION_PREFERENCE_TYPES } from "@shared/notificationTypes";
-import { writeNotificationPreferences } from "../repositories/UserNotificationPreferences";
+import { saveInvestmentNotificationPreference } from "../modules/settings/settings.investment-preferences.service";
 
 const router = Router();
 
@@ -77,56 +77,18 @@ router.put("/preferences", async (req, res) => {
 
   try {
     const data = updatePreferenceSchema.parse(req.body);
-    const [{ previous, updated }] = await writeNotificationPreferences(req.user!.id, [{
+    const household = await resolveRequestHousehold(req, req.user!.id);
+    // NEW-26: the write and its audit row commit in one transaction; an audit failure rolls back and 500s.
+    const { updated } = await saveInvestmentNotificationPreference({
+      userId: req.user!.id,
+      householdId: household?.id ?? null,
+      ipAddress: businessAuditService.getIpAddress(req),
+    }, {
       ...data,
       thresholdAmount: data.thresholdAmount === undefined
         ? undefined
         : data.thresholdAmount === null ? null : String(data.thresholdAmount),
-    }], { inAppEnabled: true, emailEnabled: true, pushEnabled: false });
-
-    // Preserve the route's non-blocking audit semantics after its transaction commits.
-    try {
-      const household = await resolveRequestHousehold(req, req.user!.id);
-      if (household) {
-        if (previous) {
-          await businessAuditService.logUpdate({
-            householdId: household.id,
-            userId: req.user!.id,
-            entityType: "user",
-            entityId: previous.id,
-            oldValue: {
-              inAppEnabled: previous.inAppEnabled,
-              emailEnabled: previous.emailEnabled,
-              pushEnabled: previous.pushEnabled,
-            },
-            newValue: {
-              inAppEnabled: data.inAppEnabled,
-              emailEnabled: data.emailEnabled,
-              pushEnabled: data.pushEnabled,
-            },
-            ipAddress: businessAuditService.getIpAddress(req),
-            metadata: { action: "investment_notification_preference_update" },
-          });
-        } else {
-          await businessAuditService.logCreate({
-            householdId: household.id,
-            userId: req.user!.id,
-            entityType: "user",
-            entityId: updated.id,
-            newValue: {
-              notificationType: data.notificationType,
-              inAppEnabled: data.inAppEnabled ?? true,
-              emailEnabled: data.emailEnabled ?? true,
-              pushEnabled: data.pushEnabled ?? false,
-            },
-            ipAddress: businessAuditService.getIpAddress(req),
-            metadata: { action: "investment_notification_preference_create" },
-          });
-        }
-      }
-    } catch {
-      // Non-blocking - audit failure shouldn't affect user flow
-    }
+    });
 
     res.json(updated);
   } catch (error) {
