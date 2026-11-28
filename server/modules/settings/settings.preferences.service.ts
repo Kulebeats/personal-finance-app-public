@@ -25,9 +25,10 @@ export interface PersonalSettingsContext {
  * The audit row's household foreign key takes KEY SHARE on the household; take it
  * before the user lock, in the household-first order the profile save and the
  * membership paths use. Defensive: the personal settings routes carry no household
- * context today, so householdId is null there and this is a no-op.
+ * context today, so householdId is null there and this is a no-op. The investment
+ * notification preference save passes a real household id, so there it is live.
  */
-async function lockAuditHousehold(tx: TransactionType, householdId: string | null): Promise<void> {
+export async function lockAuditHousehold(tx: TransactionType, householdId: string | null): Promise<void> {
   if (!householdId) return;
   await tx.select({ id: households.id }).from(households).where(eq(households.id, householdId)).for("key share");
 }

@@ -8,6 +8,7 @@
  */
 
 import { useCallback, useState } from "react";
+import { INVALID_INPUT } from "@/lib/errorCopy";
 
 export interface AuthFieldError {
   field: string;
@@ -60,14 +61,17 @@ export function toFieldMessages(errors: readonly AuthFieldError[]): FieldMessage
   );
 }
 
-/** Toast text: a short pointer when every error has an input, otherwise the messages themselves. */
+/**
+ * Toast text: a short pointer when every error has an input, otherwise fixed
+ * plain copy. The server's message is never shown for a field with no input,
+ * since nothing on screen explains it and it can carry internal detail.
+ */
 export function describeFieldErrors(
   errors: readonly AuthFieldError[],
   knownFields: readonly string[],
 ): string {
-  const unmatched = errors.filter((error) => !knownFields.includes(error.field));
-  if (unmatched.length === 0) return "Please correct the highlighted fields.";
-  return unmatched.map((error) => error.message).join(" ");
+  const hasUnmatched = errors.some((error) => !knownFields.includes(error.field));
+  return hasUnmatched ? INVALID_INPUT : "Please correct the highlighted fields.";
 }
 
 /** Props that tie an input to its error message (FormField renders `${id}-error`). */
