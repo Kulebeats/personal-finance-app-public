@@ -51,6 +51,8 @@ const SPECS = [
   { spec: 'e2e/completion-r08-reconcile-balance.spec.ts', config: COMPLETION },
   { spec: 'e2e/completion-r08-split-save.spec.ts', config: COMPLETION },
   { spec: 'e2e/completion-r20.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-r05-report-preferences.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-imp01-import-wizard.spec.ts', config: COMPLETION },
 ];
 const INVALID = 'mutation-invalid';
 const KILLED_BY = 'mutation-killed-by';
