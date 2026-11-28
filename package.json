@@ -47,6 +47,7 @@
     "test:e2e": "node scripts/check-runtime.mjs && node scripts/run-protected-tests.mjs database playwright test",
     "test:e2e:smoke": "node scripts/check-runtime.mjs && node scripts/run-protected-tests.mjs database playwright test e2e/auth.spec.ts e2e/transactions.spec.ts e2e/accounts.spec.ts e2e/budget.spec.ts e2e/dashboard.spec.ts e2e/organization.spec.ts e2e/goals.spec.ts e2e/investments.spec.ts e2e/recurring.spec.ts e2e/reports.spec.ts --project=chromium --reporter=line",
     "test:e2e:completion": "node scripts/check-runtime.mjs && node scripts/run-protected-tests.mjs database playwright test --config playwright.completion.config.ts",
+    "test:e2e:production": "node scripts/check-runtime.mjs && node scripts/run-protected-tests.mjs database playwright test --config playwright.production.config.ts",
     "test:e2e:mutation": "node scripts/check-runtime.mjs && node scripts/e2e-mutation-check.mjs",
     "test:e2e:headed": "node scripts/check-runtime.mjs && node scripts/run-protected-tests.mjs database playwright test --headed",
     "test:e2e:ui": "node scripts/check-runtime.mjs && node scripts/run-protected-tests.mjs database playwright test --ui",
