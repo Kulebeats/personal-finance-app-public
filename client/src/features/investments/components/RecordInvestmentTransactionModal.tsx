@@ -21,6 +21,7 @@ import {
   parseMoneyString,
 } from "@/lib/money";
 import { cn } from "@/lib/utils";
+import { useHouseholdDateDefault } from "@/lib/calendarZone";
 
 import { calculateTradeSettlement, InvestmentBuySellForm } from "./InvestmentBuySellForm";
 import { InvestmentHoldingSummary } from "./InvestmentHoldingSummary";
@@ -46,9 +47,8 @@ export function RecordInvestmentTransactionModal({
   const [quantity, setQuantity] = useState("");
   const [price, setPrice] = useState("");
   const [fee, setFee] = useState("");
-  const [transactionDate, setTransactionDate] = useState(
-    new Date().toISOString().split("T")[0]
-  );
+  // NEW-15: the server's day, UTC for a legacy household, computed when the dialog opens.
+  const { date: transactionDate, choose: setTransactionDate, hold: holdDate, reset: resetDate } = useHouseholdDateDefault();
 
   const [grossAmount, setGrossAmount] = useState("");
   const [whtRate, setWhtRate] = useState("");
@@ -70,7 +70,7 @@ export function RecordInvestmentTransactionModal({
       setQuantity("");
       setFee("");
       setPrice("");
-      setTransactionDate(new Date().toISOString().split("T")[0]);
+      resetDate();
       setGrossAmount("");
       setWhtRate("");
       setCustomWht(false);
@@ -90,6 +90,7 @@ export function RecordInvestmentTransactionModal({
   const handleSubmit = async () => {
     if (!isFormValid() || !currency) return;
     setIsSubmitting(true);
+    holdDate(); // sent with this request: a late zone must not move it
 
     try {
       // P1-4 FIX: Define proper payload type instead of Record<string, any>
