@@ -28,6 +28,11 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const COMPLETION = 'playwright.completion.config.ts';
 const SMOKE = 'playwright.config.ts';
 const SPECS = [
+  { spec: 'e2e/completion-r12-holdings-currency.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-r13-bond-entry.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-r13-grz-evidence.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-r13-holding-delete.spec.ts', config: COMPLETION },
+  { spec: 'e2e/completion-r13-sip-plan.spec.ts', config: COMPLETION },
   { spec: 'e2e/journey-first-household.spec.ts', config: COMPLETION },
   { spec: 'e2e/accounts.spec.ts', config: SMOKE },
   { spec: 'e2e/transactions.spec.ts', config: SMOKE },
