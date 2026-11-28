@@ -1,13 +1,16 @@
 /**
  * R18 layout and control inventory (UX-02, NEW-37 labelling, UX misc).
  *
- * Phone (375 x 812, project `phone`, tag @phone-only), on Dashboard, Transactions,
- * the Add Transaction dialog, Accounts, Budget, Reports and Settings:
+ * Phone project (`phone`, tag @phone-only), at every R18.1 width: 320, 360, 375,
+ * 390 and 768 px wide, 812 px tall, on Dashboard, Transactions, the Add
+ * Transaction dialog, Accounts, Budget, Reports and Settings:
  * - the page never scrolls sideways (`scrollWidth <= innerWidth`);
  * - no visible control is clipped past the screen edge (the app shell hides
  *   overflow, so scrollWidth alone would miss a cut-off button);
- * - every visible control is at least 44 x 44 px;
- * - every visible control has an accessible name.
+ * - below 768 px, every visible control is at least 44 x 44 px;
+ * - every visible control has an accessible name;
+ * - below 768 px the sidebar is a drawer that fits; at 768 px the sidebar shows
+ *   and the drawer trigger does not.
  *
  * Desktop (1280 px, project `chromium`): Reports and its tabs never scroll
  * sideways (UX misc), and the same control-name inventory holds.
@@ -23,6 +26,11 @@ import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
 import { signInAs } from "./utils/fixture-session";
 
 const MIN_TARGET_PX = 44;
+/** R18.1 (FINAL_COMPLETION_SPEC.md, R18): content 100% wide at each of these widths. */
+const PHONE_WIDTHS = [320, 360, 375, 390, 768] as const;
+const PHONE_HEIGHT_PX = 812;
+/** Tailwind `md`: from here the desktop sidebar replaces the drawer (TopBar.tsx, Sidebar.tsx). */
+const DRAWER_BREAKPOINT_PX = 768;
 
 /** Each page's own "ready" control; not every page's h1 is its name (Budget's is the period). */
 const PHONE_PAGES: { path: string; ready: (page: Page) => Locator }[] = [
@@ -121,37 +129,58 @@ function expectClean(where: string, geometry: Geometry) {
   expect.soft(geometry.problems, `${where}: control problems`).toEqual([]);
 }
 
-test.describe("R18 phone layout at 375 px @phone-only", () => {
-  test("primary pages fit, controls are reachable, large enough and named", async ({ page }, testInfo) => {
-    testInfo.setTimeout(240_000);
-    await signInAs(page, await populatedHousehold());
-    for (const { path, ready } of PHONE_PAGES) {
-      await page.goto(path);
-      if (path === "/reports") await skipReportsOnboarding(page, 30_000);
-      await expect(ready(page)).toBeVisible({ timeout: 30_000 });
-      await page.waitForLoadState("networkidle");
-      expectClean(path, await measure(page, { checkTargets: true }));
+for (const width of PHONE_WIDTHS) {
+  const isDrawerLayout = width < DRAWER_BREAKPOINT_PX;
+  // Phone widths are touch-first, so every control must be a 44 px target. From 768 px the
+  // desktop shell (sidebar, command-palette button) takes over; fit and names still hold there.
+  const checkTargets = isDrawerLayout;
+
+  test.describe(`R18 phone layout at ${width} px @phone-only`, () => {
+    test.beforeEach(async ({ page }) => {
+      await page.setViewportSize({ width, height: PHONE_HEIGHT_PX });
+    });
+
+    test(`primary pages fit, controls are reachable${checkTargets ? ", large enough" : ""} and named`, async ({ page }, testInfo) => {
+      testInfo.setTimeout(240_000);
+      await signInAs(page, await populatedHousehold());
+      expect(await page.evaluate(() => window.innerWidth), "the viewport is the width under test").toBe(width);
+      for (const { path, ready } of PHONE_PAGES) {
+        await page.goto(path);
+        if (path === "/reports") await skipReportsOnboarding(page, 30_000);
+        await expect(ready(page)).toBeVisible({ timeout: 30_000 });
+        await page.waitForLoadState("networkidle");
+        expectClean(`${width}px ${path}`, await measure(page, { checkTargets }));
+      }
+    });
+
+    test("the Add Transaction dialog fits and its controls are named", async ({ page }) => {
+      await signInAs(page, await populatedHousehold());
+      await page.goto("/transactions");
+      await page.getByRole("button", { name: "Add Transaction", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Add Transaction", exact: true });
+      await expect(dialog).toBeVisible();
+      await settled(dialog);
+      expectClean(`${width}px Add Transaction dialog`, await measure(page, { checkTargets, scope: "[role=dialog]" }));
+    });
+
+    if (isDrawerLayout) {
+      test("the navigation drawer covers the content and every link fits", async ({ page }) => {
+        await signInAs(page, await populatedHousehold());
+        await expect(page.getByRole("navigation", { name: "Application navigation" })).toBeHidden();
+        await page.getByRole("button", { name: "Open application navigation" }).click();
+        await expect(page.getByRole("dialog")).toBeVisible();
+        await settled(page.getByRole("dialog"));
+        expectClean(`${width}px navigation drawer`, await measure(page, { checkTargets: true, scope: "[role=dialog]" }));
+      });
+    } else {
+      test("the sidebar is shown in place of the drawer trigger", async ({ page }) => {
+        await signInAs(page, await populatedHousehold());
+        await expect(page.getByRole("navigation", { name: "Application navigation" })).toBeVisible();
+        await expect(page.getByRole("button", { name: "Open application navigation" })).toBeHidden();
+      });
     }
   });
-
-  test("the Add Transaction dialog fits and its controls are named", async ({ page }) => {
-    await signInAs(page, await populatedHousehold());
-    await page.goto("/transactions");
-    await page.getByRole("button", { name: "Add Transaction", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "Add Transaction", exact: true });
-    await expect(dialog).toBeVisible();
-    await settled(dialog);
-    expectClean("Add Transaction dialog", await measure(page, { checkTargets: true, scope: "[role=dialog]" }));
-  });
-
-  test("the navigation drawer covers the content and every link fits", async ({ page }) => {
-    await signInAs(page, await populatedHousehold());
-    await page.getByRole("button", { name: "Open application navigation" }).click();
-    await expect(page.getByRole("dialog")).toBeVisible();
-    await settled(page.getByRole("dialog"));
-    expectClean("navigation drawer", await measure(page, { checkTargets: true, scope: "[role=dialog]" }));
-  });
-});
+}
 
 test.describe("R18 desktop reports width at 1280 px", () => {
   test("Reports and its tabs never scroll sideways; every control is named", async ({ page }, testInfo) => {

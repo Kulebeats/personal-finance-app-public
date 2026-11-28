@@ -3,8 +3,11 @@
  * the page scroll sideways: a chart, table or card wider than the content
  * column pushes the whole layout past the viewport.
  *
+ * UX-02 (R18.1): the same holds on a phone at 320, 360, 375, 390 and 768 px.
+ *
  * Matched by the completion config's pattern (completion-*.spec.ts), so it
- * runs in the CI e2e gate at desktop size (the chromium project).
+ * runs in the CI e2e gate: 1280 px on the chromium project, and the
+ * `@phone-only` widths on the phone project.
  */
 import { randomUUID } from "node:crypto";
 import { test, expect, type Page } from "./protected-test";
@@ -13,6 +16,9 @@ import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
 import { signInAs } from "./utils/fixture-session";
 
 const DESKTOP = { width: 1280, height: 800 };
+/** R18.1 phone widths (FINAL_COMPLETION_SPEC.md, R18); the phone project's height. */
+const PHONE_WIDTHS = [320, 360, 375, 390, 768] as const;
+const PHONE_HEIGHT_PX = 812;
 /** Subpixel rounding can leave scrollWidth one pixel over; anything more is real overflow. */
 const ROUNDING_PX = 1;
 const FIRST_LOAD_MS = 60_000;
@@ -70,10 +76,11 @@ function horizontalOverflow(page: Page): Promise<Overflow> {
   });
 }
 
-test("every Reports tab fits a 1280px window without scrolling sideways", async ({ page }) => {
+/** Opens Reports for a new household at `viewport` and checks that no tab scrolls sideways. */
+async function checkEveryTab(page: Page, viewport: { width: number; height: number }) {
   // The annual dashboard is the heaviest bundle; its first paint can be slow on a cold server.
   test.setTimeout(FIRST_LOAD_MS * 2);
-  await page.setViewportSize(DESKTOP);
+  await page.setViewportSize(viewport);
   await signInAs(page, await householdWithActivity());
   await page.goto("/reports");
   // A new household has not finished widget setup, so the one-time onboarding dialog opens. It is
@@ -83,6 +90,7 @@ test("every Reports tab fits a 1280px window without scrolling sideways", async 
   await onboarding.getByRole("button", { name: /skip for now/i }).click();
   await expect(onboarding).toBeHidden();
   await expect(page.getByRole("heading", { level: 1, name: "Reports" })).toBeVisible();
+  expect(await page.evaluate(() => window.innerWidth), "the viewport is the width under test").toBe(viewport.width);
 
   for (const label of TABS) {
     const tab = page.getByRole("button", { name: `${label} report tab`, exact: true });
@@ -92,9 +100,21 @@ test("every Reports tab fits a 1280px window without scrolling sideways", async 
     const { hasShell, pagePx, shellPx, widest } = await horizontalOverflow(page);
     // Without the shell marker the content check below would pass vacuously.
     expect(hasShell, "the app shell's content scroller [data-main-scroll] is on the page").toBe(true);
-    expect.soft(pagePx, `${label}: the page is ${pagePx}px wider than the window (widest: ${widest})`)
+    const where = `${viewport.width}px ${label}`;
+    expect.soft(pagePx, `${where}: the page is ${pagePx}px wider than the window (widest: ${widest})`)
       .toBeLessThanOrEqual(ROUNDING_PX);
-    expect.soft(shellPx, `${label}: the content area scrolls ${shellPx}px sideways (widest: ${widest})`)
+    expect.soft(shellPx, `${where}: the content area scrolls ${shellPx}px sideways (widest: ${widest})`)
       .toBeLessThanOrEqual(ROUNDING_PX);
   }
+}
+
+test("every Reports tab fits a 1280px window without scrolling sideways", async ({ page }) => {
+  await checkEveryTab(page, DESKTOP);
 });
+
+// UX-02 / R18.1: the same check on the phone project (touch, mobile user agent) at every phone width.
+for (const width of PHONE_WIDTHS) {
+  test(`every Reports tab fits a ${width}px phone screen without scrolling sideways @phone-only`, async ({ page }) => {
+    await checkEveryTab(page, { width, height: PHONE_HEIGHT_PX });
+  });
+}
