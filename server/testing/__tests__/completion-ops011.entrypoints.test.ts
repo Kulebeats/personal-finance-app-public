@@ -49,6 +49,7 @@ describe("OPS-011 test configs refuse a canary dev database in database mode", (
   it.each([
     ["vitest.config.ts", "vitest"], ["server/vitest.config.ts", "vitest"], ["client/vitest.config.ts", "vitest"],
     ["playwright.config.ts", "playwright"], ["playwright.completion.config.ts", "playwright"],
+    ["playwright.production.config.ts", "playwright"],
     ["server/testing/browser-guard.config.ts", "playwright"],
   ])("%s refuses before collecting a test", (config, runner) => {
     const cli = runner === "vitest" ? "vitest/vitest.mjs" : "@playwright/test/cli.js";

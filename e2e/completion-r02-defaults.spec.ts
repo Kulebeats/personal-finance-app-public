@@ -1,7 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { test, expect, type Page } from "./protected-test";
+import { expect, type Page } from "./protected-test";
 import { createCompletionFixture } from "../server/testing/fixtures/completion-fixtures";
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
+import { readBack, submitForData, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { LAST_SEGMENT, labelPart, responseValue, storedMoney } from "./utils/observe";
+import { moneyValue, renderedMoney } from "./utils/money-value";
+
+/** The category-picker transaction's write; its corrupt mutant saves a different amount (QA-01, scripts/e2e-mutation-check.mjs). */
+const CREATE_TRANSACTION: SubmitStep = { name: "transaction", method: "POST", path: "/api/transactions", corruptField: "amount" };
 
 async function submitCreated(page: Page, path: string, submit: () => Promise<void>) {
   const pending = page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === "POST");
@@ -15,7 +22,7 @@ async function submitCreated(page: Page, path: string, submit: () => Promise<voi
   return id as string;
 }
 
-test("new household defaults support a real category-picker transaction", async ({ page }) => {
+testWithMutants("new household defaults support a real category-picker transaction", { corrupt: [CREATE_TRANSACTION] }, async (page) => {
   const fixture = await createCompletionFixture();
   // Independently verified synthetic actor; this is not email-verification proof.
   // Keep the old household's Golden categories as an isolation control.
@@ -52,10 +59,19 @@ test("new household defaults support a real category-picker transaction", async 
   await transactionDialog.getByRole("combobox", { name: "Category", exact: true }).click();
   await expect(page.getByRole("option", { name: "Golden Income", exact: true })).toHaveCount(0);
   await page.getByRole("option", { name: /Salary - Primary Job$/ }).click();
-  const transactionId = await submitCreated(page, "/api/transactions", () =>
+  const created = await submitForData<{ id: string; amount: unknown }>(page, CREATE_TRANSACTION, () =>
     transactionDialog.getByRole("button", { name: "Add Transaction", exact: true }).click());
+  const transactionId = created.id;
+  expect(transactionId).toMatch(/^[0-9a-f-]{36}$/i);
   await expect(transactionDialog).toBeHidden();
   await page.reload();
+  // The amount everywhere, before the row and row checks below, which a wrong amount would also fail.
+  await readBack(CREATE_TRANSACTION, moneyValue("20.00", "ZMW"), {
+    api: async () => responseValue(created.amount, "amount"),
+    db: () => storedMoney("SELECT amount::text AS amount, currency FROM transactions WHERE id=$1 AND household_id=$2",
+      [transactionId, householdId]),
+    ui: async () => renderedMoney(await labelPart(page.getByRole("button", { name: /^View Income, / }), LAST_SEGMENT)),
+  });
   const incomeRow = page.getByRole("button", { name: /^View Income, .*20\.00$/ });
   await expect(incomeRow.getByText("Salary - Primary Job", { exact: true })).toBeVisible();
 

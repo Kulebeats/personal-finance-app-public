@@ -125,7 +125,8 @@ export default function DashboardTransactionsWidget() {
   return (
     <>
       <Card className="shadow-sm border-border/50 bg-card h-full">
-      <CardHeader className="flex flex-row items-center justify-between pb-4 space-y-0">
+      {/* UX-02: wraps, so "All transactions" drops below the title on a narrow card instead of leaving it. */}
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 pb-4 space-y-0">
         <div className="flex items-baseline gap-2">
           <CardTitle className="text-lg font-bold text-foreground">
             Transactions
@@ -134,7 +135,7 @@ export default function DashboardTransactionsWidget() {
         </div>
         <Link
           href="/transactions"
-          className="text-sm font-medium text-muted-foreground hover:text-foreground flex items-center gap-1 bg-muted/30 px-3 py-1 rounded-md transition-colors"
+          className="text-sm font-medium text-muted-foreground hover:text-foreground flex items-center gap-1 bg-muted/30 px-3 py-1 rounded-md transition-colors max-md:min-h-11"
         >
           All transactions <ChevronRight className="w-3 h-3 rotate-90" />
         </Link>

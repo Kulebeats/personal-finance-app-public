@@ -10,7 +10,12 @@ process.env.BROWSERSLIST_IGNORE_OLD_DATA ??= "1";
 // worker thread does not change that thread's Date zone, so these run in a
 // forked child whose TZ is set when the process is spawned.
 const BIRTHDAY_TZ_SPEC = "client/src/pages/settings/sections/ProfileSection/__tests__/birthday-timezone.test.ts";
-const LUSAKA_TZ_SPECS = ["client/src/hooks/__tests__/use-reports.month-range.test.ts", BIRTHDAY_TZ_SPEC];
+const LUSAKA_TZ_SPECS = [
+  "client/src/hooks/__tests__/use-reports.month-range.test.ts",
+  BIRTHDAY_TZ_SPEC,
+  // NEW-15: pins the goal contribution date serialised from a local-midnight picker Date.
+  "client/src/features/goals/__tests__/GoalTransferModal.household-day.test.tsx",
+];
 // Specs that must also run in a UTC- zone (same forked-child reason).
 const NEW_YORK_TZ_SPECS = [
   BIRTHDAY_TZ_SPEC,
