@@ -7,6 +7,7 @@ import { SharedViewsCard } from "@/features/settings/saved-views/SharedViewsCard
 import { AddMemberDialog } from "./components/AddMemberDialog";
 import { LeaveHouseholdButton } from "./components/LeaveHouseholdButton";
 import { MemberList } from "./components/MemberList";
+import { PendingInvitations } from "./components/PendingInvitations";
 import { RolePermissions } from "./components/RolePermissions";
 
 export default function MembersSection() {
@@ -66,6 +67,8 @@ export default function MembersSection() {
           }
         >
           <MemberList members={members} currentUserId={profile?.id} />
+
+          <PendingInvitations canManage={canManageRoles} />
 
           <div className="mt-4 flex justify-end">
             <LeaveHouseholdButton currentUserRole={currentUserRole} />

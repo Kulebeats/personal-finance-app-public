@@ -781,6 +781,12 @@ export const householdInvitations = pgTable("household_invitations", {
   emailIdx: index("idx_household_invitations_email")
     .on(table.email, table.householdId)
     .where(sql`accepted_at IS NULL`),
+  // AH-05: one unaccepted invitation per household and address, whatever its
+  // case (migration 0064). HouseholdRepository.createInvitation clears an
+  // expired one first and maps a lost race to 409.
+  pendingEmailUnique: uniqueIndex("household_invitations_pending_email_unique")
+    .on(table.householdId, sql`lower(${table.email})`)
+    .where(sql`accepted_at IS NULL`),
 }));
 
 // ============================================================================
