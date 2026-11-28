@@ -18,8 +18,8 @@ export function buildInvitationEmailTemplate(params: {
     month: "long",
     day: "numeric",
   });
-  const safeInviter = inviterName; // MUTANT (S5 RED run)
-  const safeHousehold = householdName; // MUTANT (S5 RED run)
+  const safeInviter = escapeHtml(inviterName);
+  const safeHousehold = escapeHtml(householdName);
   const safeRole = escapeHtml(role.replace("_", " "));
   const safeUrl = escapeHtml(inviteUrl);
   const safeRecipient = escapeHtml(recipientEmail);
