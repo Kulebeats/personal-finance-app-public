@@ -16,6 +16,8 @@
  *   own per-IP credential budget.
  * - Plaintext loopback Postgres (DATABASE_SSL=false), allowed in development
  *   only for a loopback host.
+ * - Mail through the real SMTP path to an in-process loopback sink
+ *   (startProfileMailSink); provider and push egress stay blanked.
  *
  * Not production: NODE_ENV=production also requires HTTPS (APP_URL, Secure and
  * __Host- cookies, HSTS, CSP), Redis and verified database TLS
@@ -24,7 +26,12 @@
  * CSP or the Redis limiter store.
  */
 
+import { startSmtpSink, type SmtpSink } from "./smtp-sink";
+
 export const PRODUCTION_PROFILE = "production";
+/** Synthetic sender and sink login; the sink accepts any credentials and relays nothing. */
+const SINK_SENDER = "no-reply@example.test";
+const SINK_LOGIN = "pfa-test-sink";
 
 /** The runtime this profile reports at /__test/profile, read by every spec. */
 export interface ProductionProfileIdentity {
@@ -54,4 +61,22 @@ export function applyProductionProfile(env: NodeJS.ProcessEnv = process.env): Pr
   env.TRUST_PROXY = "1";
   env.SCHEDULER_ENABLED = "false";
   return { profile: PRODUCTION_PROFILE, nodeEnv: env.NODE_ENV, client: "built", trustProxy: env.TRUST_PROXY };
+}
+
+/**
+ * AH-03: points the app's real SMTP settings at an in-process loopback sink
+ * (server/testing/smtp-sink.ts), so mail takes the production send path and
+ * stays in this process. Call after applyProductionProfile (test mode never
+ * sends) and before the application import.
+ */
+export async function startProfileMailSink(env: NodeJS.ProcessEnv = process.env): Promise<SmtpSink> {
+  if (env.NODE_ENV !== "development") throw new Error("The mail sink belongs to the production-mode profile");
+  const sink = await startSmtpSink();
+  env.SMTP_HOST = "127.0.0.1";
+  env.SMTP_PORT = String(sink.port);
+  env.SMTP_SECURE = "false";
+  env.SMTP_USER = SINK_LOGIN;
+  env.SMTP_PASS = SINK_LOGIN;
+  env.SMTP_FROM = SINK_SENDER;
+  return sink;
 }

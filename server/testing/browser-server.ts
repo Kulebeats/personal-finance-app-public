@@ -3,7 +3,7 @@ import path from "node:path";
 import { prepareTestEnvironment, verifyDatabaseTarget } from "./test-target.mjs";
 import { installNetworkGuard } from "./network-guard.mjs";
 import { installPostgresGuard } from "./postgres-guard.mjs";
-import { applyProductionProfile, isProductionProfile } from "./production-profile";
+import { applyProductionProfile, isProductionProfile, startProfileMailSink } from "./production-profile";
 
 const environment = prepareTestEnvironment();
 if (environment.mode !== "database" || !environment.target?.server) {
@@ -19,6 +19,7 @@ process.env.CLIENT_URL = origin.origin;
 process.env.APP_URL = origin.origin;
 // R20.3: leave test mode (CSRF and limiters live) before the application import.
 const production = isProductionProfile() ? applyProductionProfile() : undefined;
+const mailSink = production ? await startProfileMailSink() : undefined;
 
 // No application import occurs until both static intent and persisted identity pass.
 const { default: runApp, app } = await import("../app");
@@ -30,6 +31,10 @@ if (production) {
   app.get("/__test/profile", (_req, res) => {
     res.json({ ...production, nodeEnv: process.env.NODE_ENV, trustProxy: String(app.get("trust proxy")) });
   });
+}
+if (mailSink) {
+  // AH-03: what the app mailed, for a spec to read and follow (synthetic recipients only).
+  app.get("/__test/mail", (_req, res) => { res.json({ messages: mailSink.messages() }); });
 }
 await runApp(async (expressApp, server) => {
   if (process.env.TEST_BROWSER_CLIENT === "built") {
