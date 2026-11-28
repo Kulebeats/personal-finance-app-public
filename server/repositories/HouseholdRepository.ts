@@ -237,12 +237,25 @@ export class HouseholdRepository {
    * accepted invitation for the same address still holds that slot, so it is
    * deleted in the same transaction before the insert. Losing the race is a
    * 409, the same answer the controller's earlier check gives.
+   *
+   * Lock order: the household row FOR UPDATE first, then the invitation rows,
+   * as resend (invitations.resend.ts) and accept (invitations.accept.ts) do.
+   * Deleting the expired row first would hold its lock while the insert's
+   * foreign-key check waits on the household, and a resend or accept holding
+   * the household while it waits on that row would deadlock with it.
    */
   async createInvitation(
     data: Omit<InsertHouseholdInvitation, "id" | "createdAt">
   ): Promise<HouseholdInvitation> {
     try {
       return await withTransaction(async (tx) => {
+        const [household] = await tx
+          .select({ id: households.id })
+          .from(households)
+          .where(eq(households.id, data.householdId))
+          .for("update")
+          .limit(1);
+        if (!household) throw new NotFoundError("Household not found");
         await tx
           .delete(householdInvitations)
           .where(

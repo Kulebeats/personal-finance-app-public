@@ -51,6 +51,18 @@ const inviteRow = (email: string, offsetMs: { expires: number; created: number }
   createdAt: new Date(Date.now() + offsetMs.created),
 });
 
+/** Resolves once another backend is waiting on a lock held by `holderPid`. */
+async function waitUntilBlockedBy(holderPid: number, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const { rowCount } = await pool.query(
+      "SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))", [holderPid]);
+    if (rowCount) return;
+    if (Date.now() > deadline) throw new Error("The re-invite never queued behind the household lock");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 describe("AH-05 pending invitation uniqueness — real DB", () => {
   beforeAll(async () => {
     app = await getTestApp();
@@ -111,6 +123,36 @@ describe("AH-05 pending invitation uniqueness — real DB", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].inviteCode).not.toBe(expired.inviteCode);
     expect(rows[0].expiresAt.getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("takes the household lock before the expired row, so a re-invite cannot deadlock with a resend or accept", async () => {
+    const expired = inviteRow(guest, { expires: -DAY_MS, created: -8 * DAY_MS });
+    const [stored] = await db.insert(householdInvitations).values(expired).returning();
+    // Resend and accept lock the household, then the invitation. Play that
+    // order on one connection around a concurrent re-invite of the address.
+    const holder = await pool.connect();
+    let reinvite: Promise<Awaited<ReturnType<typeof invite>>> | undefined;
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SET LOCAL lock_timeout = '5s'");
+      await holder.query("SELECT id FROM households WHERE id = $1 FOR UPDATE", [householdId]);
+      const { rows: [{ pid }] } = await holder.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
+      reinvite = Promise.resolve(invite(guest));
+      await waitUntilBlockedBy(pid);
+
+      // With the expired row locked by the re-invite this would be a 40P01.
+      await holder.query("SELECT id FROM household_invitations WHERE id = $1 FOR UPDATE", [stored.id]);
+      await holder.query("COMMIT");
+    } catch (error) {
+      await holder.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      holder.release();
+      await reinvite?.catch(() => undefined);
+    }
+
+    expect((await reinvite!).status).toBe(201);
+    expect(await invitationRows()).toHaveLength(1);
   });
 
   it("frees the address once the invitation is revoked", async () => {
