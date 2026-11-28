@@ -90,6 +90,8 @@ async function fixture() {
 const GENERAL_LIMIT = 600;
 const IP_AUTH_LIMIT = 10;
 const STRICT_LIMIT = 5;
+/** Owner decision 28 Nov 2026: the shared analytics tier is 120 per user per minute. */
+const ANALYTICS_LIMIT = 120;
 const PAGE_LOAD_BURST = 40;
 
 test("ordinary navigation: login plus five page-load bursts in one window never 429 (R00 / NEW-08)", async () => {
@@ -164,10 +166,10 @@ test("credential POSTs share IP protection; other methods and unknown paths do n
 test("reports and recap charge their analytics tier once, retaining expensive limits", async () => {
   for (const url of ["/api/reports/cashflow", "/api/weekly-recap"]) {
     const { app } = await fixture();
-    for (let index = 1; index <= 30; index++) {
+    for (let index = 1; index <= ANALYTICS_LIMIT; index++) {
       const response = await request(app).get(url).expect(200);
-      assert.equal(+response.headers["ratelimit-limit"], 30);
-      assert.equal(+response.headers["ratelimit-remaining"], 30 - index);
+      assert.equal(+response.headers["ratelimit-limit"], ANALYTICS_LIMIT);
+      assert.equal(+response.headers["ratelimit-remaining"], ANALYTICS_LIMIT - index);
     }
     await request(app).get(url).expect(429);
   }
