@@ -92,7 +92,8 @@ export default function DashboardBudgetWidget() {
 
   return (
     <Card className="shadow-sm border-border/50 bg-card h-full flex flex-col">
-      <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0 shrink-0">
+      {/* UX-02: wraps, so the link and range picker drop below the title on a narrow card instead of leaving it. */}
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 pb-2 space-y-0 shrink-0">
         <div className="flex items-center gap-2">
           <div className="h-6 w-1 bg-emerald-500 rounded-full"></div>
           <CardTitle className="text-lg font-bold text-foreground">
@@ -102,7 +103,7 @@ export default function DashboardBudgetWidget() {
             </span>
           </CardTitle>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           {/* Audit v2 P2: this widget had no way to drill into the Budget
               page - link out, matching the "View All" convention used by
               sibling dashboard widgets. */}

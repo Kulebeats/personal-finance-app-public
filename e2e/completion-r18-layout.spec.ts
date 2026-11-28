@@ -39,7 +39,8 @@ const PHONE_PAGES: { path: string; ready: (page: Page) => Locator }[] = [
   { path: "/accounts", ready: (page) => page.getByRole("button", { name: "Add a new account", exact: true }) },
   { path: "/budget", ready: (page) => page.getByRole("button", { name: "Budget", exact: true }) },
   { path: "/reports", ready: (page) => page.getByRole("heading", { name: "Reports", level: 1 }) },
-  { path: "/settings", ready: (page) => page.getByRole("button", { name: /settings menu/i }) },
+  // Below 768 px the section list is behind "Open settings menu"; from 768 px it is shown inline.
+  { path: "/settings", ready: (page) => page.getByRole("button", { name: /^(Open settings menu|Navigate to Profile settings)$/ }) },
 ];
 
 interface ControlProblem { kind: "clipped" | "small" | "unnamed"; control: string; box: string }
