@@ -2,18 +2,20 @@
  * AH-11 slice 2: a member without MFA is e-mailed when 7 days and when 1 day of
  * the grace are left. Real Postgres and the real delivery ledger; only SMTP is
  * stubbed. A re-run sends nothing twice, a definite rejection is retried, and a
- * lost acknowledgement is not.
+ * lost acknowledgement is not. A member erased through the real erasure
+ * service is never reminded (AH-11 finding #13).
  */
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import { notificationDeliveries, securityAuditLogs, users } from "@shared/schema";
+import { auditLogs, notificationDeliveries, securityAuditLogs, users } from "@shared/schema";
 import { db } from "../../../db";
 import { sendEmail } from "../../../services/emailService";
 
 vi.mock("../../../services/emailService", () => ({ sendEmail: vi.fn(async () => true), isEmailServiceConfigured: vi.fn(() => true) }));
 
 import { sendMfaGraceReminders } from "../auth.mfa-reminders";
+import { eraseAccount } from "../../settings/settings.account-deletion.service";
 
 const smtp = vi.mocked(sendEmail);
 const REMINDER_AUDIT = "MFA_GRACE_REMINDER_SENT";
@@ -49,6 +51,7 @@ beforeEach(() => {
 afterAll(async () => {
   if (created.length === 0) return;
   await db.delete(securityAuditLogs).where(inArray(securityAuditLogs.userId, created));
+  await db.delete(auditLogs).where(inArray(auditLogs.userId, created));
   await db.delete(notificationDeliveries).where(inArray(notificationDeliveries.userId, created));
   await db.delete(users).where(inArray(users.id, created));
 });
@@ -143,5 +146,30 @@ describe("AH-11 MFA grace reminders", () => {
     expect(await ledger(rejected)).toEqual([expect.objectContaining({ status: "sent" })]);
     expect(await audits(rejected)).toBe(1);
     expect(subjectsTo(lost)).toHaveLength(1);
+  });
+
+  it("finding #13: a member erased through the real erasure service gets no reminder and no ledger row", async () => {
+    const live = await member("6 days 12 hours");
+    const erased = await member("6 days 12 hours");
+    // The same path DELETE /api/settings/account/delete takes (no household: A-20).
+    await eraseAccount({ userId: erased.id, householdId: null, userEmail: erased.email });
+    const [tombstone] = await db.select({ erasedAt: users.erasedAt, email: users.email, graceEndsAt: users.mfaGraceEndsAt })
+      .from(users).where(eq(users.id, erased.id));
+    // Precondition: the tombstone still carries a deadline inside the 7-day window, so the
+    // erasure, not the deadline, is what must keep this member out of the run.
+    expect(tombstone.erasedAt).not.toBeNull();
+    const firstReminderWindowMs = 7 * 86_400_000;
+    expect(tombstone.graceEndsAt?.getTime()).toBeGreaterThan(Date.now());
+    expect(tombstone.graceEndsAt?.getTime()).toBeLessThanOrEqual(Date.now() + firstReminderWindowMs);
+
+    await sendMfaGraceReminders();
+
+    expect(subjectsTo(live)).toEqual([expect.stringMatching(/7 days left/)]);
+    expect(await ledger(live)).toEqual([{ status: "sent", eventKey: expect.stringMatching(/^mfa_grace_reminder:7d:/) }]);
+    expect(await audits(live)).toBe(1);
+    const toErased = smtp.mock.calls.filter(([message]) => message.to === erased.email || message.to === tombstone.email);
+    expect(toErased).toEqual([]);
+    expect(await ledger(erased)).toEqual([]);
+    expect(await audits(erased)).toBe(0);
   });
 });
