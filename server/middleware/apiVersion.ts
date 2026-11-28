@@ -1,12 +1,10 @@
 /**
- * API Version Router
+ * API version helpers
  *
- * Provides API versioning support with backwards compatibility.
- * Current version: v1
- *
- * Usage:
- * - New clients should use /api/v1/*
- * - Legacy clients can use /api/* (redirected to v1)
+ * API versioning has NOT been introduced. The API is served at `/api/*` only;
+ * there is no `/api/v1/*` alias (it answers a JSON 404), nothing is deprecated
+ * and no sunset is planned. If versioning is introduced later, add the alias
+ * first and update `docs/api/openapi.yaml` with it.
  *
  * @module middleware/apiVersion
  */
@@ -17,56 +15,30 @@ import {
   type Response,
   type NextFunction,
 } from "express";
-import { logger } from "../utils/logger";
 
 // Current API version
 export const CURRENT_API_VERSION = "v1";
 
-// Routes that should NOT be versioned (health checks, auth token)
-const UNVERSIONED_ROUTES = ["/health", "/healthz", "/csrf-token"];
-
 /**
  * Creates a versioned API router.
- * Routes mounted on this router will be accessible at /api/v1/*
+ * Unused: no /api/v1 mount exists.
  */
 export function createVersionedRouter(): Router {
   return Router();
 }
 
 /**
- * Middleware to redirect legacy /api/* requests to /api/v1/*
- * Logs deprecation warning for monitoring.
+ * Pass-through kept so server/routes.ts can keep mounting it.
+ *
+ * It used to send Deprecation, Sunset and a /api/v1 successor Link on every
+ * /api/* response. Versioning has not been introduced and /api/v1 does not
+ * exist, so those headers were false and are no longer sent (NEW-33).
  */
 export function legacyApiRedirect(
-  req: Request,
-  res: Response,
+  _req: Request,
+  _res: Response,
   next: NextFunction
 ): void {
-  // Skip if already versioned
-  if (req.path.startsWith("/v1")) {
-    return next();
-  }
-
-  // Skip unversioned routes
-  for (const route of UNVERSIONED_ROUTES) {
-    if (req.path === route || req.path.startsWith(route)) {
-      return next();
-    }
-  }
-
-  // Log deprecation warning (rate-limited per path)
-  // logger.warn("Deprecated unversioned API call", {
-  //   path: req.path,
-  //   method: req.method,
-  //   deprecation: "Use /api/v1/* instead of /api/*",
-  // });
-
-  // Set deprecation header
-  res.setHeader("Deprecation", "true");
-  res.setHeader("Sunset", "2026-12-31");
-  res.setHeader("Link", `</api/v1${req.path}>; rel="successor-version"`);
-
-  // Continue with request (don't break existing clients)
   next();
 }
 
