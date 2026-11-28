@@ -105,7 +105,7 @@ test.describe("Recurring create form", () => {
           FROM recurring_transactions r JOIN recurring_transaction_history h
             ON h.recurring_transaction_id = r.id AND h.action = 'denomination_confirmed_v1'
          WHERE r.id = $1 AND r.household_id = $2`, [rule.id, fixture.householdId]),
-      // The painted amount without its expense sign; the sign is checked above.
+      // The painted amount without its expense sign; the full cell, sign included, is checked below.
       cell: async () => renderedMoney((await shownText(cell)).replace(/^-/, "")),
     });
     // The painted cell in full, after the read-back so a corrupt amount fails there first:

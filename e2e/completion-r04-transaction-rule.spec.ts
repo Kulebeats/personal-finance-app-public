@@ -9,6 +9,8 @@ import { responseValue, storedValue } from "./utils/observe";
 
 /** The rule modal's save; its corrupt mutant stores a different rule name (QA-01, scripts/e2e-mutation-check.mjs). */
 const CREATE_RULE: SubmitStep = { name: "rule", method: "POST", path: "/api/rules", corruptField: "name" };
+/** The privacy-only edit; its corrupt mutant saves the transaction as not private. */
+const MAKE_PRIVATE: SubmitStep = { name: "privacy-edit", method: "PUT", path: /^\/api\/transactions\/[0-9a-f-]+$/,corruptField: "isPrivate" };
 
 const ownedOrigin = loadTestTarget().server?.origin;
 if (!ownedOrigin) throw new Error("R04 transaction-rule browser acceptance requires the protected owned server origin");
@@ -192,7 +194,7 @@ testWithMutants("saved transaction creates a household rule with category and ta
   }
 });
 
-test("a privacy-only edit from the transaction list preserves the original expense and hides it from a household peer", async ({ page, request: peerApi }) => {
+testWithMutants("a privacy-only edit from the transaction list preserves the original expense and hides it from a household peer", { corrupt: [MAKE_PRIVATE] }, async (page, peerApi) => {
   const fixture = await createCompletionFixture();
   const peerId = randomUUID(), accountId = randomUUID(), transactionId = randomUUID(), tagId = randomUUID();
   const peer = { ...fixture, userId: peerId, email: `peer-${peerId}@example.invalid` };
@@ -238,10 +240,13 @@ test("a privacy-only edit from the transaction list preserves the original expen
   const editor = page.getByRole("dialog", { name: "Edit Transaction", exact: true });
   await expect(editor.getByRole("combobox", { name: "Owner", exact: true })).toContainText("Me");
   await editor.getByRole("checkbox", { name: "Private transaction", exact: true }).check();
-  const [response] = await Promise.all([
-    responseFor(page, path, "PUT"), editor.getByRole("button", { name: "Save Changes", exact: true }).click(),
-  ]);
+  const response = await submitStep(page, MAKE_PRIVATE, () => editor.getByRole("button", { name: "Save Changes", exact: true }).click());
   expect(response.status()).toBe(200);
+  // The saved flag, before the request, list and peer checks below, which a wrong flag would also fail.
+  await readBack(MAKE_PRIVATE, "true", {
+    db: () => storedValue("SELECT is_private::text AS value FROM transactions WHERE id=$1 AND household_id=$2", [transactionId, fixture.householdId]),
+    saved: async () => responseValue((await response.json()).data?.isPrivate, "isPrivate"),
+  });
   expect(response.request().postDataJSON()).toMatchObject({ isPrivate: true, ownerUserId: fixture.userId, updatedAt: original.updatedAt });
   await expect(editor).toBeHidden();
   await page.reload();

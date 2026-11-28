@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { APIRequestContext, Page } from "@playwright/test";
 import { test } from "../protected-test";
 import type { SubmitStep } from "./submit";
 import { isMutationRun, mutationEvidence, setCorruptStep } from "./read-back";
@@ -31,21 +31,24 @@ export interface MutantPlan {
 export const MUTATION_INVALID = "mutation-invalid";
 export const MUTATION_KILLED_BY = "mutation-killed-by";
 
-export function testWithMutants(title: string, plan: MutantPlan, body: (page: Page) => Promise<void>): void {
+/** The test's page, and its own `request` fixture (an API context apart from the page's cookies). */
+export type MutantBody = (page: Page, request: APIRequestContext) => Promise<void>;
+
+export function testWithMutants(title: string, plan: MutantPlan, body: MutantBody): void {
   if (!isMutationRun()) {
-    test(title, async ({ page }, testInfo) => {
+    test(title, async ({ page, request }, testInfo) => {
       if (plan.timeoutMs) testInfo.setTimeout(plan.timeoutMs);
-      await body(page);
+      await body(page, request);
     });
     return;
   }
   for (const step of plan.corrupt ?? []) {
-    test(`mutant: corrupt ${step.name} submit`, async ({ page }, testInfo) => {
+    test(`mutant: corrupt ${step.name} submit`, async ({ page, request }, testInfo) => {
       if (plan.timeoutMs) testInfo.setTimeout(plan.timeoutMs);
       setCorruptStep(step.name);
       let failure: { error: unknown } | undefined;
       try {
-        await body(page);
+        await body(page, request);
       } catch (error) {
         failure = { error };
         throw error;

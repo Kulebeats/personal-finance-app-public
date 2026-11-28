@@ -21,6 +21,15 @@ import { signInAs } from "./utils/fixture-session";
 import { buildImportWorkbook } from "./utils/import-workbook";
 import { kwacha, responseValue, shownText, storedMoney } from "./utils/observe";
 import { moneyValue, renderedMoney } from "./utils/money-value";
+import { readBack, submitStep, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+
+/**
+ * The wizard's execute write (QA-01, scripts/e2e-mutation-check.mjs): its corrupt
+ * mutant imports the second file row (the income, rows are keyed by the
+ * template header) at 251.00 instead of 250.00.
+ */
+const EXECUTE_IMPORT: SubmitStep = { name: "import-execute", method: "POST", path: "/api/import/execute", corruptField: "rows.1.Amount" };
 
 const ACCOUNT_NAME = "Synthetic import account";
 const OPENING_BALANCE = "100.00";
@@ -73,7 +82,7 @@ async function checkTemplates(page: Page, wizard: Locator): Promise<void> {
   await expect(instructions.locator("p")).toHaveText(sheetInstructions.slice(1).map((line) => line.trim()));
 }
 
-test("IMP-01: templates download with their headers, and a synthetic .xlsx imports through the wizard", async ({ page }) => {
+testWithMutants("IMP-01: templates download with their headers, and a synthetic .xlsx imports through the wizard", { corrupt: [EXECUTE_IMPORT] }, async (page) => {
   test.setTimeout(180_000);
   const fixture = await createCompletionFixture();
   const accountId = randomUUID();
@@ -115,10 +124,20 @@ test("IMP-01: templates download with their headers, and a synthetic .xlsx impor
   expect((await previewed).status()).toBe(200);
   const importButton = dialog.getByRole("button", { name: "Import Transactions", exact: true });
   await expect(importButton).toBeEnabled();
-  const executed = apiResponse(page, "POST", "/api/import/execute");
-  await importButton.click();
-  const execution = await executed;
+  const execution = await submitStep(page, EXECUTE_IMPORT, () => importButton.click());
   expect(execution.status()).toBe(200);
+  // The income row's imported amount, before the painted-amount checks below, which a wrong amount would also fail.
+  await readBack(EXECUTE_IMPORT, moneyValue(INCOME.amount, "ZMW"), {
+    api: async () => {
+      const listed = await page.request.get(`/api/transactions?accountId=${accountId}`);
+      if (listed.status() !== 200) throw new Error(`GET /api/transactions returned ${listed.status()}`);
+      const named = ((await listed.json()) as { data: { name: string; amount: unknown }[] }).data.filter((row) => row.name === INCOME.name);
+      if (named.length !== 1) throw new Error(`expected one imported ${INCOME.name}, found ${named.length}`);
+      return responseValue(named[0].amount, "amount");
+    },
+    db: () => storedMoney("SELECT amount::text AS amount, currency FROM transactions WHERE household_id = $1 AND account_id = $2 AND name = $3",
+      [fixture.householdId, accountId, INCOME.name]),
+  });
   expect(await execution.json()).toMatchObject({ imported: 2 });
   await expect(dialog.getByRole("heading", { name: "Import Successful!" })).toBeVisible();
   await dialog.getByRole("button", { name: "Done", exact: true }).click();

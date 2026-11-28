@@ -3,6 +3,8 @@
  * receipts.match, under its own advisory lock and the job journal like every
  * other scheduled job, and a receipt that fails to match is a partial failure
  * of the run, never a silent success. The durable catalog names its real file.
+ * Unit: the queue and the journal are mocked here; the real queue, locks and
+ * journal are covered by ops003.receipt-matcher.realdb.integration.test.ts.
  */
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";

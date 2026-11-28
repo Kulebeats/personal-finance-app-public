@@ -4,11 +4,20 @@ import { loadTestTarget } from "../server/testing/test-target.mjs";
 import { createCompletionFixture, type CompletionFixture } from "../server/testing/fixtures/completion-fixtures";
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
 import type { ReportWidgetPreferences } from "../shared/reports";
+import { readBack, submitStep, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { responseValue } from "./utils/observe";
 
 const ownedOrigin = loadTestTarget().server?.origin;
 if (!ownedOrigin) throw new Error("R05 report browser acceptance requires the protected owned server origin");
 const preferencesPath = "/api/settings/report-widgets";
 const resetPath = `${preferencesPath}/reset`;
+/**
+ * The gallery's Category Breakdown switch save (QA-01, scripts/e2e-mutation-check.mjs):
+ * its corrupt mutant saves the nested flag as true instead of false.
+ */
+const HIDE_CATEGORY: SubmitStep = { name: "hide-category", method: "PATCH", path: preferencesPath,
+  corruptField: "optionalWidgets.categoryBreakdown.enabled" };
 
 async function signIn(page: Page, fixture: CompletionFixture) {
   await page.goto("/login");
@@ -95,7 +104,9 @@ async function freshSignedInPage(browser: Browser, fixture: CompletionFixture) {
   }
 }
 
-test("report setup, customization and reset survive fresh login and stay within the user", async ({ page, browser }) => {
+testWithMutants("report setup, customization and reset survive fresh login and stay within the user", { corrupt: [HIDE_CATEGORY] }, async (page) => {
+  const browser = page.context().browser();
+  if (!browser) throw new Error("R05 report isolation needs a browser to open fresh contexts");
   const owner = await createCompletionFixture();
   const other = await createCompletionFixture();
   await signIn(page, owner);
@@ -117,9 +128,16 @@ test("report setup, customization and reset survive fresh login and stay within 
   const gallery = await openGallery(page);
   const category = gallery.getByRole("switch", { name: "Show Category Breakdown", exact: true });
   await expect(category).toBeChecked();
-  const customizePatch = await acceptedWrite(page, preferencesPath, "PATCH", async () => {
-    await category.click();
+  const customized = await submitStep(page, HIDE_CATEGORY, () => category.click());
+  expect(customized.status()).toBe(200);
+  // The saved flag, before the switch and fresh-login checks below, which a wrong flag would also fail.
+  await readBack(HIDE_CATEGORY, "false", {
+    db: async () => responseValue((await storedPreferences(owner))?.optionalWidgets.categoryBreakdown?.enabled, "categoryBreakdown.enabled"),
+    api: async () => responseValue((await freshPreferences(page)).optionalWidgets.categoryBreakdown?.enabled, "categoryBreakdown.enabled"),
   });
+  expect(Boolean(customized.request().headers()["x-csrf-token"])).toBe(true);
+  expect((await customized.json()).success).toBe(true);
+  const customizePatch = customized.request().postDataJSON();
   expect(customizePatch).toEqual({ optionalWidgets: { categoryBreakdown: { enabled: false } } });
   await expect(category).not.toBeChecked();
   await gallery.getByRole("button", { name: "Done", exact: true }).click();

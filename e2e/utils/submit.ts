@@ -25,8 +25,19 @@ export interface SubmitStep {
   name: string;
   method: "POST" | "PUT" | "PATCH" | "DELETE";
   path: string | RegExp;
-  /** Top-level request-body field a corrupt mutant changes (money, number or text). */
+  /**
+   * Request-body field a corrupt mutant changes (money, number, text or
+   * boolean). A dotted path reaches a nested field ("optionalWidgets.monthlyTrends.enabled",
+   * "rows.0.amount": a numeric segment indexes an array).
+   */
   corruptField?: string;
+  /**
+   * How the mutant changes that field, when the default change would be
+   * refused by validation (an e-mail address cannot take " mutant"). It must
+   * return a different value the server still accepts, or `undefined` to
+   * leave the request alone (the mutant then counts as invalid).
+   */
+  corruptWith?: (value: unknown) => unknown;
 }
 
 export const MUTANT_HEADER = "x-e2e-mutant";
@@ -44,6 +55,7 @@ function bumpNumeric(value: string): string | undefined {
 }
 
 function corruptValue(value: unknown): unknown {
+  if (typeof value === "boolean") return !value;
   if (typeof value === "number") return value + 1;
   if (typeof value === "string") return bumpNumeric(value) ?? `${value} mutant`;
   if (value && typeof value === "object" && "amount" in value && typeof value.amount === "string") {
@@ -55,15 +67,37 @@ function corruptValue(value: unknown): unknown {
 
 interface CorruptedBody { body: Record<string, unknown>; original: string; corrupted: string }
 
-/** The request body with `field` changed, or `undefined` when it has no such field. */
-function corruptBody(body: unknown, field: string): CorruptedBody | undefined {
-  if (!body || typeof body !== "object" || Array.isArray(body) || !(field in body)) return undefined;
-  const record = body as Record<string, unknown>;
-  const changed = corruptValue(record[field]);
-  const original = valueText(record[field]);
+type Container = Record<string, unknown> | unknown[];
+
+const isContainer = (value: unknown): value is Container => !!value && typeof value === "object";
+
+/** The value at `path` (own keys or array indexes only), or `undefined` when the path does not exist. */
+function valueAt(value: unknown, path: readonly string[]): { found: boolean; value: unknown } {
+  if (path.length === 0) return { found: true, value };
+  if (!isContainer(value) || !Object.prototype.hasOwnProperty.call(value, path[0])) return { found: false, value: undefined };
+  return valueAt((value as Record<string, unknown>)[path[0]], path.slice(1));
+}
+
+/** A copy of `container` with the value at `path` replaced; the original is never mutated. */
+function withValueAt(container: Container, path: readonly string[], next: unknown): Container {
+  const [key, ...rest] = path;
+  const current = (container as Record<string, unknown>)[key];
+  const replaced = rest.length === 0 ? next : withValueAt(current as Container, rest, next);
+  if (Array.isArray(container)) return container.map((item, index) => (String(index) === key ? replaced : item));
+  return { ...container, [key]: replaced };
+}
+
+/** The request body with `field` (a key or dotted path) changed, or `undefined` when it has no such field. */
+function corruptBody(body: unknown, field: string, corrupt: (value: unknown) => unknown): CorruptedBody | undefined {
+  if (!isContainer(body) || Array.isArray(body)) return undefined;
+  const path = field.split(".");
+  const target = valueAt(body, path);
+  if (!target.found) return undefined;
+  const changed = corrupt(target.value);
+  const original = valueText(target.value);
   const corrupted = valueText(changed);
-  if (changed === undefined || original === undefined || corrupted === undefined) return undefined;
-  return { body: { ...record, [field]: changed }, original, corrupted };
+  if (changed === undefined || original === undefined || corrupted === undefined || corrupted === original) return undefined;
+  return { body: withValueAt(body, path, changed) as Record<string, unknown>, original, corrupted };
 }
 
 /**
@@ -87,7 +121,7 @@ async function corruptNextRequest(page: Page, step: SubmitStep, mutantId: string
     if (!field || hasRewrite() || request.method() !== step.method) return route.fallback();
     let body: unknown;
     try { body = request.postDataJSON(); } catch { return route.fallback(); }
-    const changed = corruptBody(body, field);
+    const changed = corruptBody(body, field, step.corruptWith ?? corruptValue);
     if (!changed) return route.fallback();
     recordRewrite(step, changed.original, changed.corrupted);
     return route.fallback({

@@ -4,7 +4,8 @@ import { createCompletionFixture, type CompletionFixture } from "../server/testi
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
 import { readBack, submitStep, type SubmitStep } from "./utils/submit";
 import { testWithMutants } from "./utils/mutants";
-import { responseValue, storedValue } from "./utils/observe";
+import { escapeRegExp, responseValue, storedValue } from "./utils/observe";
+import { moneyValue, sameValue } from "./utils/money-value";
 
 const name = "Synthetic acquired evidence issue", custody = "Synthetic evidence custody", isin = "ZM0000000001";
 const acquisitionDate = "2026-03-12", roundingPolicy = "round_total_and_clean_residual_to_accrued";
@@ -54,13 +55,30 @@ async function saveEvidence(page: Page, fixture: CompletionFixture, bondId: stri
   await expect(form).toBeHidden();
   return { submitted, data: envelope.data };
 }
-async function wealth(page: Page, fixture: CompletionFixture, date: string, amount: number, displayed: RegExp) {
+/**
+ * A number field of a JSON body exactly as the server wrote it. The accounts
+ * summary sends money as JSON numbers, so its amounts are read as these raw
+ * tokens and compared as decimal text, never parsed into floats (a float sum
+ * such as 1120.1000000000001 then shows as a mismatch). Exactly one occurrence.
+ */
+function rawNumber(json: string, field: string): string {
+  const tokens = [...json.matchAll(new RegExp(`"${escapeRegExp(field)}"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)(?=\\s*[,}])`, "g"))];
+  if (tokens.length !== 1) throw new Error(`expected one plain number for ${field}, found ${tokens.length} in ${json}`);
+  return tokens[0][1];
+}
+async function wealth(page: Page, fixture: CompletionFixture, date: string, amount: string, displayed: RegExp) {
   if (new URL(page.url()).pathname === "/accounts") await page.reload();
   else await page.getByRole("navigation", { name: "Application navigation", exact: true }).getByRole("link", { name: "Accounts", exact: true }).click();
   await expect(page.getByRole("heading", { level: 1, name: displayed })).toBeVisible();
   const summary = await page.request.get("/api/accounts/summary", { headers: { "x-capital-subject": fixture.userId, "x-capital-household": fixture.householdId } });
   expect(summary.status()).toBe(200);
-  expect((await summary.json()).data).toMatchObject({ totalAssets: amount, totalLiabilities: 0, netWorth: amount, currency: "ZMW", valuationDate: date });
+  const json = await summary.text();
+  expect(JSON.parse(json).data).toMatchObject({ currency: "ZMW", valuationDate: date });
+  const expected = { totalAssets: amount, totalLiabilities: "0.00", netWorth: amount };
+  for (const [field, want] of Object.entries(expected)) {
+    const sent = moneyValue(rawNumber(json, field), "ZMW");
+    expect(sameValue(sent, moneyValue(want, "ZMW")), `${field}: sent ${sent}, expected ${want} ZMW`).toBe(true);
+  }
 }
 async function cashState(householdId: string) {
   return withFixtureClient(async client => ({
@@ -86,7 +104,7 @@ testWithMutants("an acquired bond records explicit basis and two same-day market
   await account.getByRole("button", { name: "Save Account", exact: true }).click();
   const accountResponse = await accountSaved; expect(accountResponse.status()).toBe(201); const accountId = (await accountResponse.json()).data.id;
   // Warm the same ordinary account view before adding any market evidence.
-  await wealth(page, fixture, date, 125, /ZMW\s+125\.00/);
+  await wealth(page, fixture, date, "125.00", /ZMW\s+125\.00/);
   await investments(page);
   await page.getByRole("button", { name: "Add Security", exact: true }).click();
   await page.getByRole("menuitem", { name: "Government Bond", exact: true }).click();
@@ -136,7 +154,7 @@ testWithMutants("an acquired bond records explicit basis and two same-day market
   const first = await saveEvidence(page, fixture, bondId, "market", cleanReference);
   expect(first.submitted).toMatchObject({ valuationDate: date, sourceDate: date, nominalAmount: "1000.00", quoteBasis: "clean", quoteUnits: "per_100_nominal", quotedAmount: "97", accruedInterest: "2.51" });
   expect(first.data).toMatchObject({ roundingPolicy, dirtyValue: { amount: "995.10", currency: "ZMW" }, cleanValue: { amount: "970.00", currency: "ZMW" }, accruedInterest: { amount: "25.10", currency: "ZMW" } });
-  await wealth(page, fixture, date, 1120.1, /ZMW\s+1,120\.10/);
+  await wealth(page, fixture, date, "1120.10", /ZMW\s+1,120\.10/);
 
   await investments(page);
   await page.getByRole("button", { name: `Record market evidence for ${name}`, exact: true }).click();
@@ -152,7 +170,7 @@ testWithMutants("an acquired bond records explicit basis and two same-day market
   expect(second.data).toMatchObject({ roundingPolicy, dirtyValue: { amount: "993.89", currency: "ZMW" }, cleanValue: { amount: "968.76", currency: "ZMW" }, accruedInterest: { amount: "25.13", currency: "ZMW" } });
   // Both marks have the same civil date. Only the later admitted mark belongs
   // in current wealth; neither face, acquisition cost nor both marks is added.
-  await wealth(page, fixture, date, 1118.89, /ZMW\s+1,118\.89/);
+  await wealth(page, fixture, date, "1118.89", /ZMW\s+1,118\.89/);
   await page.reload(); await expect(page.getByRole("heading", { level: 1, name: /ZMW\s+1,118\.89/ })).toBeVisible();
   expect(await cashState(fixture.householdId)).toEqual(before);
   const persisted = await withFixtureClient(async client => ({

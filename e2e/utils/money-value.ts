@@ -13,9 +13,9 @@ export const ANY_CURRENCY = "*";
 export const moneyValue = (amount: string, currency: string): string => `${amount.trim()} ${currency}`;
 export const amountOnly = (amount: string): string => moneyValue(amount, ANY_CURRENCY);
 
-/** A request or response field as a value: a number, a string, or a MoneyDto with its currency. */
+/** A request or response field as a value: a number, a boolean, a string, or a MoneyDto with its currency. */
 export function valueText(value: unknown): string | undefined {
-  if (typeof value === "number") return String(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
   if (typeof value === "string") return value;
   if (!value || typeof value !== "object" || !("amount" in value) || typeof value.amount !== "string") return undefined;
   const currency = "currency" in value ? value.currency : undefined;

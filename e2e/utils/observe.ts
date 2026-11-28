@@ -53,9 +53,13 @@ export async function inputValue(locator: Locator): Promise<string> {
   return locator.inputValue();
 }
 
-/** The text of the single element `locator` finds. */
+/**
+ * The text of the single element `locator` finds, once it shows any text
+ * (retried, like the other readers; never waits for a particular value).
+ */
 export async function shownText(locator: Locator): Promise<string> {
   await expect(locator).toHaveCount(1);
+  await expect(locator).toHaveText(/\S/);
   return (await locator.textContent()) ?? "";
 }
 
