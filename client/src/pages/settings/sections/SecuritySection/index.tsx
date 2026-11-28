@@ -9,6 +9,7 @@ import { SessionsCard } from "./components/SessionsCard";
 import { MfaCard } from "./components/mfa/MfaCard";
 import { LoginHistoryCard } from "./components/LoginHistoryCard";
 import { PersonalDataExportCard } from "./components/PersonalDataExportCard";
+import { DeleteAccountCard } from "./components/DeleteAccountCard";
 
 export default function SecuritySection() {
   const { data: mfaStatus } = useMfaStatus();
@@ -28,6 +29,7 @@ export default function SecuritySection() {
           <SessionsCard />
           <LoginHistoryCard />
           <PersonalDataExportCard />
+          <DeleteAccountCard />
         </div>
       </Suspense>
     </ErrorBoundary>
