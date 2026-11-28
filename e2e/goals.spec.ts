@@ -5,7 +5,9 @@
  * (client/src/pages/Goals.tsx + client/src/features/goals/**):
  * - Viewing the Save Up / Pay Down tabs
  * - Creating a save-up goal through the real wizard (Radix Select, not a
- *   native <select>) and confirming it renders in the list
+ *   native <select>) and confirming it renders in the list, with its target
+ *   amount and currency read back from GET /api/goals and the list row
+ *   (QA-01: mutation-checked by scripts/e2e-mutation-check.mjs)
  * - Opening the goal detail dialog and confirming its real tabs
  * - Opening the "Goal accounts" and "Create goal transfer" dialogs
  *
@@ -19,13 +21,27 @@
 import { test, expect, type Page } from "./protected-test";
 import { login } from "./utils/login";
 import { selectRadixOption } from "./utils/locators";
+import { readBack, submitForData, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { responseValue, shownText } from "./utils/observe";
+import { moneyValue, renderedMoney } from "./utils/money-value";
+
+/** The wizard's create write; its corrupt mutant saves a different target amount. */
+const CREATE_GOAL: SubmitStep = { name: "goal", method: "POST", path: "/api/goals", corruptField: "targetAmount" };
+
+/** The target amount the wizard enters, and the currency it sends it in (the e2e household is ZMW, e2e/global-setup.ts). */
+const TARGET_AMOUNT = "500";
+const TARGET_CURRENCY = "ZMW";
+
+interface CreatedGoal { name: string; targetAmount: string; currency: string }
 
 /**
- * Creates a save-up goal through the real wizard and returns its name.
+ * Creates a save-up goal through the real wizard and returns what it entered.
  * The wizard is a two-step flow: fill details -> "Continue" -> assignment
- * step (no account assignment required) -> "Create goal".
+ * step (no account assignment required) -> "Create goal". The create POST
+ * must answer 201 with a success envelope (submitForData).
  */
-async function createSaveUpGoal(page: Page): Promise<string> {
+async function createSaveUpGoal(page: Page): Promise<CreatedGoal> {
   const goalName = `E2E Save Goal ${Date.now()}`;
 
   await page.getByRole("button", { name: "New Goal" }).click();
@@ -36,13 +52,41 @@ async function createSaveUpGoal(page: Page): Promise<string> {
   // Default goal type is "other", which requires an extra free-text field.
   // Picking a concrete type keeps the form to the fields under test.
   await selectRadixOption(page, dialog.getByLabel("Goal type"), "Vacation");
-  await dialog.getByLabel("Target amount").fill("500");
+  await dialog.getByLabel("Target amount").fill(TARGET_AMOUNT);
 
   await dialog.getByRole("button", { name: "Continue" }).click();
-  await dialog.getByRole("button", { name: "Create goal" }).click();
+  await submitForData<unknown>(page, CREATE_GOAL,
+    () => dialog.getByRole("button", { name: "Create goal" }).click());
 
   await expect(dialog).not.toBeVisible();
-  return goalName;
+  return { name: goalName, targetAmount: TARGET_AMOUNT, currency: TARGET_CURRENCY };
+}
+
+/** The one goal named `name` in GET /api/goals (V7 envelope, MoneyDto amounts). */
+async function listedGoal(page: Page, name: string): Promise<Record<string, unknown>> {
+  const response = await page.request.get("/api/goals");
+  if (response.status() !== 200) throw new Error(`GET /api/goals returned ${response.status()}`);
+  const body: unknown = await response.json();
+  if (!body || typeof body !== "object" || !("success" in body) || body.success !== true
+    || !("data" in body) || !Array.isArray(body.data)) {
+    throw new Error("GET /api/goals is not a success envelope with a goal list");
+  }
+  const matches = body.data.filter((goal: unknown): goal is Record<string, unknown> =>
+    !!goal && typeof goal === "object" && "name" in goal && goal.name === name);
+  if (matches.length !== 1) throw new Error(`expected one listed goal named ${JSON.stringify(name)}, found ${matches.length}`);
+  return matches[0];
+}
+
+/** The goal's list row (GoalListItem, a role="button" card holding its h3). */
+const goalRow = (page: Page, name: string) =>
+  page.locator('[role="button"]').filter({ has: page.getByRole("heading", { name, level: 3, exact: true }) });
+
+/** The row's target money text ("of K500.00"), as a money value. */
+async function shownTarget(page: Page, name: string): Promise<string> {
+  const text = await shownText(goalRow(page, name).getByText(/^of /));
+  const match = /^of\s+(.+)$/.exec(text.trim());
+  if (!match) throw new Error(`target text ${JSON.stringify(text)} is not "of <amount>"`);
+  return renderedMoney(match[1]);
 }
 
 test.describe("Goals", () => {
@@ -79,22 +123,32 @@ test.describe("Goals", () => {
     await expect(page.getByText("Monthly Payments")).toBeVisible();
   });
 
-  test("creates a save-up goal through the wizard and shows it in the list", async ({
-    page,
-  }) => {
-    const goalName = await createSaveUpGoal(page);
+  testWithMutants("creates a save-up goal through the wizard and shows it in the list", { corrupt: [CREATE_GOAL] }, async (page) => {
+    // Signed in and on /goals by the describe's beforeEach.
+    const created = await createSaveUpGoal(page);
 
     // The goal name also appears in the success toast ("X has been added."),
     // so scope to the card's own heading rather than a bare text match.
     await expect(
-      page.getByRole("heading", { name: goalName, level: 3 }),
+      page.getByRole("heading", { name: created.name, level: 3 }),
     ).toBeVisible();
+
+    // Reload so the row is painted from the server, not the mutation's cache.
+    await page.reload();
+    await expect(page.getByRole("heading", { name: created.name, level: 3 })).toBeVisible();
+    await readBack(CREATE_GOAL, moneyValue(created.targetAmount, created.currency), {
+      api: async () => responseValue((await listedGoal(page, created.name)).targetAmount, "targetAmount"),
+      ui: () => shownTarget(page, created.name),
+    });
+    const stored = await listedGoal(page, created.name);
+    expect(stored.type).toBe("save_up");
+    expect(stored.currency).toBe(created.currency);
   });
 
   test("opens the goal detail dialog with the real tabs", async ({
     page,
   }) => {
-    const goalName = await createSaveUpGoal(page);
+    const { name: goalName } = await createSaveUpGoal(page);
 
     await page.getByRole("heading", { name: goalName, level: 3 }).click();
 
