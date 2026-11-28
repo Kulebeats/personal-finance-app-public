@@ -31,6 +31,13 @@ export interface SubmitStep {
    * "rows.0.amount": a numeric segment indexes an array).
    */
   corruptField?: string;
+  /**
+   * How the mutant changes that field, when the default change would be
+   * refused by validation (an e-mail address cannot take " mutant"). It must
+   * return a different value the server still accepts, or `undefined` to
+   * leave the request alone (the mutant then counts as invalid).
+   */
+  corruptWith?: (value: unknown) => unknown;
 }
 
 export const MUTANT_HEADER = "x-e2e-mutant";
@@ -81,15 +88,15 @@ function withValueAt(container: Container, path: readonly string[], next: unknow
 }
 
 /** The request body with `field` (a key or dotted path) changed, or `undefined` when it has no such field. */
-function corruptBody(body: unknown, field: string): CorruptedBody | undefined {
+function corruptBody(body: unknown, field: string, corrupt: (value: unknown) => unknown): CorruptedBody | undefined {
   if (!isContainer(body) || Array.isArray(body)) return undefined;
   const path = field.split(".");
   const target = valueAt(body, path);
   if (!target.found) return undefined;
-  const changed = corruptValue(target.value);
+  const changed = corrupt(target.value);
   const original = valueText(target.value);
   const corrupted = valueText(changed);
-  if (changed === undefined || original === undefined || corrupted === undefined) return undefined;
+  if (changed === undefined || original === undefined || corrupted === undefined || corrupted === original) return undefined;
   return { body: withValueAt(body, path, changed) as Record<string, unknown>, original, corrupted };
 }
 
@@ -114,7 +121,7 @@ async function corruptNextRequest(page: Page, step: SubmitStep, mutantId: string
     if (!field || hasRewrite() || request.method() !== step.method) return route.fallback();
     let body: unknown;
     try { body = request.postDataJSON(); } catch { return route.fallback(); }
-    const changed = corruptBody(body, field);
+    const changed = corruptBody(body, field, step.corruptWith ?? corruptValue);
     if (!changed) return route.fallback();
     recordRewrite(step, changed.original, changed.corrupted);
     return route.fallback({
