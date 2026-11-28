@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { Holding } from "@/hooks/useInvestments";
+import { setCalendarTimeZone, setHouseholdCalendarTimeZone } from "@/lib/calendarZone";
 import { RecordInvestmentTransactionModal } from "../RecordInvestmentTransactionModal";
 
 const { submit, display } = vi.hoisted(() => ({ submit: vi.fn(), display: { numberFormat: "US", currency: "ZMW" } }));
@@ -148,4 +149,43 @@ it.each(quoteSources)("requires an explicit Sell execution price when a $label q
   expect(submit).toHaveBeenCalledWith(expect.objectContaining({
     type: "sell", price: "0.6667", quantity: "1.5", currency: "USD", amount: "1.00",
   }));
+});
+
+// NEW-15: 22:30 UTC on 22 November is 00:30 on 23 November in Lusaka (UTC+2). A household with no
+// zone follows the server's UTC day, even when the member's display zone is Lusaka.
+it.each([["Africa/Lusaka", null, "2026-11-23"], [null, "Africa/Lusaka", "2026-11-22"]] as const)(
+  "NEW-15: defaults the activity date to the server's household day (household zone %s, display zone %s)", async (household, display, expected) => {
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-11-22T22:30:00Z"));
+    setHouseholdCalendarTimeZone(household); setCalendarTimeZone(display); await Promise.resolve();
+    try {
+      const { form } = await openActivity("Buy");
+      expect(form.getByLabelText("Transaction Date")).toHaveValue(expected);
+    } finally { cleanup(); vi.useRealTimers(); setHouseholdCalendarTimeZone(null); setCalendarTimeZone(null); await Promise.resolve(); }
+  });
+
+it("NEW-15: a zone arriving while the activity form is open moves an untouched date, never a chosen one", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-11-22T22:30:00Z"));
+  try {
+    const { form } = await openActivity("Buy");
+    const date = form.getByLabelText("Transaction Date");
+    expect(date).toHaveValue("2026-11-22");
+    await act(async () => { setHouseholdCalendarTimeZone("Africa/Lusaka"); await Promise.resolve(); });
+    expect(date).toHaveValue("2026-11-23");
+    fireEvent.change(date, { target: { value: "2026-11-20" } });
+    await act(async () => { setHouseholdCalendarTimeZone(null); await Promise.resolve(); });
+    expect(date).toHaveValue("2026-11-20");
+  } finally { cleanup(); vi.useRealTimers(); setHouseholdCalendarTimeZone(null); await Promise.resolve(); }
+});
+
+it("NEW-15: reopening the activity form after midnight shows the new day", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-11-22T23:30:00Z"));
+  try {
+    const { user, form } = await openActivity("Buy");
+    expect(form.getByLabelText("Transaction Date")).toHaveValue("2026-11-22");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    vi.setSystemTime(new Date("2026-11-23T00:30:00Z"));
+    await user.click(screen.getByRole("button", { name: "Record activity" }));
+    expect(within(screen.getByRole("dialog")).getByLabelText("Transaction Date")).toHaveValue("2026-11-23");
+  } finally { cleanup(); vi.useRealTimers(); }
 });

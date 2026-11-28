@@ -4,6 +4,12 @@ import type { Request, Response } from "@playwright/test";
 import { test, expect, type Page } from "./protected-test";
 import { createCompletionFixture, type CompletionFixture } from "../server/testing/fixtures/completion-fixtures";
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
+import { readBack, submitStep, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { responseValue, storedValue } from "./utils/observe";
+
+/** The Shared account's create write; its corrupt mutant stores a different name (QA-01, scripts/e2e-mutation-check.mjs). */
+const CREATE_SHARED_ACCOUNT: SubmitStep = { name: "shared-account", method: "POST", path: "/api/accounts", corruptField: "name" };
 
 const preferencePath = "/api/settings/user-preferences";
 const accountFramePath = "/api/accounts/net-worth/history";
@@ -167,7 +173,8 @@ async function assertFreshSharedList(page: Page, fixture: CompletionFixture, id:
 }
 
 // Local Shared-ownership consumer proof, separate from full R04 and financial posting acceptance.
-test("Shared account creation retains null ownership through SQL, filters, reload and fresh login", async ({ page }, testInfo) => {
+testWithMutants("Shared account creation retains null ownership through SQL, filters, reload and fresh login", { corrupt: [CREATE_SHARED_ACCOUNT] }, async (page) => {
+  const testInfo = test.info();
   const fixture = await createCompletionFixture();
   await signIn(page, fixture, "initial");
   const initial = accountFrameFor(page, fixture, "all");
@@ -183,9 +190,8 @@ test("Shared account creation retains null ownership through SQL, filters, reloa
   await dialog.locator("#balance").fill("0");
   await dialog.getByRole("combobox").click();
   await page.getByRole("option", { name: "Shared (Household)", exact: true }).click();
-  const created = responseFor(page, "/api/accounts", "POST");
-  await dialog.getByRole("button", { name: "Save Account", exact: true }).click();
-  const createResponse = await created;
+  const createResponse = await submitStep(page, CREATE_SHARED_ACCOUNT,
+    () => dialog.getByRole("button", { name: "Save Account", exact: true }).click());
   const requestBody = createResponse.request().postDataJSON();
   const body = await createResponse.json();
   const observationPath = testInfo.outputPath("shared-account-create-observation.json");
@@ -196,6 +202,11 @@ test("Shared account creation retains null ownership through SQL, filters, reloa
     accountId: body.data?.id, householdId: body.data?.householdId,
   }, null, 2), "utf8");
   await testInfo.attach("shared-account-create-observation", { path: observationPath, contentType: "application/json" });
+  // The stored name, before the request, row and filter checks below, which a wrong name would also fail.
+  await readBack(CREATE_SHARED_ACCOUNT, name, {
+    created: async () => responseValue(body.data?.name, "name"),
+    db: () => storedValue("SELECT name AS value FROM accounts WHERE id=$1 AND household_id=$2", [body.data?.id, fixture.householdId]),
+  });
   expect(createResponse.status()).toBe(201);
   expect(requestBody).toMatchObject({ name, type: "cash", ownerUserId: null, initialBalance: "0.00" });
   expect(createResponse.request().headers()["x-capital-subject"]).toBe(fixture.userId);

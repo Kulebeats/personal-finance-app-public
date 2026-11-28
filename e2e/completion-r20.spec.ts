@@ -4,6 +4,15 @@ import { createCompletionFixture, type CompletionFixture } from "../server/testi
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
 import { loadTestTarget } from "../server/testing/test-target.mjs";
 import { GOLDEN_A, readGoldenA, assertGoldenAPrefix } from "../server/testing/fixtures/golden-a";
+import { readBack, submitForData, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { LAST_SEGMENT, labelPart, responseValue, storedMoney } from "./utils/observe";
+import { moneyValue, renderedMoney } from "./utils/money-value";
+
+/** The Golden A expense write; its corrupt mutant saves a different amount (QA-01, scripts/e2e-mutation-check.mjs). */
+const CREATE_EXPENSE: SubmitStep = { name: "expense", method: "POST", path: "/api/transactions", corruptField: "amount" };
+
+interface CreatedExpense { id: string; amount: unknown }
 
 async function createdId(page: Page, pathname: string, submit: () => Promise<void>) {
   const pending = page.waitForResponse(response => new URL(response.url()).pathname === pathname && response.request().method() === "POST");
@@ -64,6 +73,16 @@ async function enterTransaction(page: Page, type: "income" | "expense", omitSubm
   return id;
 }
 
+/** The expense submitted through CREATE_EXPENSE, so its amount can be read back and mutation-checked. */
+async function enterExpense(page: Page): Promise<CreatedExpense> {
+  const dialog = await fillTransaction(page, "expense");
+  const created = await submitForData<CreatedExpense>(page, CREATE_EXPENSE,
+    () => dialog.getByRole("button", { name: "Add Transaction", exact: true }).click());
+  expect(created.id).toMatch(/^[0-9a-f-]{36}$/i);
+  await expect(dialog).toBeHidden();
+  return created;
+}
+
 test("retrying an expense after a lost committed response debits cash once", async ({ page }) => {
   const fixture = await createCompletionFixture();
   const accountId = await loginAndCreateAccount(page, fixture);
@@ -115,15 +134,24 @@ test("retrying an expense after a lost committed response debits cash once", asy
     [id])).rows[0])).toEqual({ audits: 1, events: 1 });
 });
 
-for (const omitExpense of [false, true]) {
-  test(omitExpense ? "Golden A oracle rejects an omitted expense submit" : "Golden A UI submissions persist through reload", async ({ page }) => {
+async function goldenASubmissions(page: Page, omitExpense: boolean) {
     const fixture = await createCompletionFixture();
     expect(await readGoldenA(fixture)).toEqual({ accounts: [], transactions: [] });
     const account = await loginAndCreateAccount(page, fixture);
     const income = await enterTransaction(page, "income");
-    const expense = await enterTransaction(page, "expense", omitExpense);
+    const created = omitExpense ? null : await enterExpense(page);
+    const expense = created ? created.id : await enterTransaction(page, "expense", true);
     await page.reload();
     await expect(page.getByRole("heading", { name: "Transactions", exact: true })).toBeVisible();
+    if (created) {
+      // The expense amount everywhere, before the row and Golden A checks below, which a wrong amount would also fail.
+      await readBack(CREATE_EXPENSE, moneyValue(GOLDEN_A.expense, GOLDEN_A.currency), {
+        api: async () => responseValue(created.amount, "amount"),
+        db: () => storedMoney("SELECT amount::text AS amount, currency FROM transactions WHERE id=$1 AND household_id=$2",
+          [created.id, fixture.householdId]),
+        ui: async () => renderedMoney(await labelPart(page.getByRole("button", { name: /^View Golden Expense Merchant, / }), LAST_SEGMENT)),
+      });
+    }
     const incomeRow = page.getByRole("button", { name: /^View Income, .*200\.00$/ });
     const expenseRow = page.getByRole("button", { name: /^View Golden Expense Merchant, .*125\.50$/ });
     await expect(incomeRow).toBeVisible();
@@ -145,5 +173,8 @@ for (const omitExpense of [false, true]) {
       expect(body.data.id).toBe(account);
       expect(body.data.balance).toBe(GOLDEN_A.balance);
     }
-  });
 }
+
+test("Golden A oracle rejects an omitted expense submit", async ({ page }) => goldenASubmissions(page, true));
+testWithMutants("Golden A UI submissions persist through reload", { corrupt: [CREATE_EXPENSE] },
+  async (page) => goldenASubmissions(page, false));

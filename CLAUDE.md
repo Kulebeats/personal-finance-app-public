@@ -492,7 +492,7 @@ Goal→Transaction). Use `findByIdWithVisibility`, never `findById`.
 ### 12. Rate Limiting Rules
 
 **ALL routes MUST have rate limiting.** Tiers (`server/middleware/rateLimit.ts`):
-`generalLimiter` 600/min per user, `analyticsLimiter` 30/min, `authLimiter` 10/min,
+`generalLimiter` 600/min per user, `analyticsLimiter` 120/min per user (owner, 28 Nov 2026), `authLimiter` 10/min,
 `ipAuthLimiter` 10/min per IP (credential attempts), `strictLimiter` 5/min, `uploadLimiter`
 20/hour, `expensiveAnalyticsLimiter` 10/min.
 

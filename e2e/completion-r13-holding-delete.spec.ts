@@ -3,6 +3,16 @@ import { test, expect, type Page } from "./protected-test";
 import { createCompletionFixture, type CompletionFixture } from "../server/testing/fixtures/completion-fixtures";
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
 import { loadTestTarget } from "../server/testing/test-target.mjs";
+import { readBack, submitStep, type SubmitStep } from "./utils/submit";
+import { testWithMutants } from "./utils/mutants";
+import { responseValue, storedValue } from "./utils/observe";
+
+/**
+ * The opening that each removal journey starts from (QA-01: mutation-checked by
+ * scripts/e2e-mutation-check.mjs on the sold-history journey). The removal
+ * itself is a body-less DELETE, which no corrupt mutant can rewrite.
+ */
+const OPEN_HOLDING: SubmitStep = { name: "holding-opening", method: "POST", path: "/api/investments/holdings", corruptField: "quantity" };
 
 // Bounded observers emit fixed classifications/codes plus owned paths only.
 // Never emit messages, stacks, response data, headers or error arguments.
@@ -100,14 +110,15 @@ async function openHolding(page: Page, source: Awaited<ReturnType<typeof startJo
   await dialog.getByLabel("Quantity", { exact: false }).fill(quantity);
   await dialog.getByLabel("Purchase Price (ZMW)", { exact: false }).fill(quantity === "0" ? "0" : "1");
   await dialog.getByLabel("Purchase Date", { exact: true }).fill(openingDate);
-  const [response] = await Promise.all([
-    page.waitForResponse(r => r.request().method() === "POST" && new URL(r.url()).pathname === "/api/investments/holdings"),
-    dialog.getByRole("button", { name: "Add Holding", exact: true }).click(),
-  ]);
+  const response = await submitStep(page, OPEN_HOLDING, () => dialog.getByRole("button", { name: "Add Holding", exact: true }).click());
   expect(response.status()).toBe(201);
+  const holding: { id: string; quantity: string; costBasis: string } = (await response.json()).data;
+  await readBack(OPEN_HOLDING, quantity, {
+    created: async () => responseValue(holding.quantity, "quantity"),
+    db: () => storedValue("select quantity::text as value from holdings where id=$1 and household_id=$2", [holding.id, source.fixture.householdId]),
+  });
   expect(response.request().postDataJSON()).toMatchObject({ accountId: source.accountId, securityId: source.securityId,
     expectedCurrency: "ZMW", quantity, costBasis: quantity === "0" ? "0.00" : "3.00", acquiredDate: openingDate });
-  const holding: { id: string; quantity: string; costBasis: string } = (await response.json()).data;
   await expect(dialog).toBeHidden();
   await expect(page.getByRole("row").filter({ hasText: source.securityName })).toHaveCount(1);
   return holding;
@@ -229,7 +240,7 @@ test("recovers the same holding removal after a real committed204 acknowledgemen
   expect(await persistedState(source.fixture, holding.id)).toEqual(committed);
 });
 
-test("refuses removal of a genuinely fully sold holding and retains its booked financial history", async ({ page }) => {
+testWithMutants("refuses removal of a genuinely fully sold holding and retains its booked financial history", { corrupt: [OPEN_HOLDING] }, async (page) => {
   const source = await startJourney(page, "Synthetic sold history"), holding = await openHolding(page, source, "3");
   const row = page.getByRole("row").filter({ hasText: source.securityName });
   await expect(row.getByRole("button", { name: /Review removal/ })).toHaveCount(0);

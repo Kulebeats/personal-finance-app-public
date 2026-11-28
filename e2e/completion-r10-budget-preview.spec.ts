@@ -3,6 +3,8 @@ import type { Page } from "@playwright/test";
 import { test, expect } from "./protected-test";
 import { createCompletionFixture } from "../server/testing/fixtures/completion-fixtures";
 import { withFixtureClient } from "../server/testing/fixtures/fixture-context";
+import { storedMoney } from "./utils/observe";
+import { moneyValue } from "./utils/money-value";
 
 function budgetState(householdId: string) {
   return withFixtureClient(async client => (await client.query(`
@@ -109,7 +111,10 @@ test("confirmed suggestion creates a limit only for the selected month", async (
   expect(after.budgets).toHaveLength(1);
   expect(after.budgets[0]).toMatchObject({ category_id: fixture.expenseCategoryId, amount: null });
   expect(after.periods).toHaveLength(1);
-  expect(after.periods[0]).toMatchObject({ budget_id: after.budgets[0].id, start_date: `${targetPeriod}-01`, budget_amount: 183.33, currency: "ZMW" });
+  expect(after.periods[0]).toMatchObject({ budget_id: after.budgets[0].id, start_date: `${targetPeriod}-01`, currency: "ZMW" });
+  // The limit as the column's own text, not the float to_jsonb hands back (QA-01: money compared exactly).
+  expect(await storedMoney("select budget_amount::text as amount, currency from budget_periods where id=$1", [after.periods[0].id]))
+    .toBe(moneyValue("183.33", "ZMW"));
   expect(after.audits).toBe(before.audits + 1);
 });
 

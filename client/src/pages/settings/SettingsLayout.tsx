@@ -129,10 +129,11 @@ export function SettingsLayout({
   return (
     <Layout fullWidth>
       <div className="flex min-h-full min-w-0">
-        {/* Desktop Sidebar */}
+        {/* Desktop Sidebar. UX-02: narrower from 768 px until lg, where the app sidebar and this
+            list together left the settings content too narrow to fit (it scrolled sideways). */}
         <nav
           ref={desktopNavigation}
-          className="hidden md:flex w-64 shrink-0 border-r bg-card p-4 flex-col"
+          className="hidden md:flex w-48 lg:w-64 shrink-0 border-r bg-card p-4 flex-col"
           aria-label="Settings navigation"
         >
           <SidebarContent

@@ -11,6 +11,8 @@ import { resolveRequestHousehold } from "../core/authz/session-preconditions";
 import { requireAuth } from "../auth";
 import { INVESTMENT_NOTIFICATION_PREFERENCE_TYPES } from "@shared/notificationTypes";
 import { saveInvestmentNotificationPreference } from "../modules/settings/settings.investment-preferences.service";
+import { notificationThresholdSchema } from "../modules/settings/settings.validation";
+import { HttpError } from "../core/errors";
 
 const router = Router();
 
@@ -68,11 +70,12 @@ const updatePreferenceSchema = z.object({
   inAppEnabled: z.boolean().optional(),
   emailEnabled: z.boolean().optional(),
   pushEnabled: z.boolean().optional(),
-  thresholdAmount: z.number().optional().nullable(),
+  // NEW-26: the same exact decimal(15,2) rule as the general notification writer; never a float.
+  thresholdAmount: notificationThresholdSchema.optional().nullable(),
 });
 
 // PUT /api/investments/notifications/preferences
-router.put("/preferences", async (req, res) => {
+router.put("/preferences", async (req, res, next) => {
   // Auth already enforced by requireAuth middleware
 
   try {
@@ -83,18 +86,15 @@ router.put("/preferences", async (req, res) => {
       userId: req.user!.id,
       householdId: household?.id ?? null,
       ipAddress: businessAuditService.getIpAddress(req),
-    }, {
-      ...data,
-      thresholdAmount: data.thresholdAmount === undefined
-        ? undefined
-        : data.thresholdAmount === null ? null : String(data.thresholdAmount),
-    });
+    }, data);
 
     res.json(updated);
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: error.errors });
     }
+    // A deliberate refusal (409 session context changed, 400 bad context header, 404) keeps its status.
+    if (error instanceof HttpError) return next(error);
     logger.error(
       "Error updating notification preference",
       { requestId: req.requestId },
