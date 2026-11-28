@@ -33,6 +33,7 @@ const SPECS = [
   { spec: 'e2e/transactions.spec.ts', config: SMOKE },
   { spec: 'e2e/budget.spec.ts', config: SMOKE },
   { spec: 'e2e/organization.spec.ts', config: SMOKE },
+  { spec: 'e2e/goals.spec.ts', config: SMOKE },
 ];
 const INVALID = 'mutation-invalid';
 const KILLED_BY = 'mutation-killed-by';
