@@ -47,7 +47,7 @@ cat .env | grep -E "^(DATABASE_URL|SESSION_SECRET|NODE_ENV)"
 
 1. Fix environment variable
 2. Restart application
-3. Verify health check: `curl http://localhost:5000/healthz`
+3. Verify readiness: `curl http://localhost:5000/health/ready` (checks the database and Redis; the Render health check uses this path). `/healthz` only shows the process is up.
 
 ---
 
