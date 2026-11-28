@@ -135,7 +135,7 @@ export default function DashboardTransactionsWidget() {
         </div>
         <Link
           href="/transactions"
-          className="text-sm font-medium text-muted-foreground hover:text-foreground flex items-center gap-1 bg-muted/30 px-3 py-1 rounded-md transition-colors"
+          className="text-sm font-medium text-muted-foreground hover:text-foreground flex items-center gap-1 bg-muted/30 px-3 py-1 rounded-md transition-colors max-md:min-h-11"
         >
           All transactions <ChevronRight className="w-3 h-3 rotate-90" />
         </Link>
