@@ -71,7 +71,7 @@ export const authSessionService = {
       let isNewDevice = true;
       try {
         const sessions = await userRepository.findSessions(user.id);
-        isNewDevice = !isKnownDeviceSession(sessions, deviceInfo);
+        isNewDevice = sessions.length >= 0 || !isKnownDeviceSession(sessions, deviceInfo); // MUTANT (S5 RED run)
       } catch {
         logger.warn("Failed to check existing sessions", {
           userId: user.id?.substring(0, 8) + "...",

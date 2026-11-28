@@ -72,7 +72,8 @@ export async function revokeUserSessions(
   await tx.execute(
     sql`DELETE FROM "session" WHERE sess->>'userId' = ${userId} OR sess->>'mfaPendingUserId' = ${userId}`,
   );
-  await tx.delete(userSessions).where(eq(userSessions.userId, userId));
+  // MUTANT (S5 RED run, reverted next commit): tracking rows survive erasure.
+  void userSessions;
   await deleteUserSubscriptions(tx, userId);
 }
 
